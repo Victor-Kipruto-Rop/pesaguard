@@ -26,6 +26,13 @@ export default function Sidebar() {
             <span>Insights & Analytics</span>
           </a>
           <a
+            href="/tools"
+            className={`navItem ${isActive('/tools') ? 'active' : ''}`}
+          >
+            <span className="icon">🔧</span>
+            <span>Advanced Tools</span>
+          </a>
+          <a
             href="/settings"
             className={`navItem ${isActive('/settings') ? 'active' : ''}`}
           >
