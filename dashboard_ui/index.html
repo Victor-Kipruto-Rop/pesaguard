@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PesaGuard Dashboard</title>
+    <style>
+      :root { color-scheme: dark; --bg:#07111f; --panel:#0f1b2c; --text:#f3f6ff; --muted:#8ea0bb; --accent:#44d7b6; --warning:#ffb347; --danger:#ff6b6b; }
+      * { box-sizing:border-box; }
+      body { margin:0; font-family:Inter,Segoe UI,sans-serif; background:linear-gradient(135deg,var(--bg),#13243d); color:var(--text); }
+      .shell { max-width:1280px; margin:0 auto; padding:24px; }
+      .hero { background:rgba(15,27,44,.9); border:1px solid rgba(255,255,255,.07); border-radius:24px; padding:24px; display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; box-shadow:0 20px 60px rgba(0,0,0,.25); }
+      .hero h1 { margin:0 0 8px; font-size:2rem; }
+      .hero p { color:var(--muted); margin:0; }
+      .badge { padding:8px 12px; border-radius:999px; background:rgba(68,215,182,.16); color:var(--accent); font-weight:600; }
+      .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:16px; margin-bottom:20px; }
+      .card { background:rgba(15,27,44,.92); border:1px solid rgba(255,255,255,.08); border-radius:18px; padding:18px; }
+      .kpi { font-size:2rem; font-weight:700; margin-top:8px; }
+      .muted { color:var(--muted); font-size:.95rem; }
+      table { width:100%; border-collapse:collapse; margin-top:12px; }
+      th, td { padding:12px; text-align:left; border-bottom:1px solid rgba(255,255,255,.08); }
+      .pill { padding:6px 10px; border-radius:999px; display:inline-block; font-size:.8rem; font-weight:700; }
+      .pill.warning { background:rgba(255,179,71,.16); color:var(--warning); }
+      .pill.danger { background:rgba(255,107,107,.16); color:var(--danger); }
+      .pill.ok { background:rgba(68,215,182,.16); color:var(--accent); }
+      button { border:none; border-radius:10px; padding:10px 14px; background:linear-gradient(135deg,var(--accent),#2f92e0); color:white; font-weight:600; cursor:pointer; }
+      .topbar { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
+      select { padding:10px 12px; border-radius:10px; border:1px solid rgba(255,255,255,.1); background:#0c1728; color:white; }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <div class="hero">
+        <div>
+          <h1>PesaGuard Control Center</h1>
+          <p>Real-time reconciliation, exceptions, and customer-ready ops insights.</p>
+        </div>
+        <div class="badge">Live • Premium Operations</div>
+      </div>
+      <div class="topbar">
+        <div class="muted">Filter discrepancies by status</div>
+        <select id="statusFilter">
+          <option value="">All</option>
+          <option value="matched">Matched</option>
+          <option value="needs_review">Needs Review</option>
+          <option value="missing_payment">Missing Payment</option>
+        </select>
+      </div>
+      <div class="grid">
+        <div class="card"><div class="muted">Reconciled Today</div><div class="kpi" id="reconciled">0</div></div>
+        <div class="card"><div class="muted">Open Exceptions</div><div class="kpi" id="open">0</div></div>
+        <div class="card"><div class="muted">Resolution Rate</div><div class="kpi" id="rate">0%</div></div>
+        <div class="card"><div class="muted">Avg. Latency</div><div class="kpi" id="latency">0m</div></div>
+      </div>
+      <div class="card">
+        <h3 style="margin-top:0">Discrepancy feed</h3>
+        <table>
+          <thead><tr><th>Transaction</th><th>Status</th><th>Severity</th><th>Detected</th><th>Action</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </div>
+    <script>
+      const rowsEl = document.getElementById('rows');
+      const filterEl = document.getElementById('statusFilter');
+      async function load() {
+        const res = await fetch('/discrepancies');
+        const data = await res.json();
+        rowsEl.innerHTML = data.map(item => `
+          <tr>
+            <td>${item.trans_id || item.id}</td>
+            <td><span class="pill ${item.status === 'missing_payment' ? 'danger' : item.status === 'needs_review' ? 'warning' : 'ok'}">${item.status || 'review'}</span></td>
+            <td><span class="pill ${item.severity === 'critical' ? 'danger' : item.severity === 'warning' ? 'warning' : 'ok'}">${item.severity || 'info'}</span></td>
+            <td>${item.detected_at || '—'}</td>
+            <td><button onclick="resolve('${item.id}')">Resolve</button></td>
+          </tr>`).join('');
+        document.getElementById('reconciled').textContent = data.filter(i => i.status === 'matched').length;
+        document.getElementById('open').textContent = data.filter(i => i.status !== 'matched').length;
+        document.getElementById('rate').textContent = `${Math.round((data.filter(i => i.resolved).length / Math.max(data.length,1))*100)}%`;
+        document.getElementById('latency').textContent = '4m';
+      }
+      async function resolve(id) {
+        await fetch(`/discrepancies/${id}/resolve`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({note:'Resolved from UI'})});
+        load();
+      }
+      filterEl.addEventListener('change', () => load());
+      setInterval(load, 5000);
+      load();
+    </script>
+  </body>
+</html>
