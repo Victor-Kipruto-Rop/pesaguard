@@ -494,3 +494,52 @@ tbody tr { cursor: pointer; }
   background: var(--panel);
 }
 
+/* Historical Trends & Insights */
+.trendAnalytics {
+  background: linear-gradient(135deg, var(--panel), rgba(68, 215, 182, 0.05));
+  border: 1px solid var(--border);
+}
+
+.trendGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 16px;
+  margin-top: 20px;
+}
+
+.trendMetric {
+  padding: 16px;
+  border-radius: 8px;
+  background: rgba(68, 215, 182, 0.05);
+  border: 1px solid rgba(68, 215, 182, 0.1);
+  transition: all 0.2s ease;
+}
+
+.trendMetric:hover {
+  background: rgba(68, 215, 182, 0.1);
+  border-color: rgba(68, 215, 182, 0.2);
+  transform: translateY(-2px);
+}
+
+.trendMetric .label {
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+
+.trendMetric .value {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+
+.trendMetric .muted.small {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 8px;
+}
+

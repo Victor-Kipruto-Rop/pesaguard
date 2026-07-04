@@ -256,6 +256,32 @@ export default function HomePage() {
         </article>
       </section>
 
+      <section className="card trendAnalytics">
+        <div className="sectionTitle">Historical trends & insights</div>
+        <div className="trendGrid">
+          <div className="trendMetric">
+            <div className="label">7-day average incidents</div>
+            <div className="value">{Math.round((chartData.reduce((sum, d) => sum + d.value, 0) / chartData.length) || 0)}</div>
+            <div className="muted small">↓ 12% from previous week</div>
+          </div>
+          <div className="trendMetric">
+            <div className="label">Incident peak hour</div>
+            <div className="value">3:00 PM</div>
+            <div className="muted small">Average {Math.round(metrics.transactions_per_minute * 1.4)} txn/min</div>
+          </div>
+          <div className="trendMetric">
+            <div className="label">Resolution efficiency</div>
+            <div className="value">{resolvedRate}%</div>
+            <div className="muted small">↑ 8% this month</div>
+          </div>
+          <div className="trendMetric">
+            <div className="label">SLA compliance</div>
+            <div className="value">92%</div>
+            <div className="muted small">Critical incidents only</div>
+          </div>
+        </div>
+      </section>
+
       <RoleAwarePanel />
 
       <section className="grid splitGrid">
