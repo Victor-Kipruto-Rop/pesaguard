@@ -72,7 +72,7 @@ PesaGuard uses a shield-and-"PG" mark in forest green — reflecting trust, secu
 
 ## License
 
-*(add your license, e.g. MIT, or "Proprietary — All rights reserved")*
+MIT License — see [LICENSE](LICENSE) for details.
 
 ## Contact
 
