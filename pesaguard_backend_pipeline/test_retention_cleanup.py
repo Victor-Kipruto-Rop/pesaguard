@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-import pesaguard_backend_pipeline.retention_cleanup as retention_cleanup
+import pesaguard_backend_pipeline.retention_cleanup as retention_cleanup_mod
 from pesaguard_backend_pipeline.models import Base, Transaction, Discrepancy
 from pesaguard_backend_pipeline.action_audit import ActionAuditEntry
 
@@ -40,7 +40,7 @@ def test_cleanup_retention_deletes_older_records(monkeypatch):
         finally:
             session.close()
 
-        retention_cleanup = importlib.reload(retention_cleanup)
+        retention_cleanup = importlib.reload(retention_cleanup_mod)
         result = retention_cleanup.cleanup_retention()
         assert result["deleted_transactions"] == 1
         assert result["deleted_discrepancies"] == 1
