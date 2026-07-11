@@ -1,0 +1,15 @@
+name: Deploy to staging
+
+on:
+  push:
+    branches: [staging]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run tests
+        run: pytest -q
+      - name: Deploy staging placeholder
+        run: echo "Deploy to staging environment"

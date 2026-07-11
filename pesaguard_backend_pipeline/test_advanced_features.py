@@ -1,8 +1,14 @@
 """Test suite for advanced features: webhooks, auth, email, escalations, on-call, search, rate limiting."""
 
+import os
 import pytest
 import json
 from datetime import datetime, timezone, timedelta
+
+from test_config import configure_test_database
+
+configure_test_database()
+
 from app_4_advanced_features import app
 from models import Base, Discrepancy, EscalationRule, OnCallRotation, WebhookConfig
 from sqlalchemy import create_engine

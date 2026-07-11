@@ -12,6 +12,7 @@ from typing import Any, Dict
 from flask import Flask, jsonify, request, g
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from webhook_manager import WebhookManager
 from auth_rbac import AuthRBAC, require_auth, require_tenant_access, get_current_user
@@ -27,7 +28,20 @@ logger = logging.getLogger("pesaguard.advanced_features")
 
 app = Flask(__name__)
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+
+
+def create_db_engine(url: str):
+    if url.startswith("sqlite:///:memory:"):
+        return create_engine(
+            url,
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+
+    return create_engine(url, pool_pre_ping=True)
+
+
+engine = create_db_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 # Initialize services
@@ -40,8 +54,7 @@ email_service = EmailService(
 
 @app.before_request
 def _ensure_tables():
-    if not app.config.get("TESTING", False):
-        Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine)
 
 
 @app.after_request
@@ -101,6 +114,19 @@ def verify_token():
         "roles": user.roles,
         "permissions": user.permissions,
     }), 200
+
+
+@app.route("/auth/revoke", methods=["POST"])
+@require_auth("manage:users")
+def revoke_token():
+    """Revoke an active authentication token."""
+    payload = request.json or {}
+    token = payload.get("token")
+    if not token:
+        return jsonify({"error": "missing_token"}), 400
+
+    AuthRBAC.revoke_token(token)
+    return jsonify({"status": "revoked"}), 200
 
 
 # ============================================================================

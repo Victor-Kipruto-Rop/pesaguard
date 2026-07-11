@@ -1,0 +1,26 @@
+version: '3.9'
+services:
+  postgres-staging:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: pesaguard_staging
+      POSTGRES_USER: pesaguard
+      POSTGRES_PASSWORD: pesaguard
+    ports:
+      - "5433:5432"
+  kafka-staging:
+    image: bitnami/kafka:3.7
+    environment:
+      KAFKA_CFG_NODE_ID: 1
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka-staging:9093
+      ALLOW_PLAINTEXT_LISTENER: yes
+    ports:
+      - "9092:9092"
+  redis-staging:
+    image: redis:7
+    ports:
+      - "6380:6379"

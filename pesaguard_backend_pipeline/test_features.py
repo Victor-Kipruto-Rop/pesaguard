@@ -1,53 +1,74 @@
 """Integration tests for new PesaGuard features."""
 
+import importlib
+import os
+from datetime import datetime, timedelta, timezone
+
 import pytest
-from datetime import datetime, timezone, timedelta
-from app_2 import app
+
+from test_config import configure_test_database
+
+configure_test_database()
+
+import app_2
 from models import Base, Discrepancy
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 
 @pytest.fixture
-def test_client():
-    """Create test client with in-memory database."""
-    DATABASE_URL = "sqlite:///:memory:"
-    engine = create_engine(DATABASE_URL)
+def test_client(monkeypatch):
+    """Create test client with an isolated in-memory database."""
+    db_url = configure_test_database()
+    engine = create_engine(db_url, connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
-    
-    SessionLocal = sessionmaker(bind=engine)
+
+    SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+    app_2.engine = engine
+    app_2.SessionLocal = SessionLocal
+    app_2.app.config.update(TESTING=True)
+
     session = SessionLocal()
-    
-    # Add test data
+
     now = datetime.now(timezone.utc)
-    
+
     test_incidents = [
         Discrepancy(
-            id="test-1", trans_id="txn-001", anomaly_type="duplicate",
-            severity="critical", status="needs_review", resolved=False,
+            id="test-1",
+            trans_id="txn-001",
+            anomaly_type="duplicate",
+            severity="critical",
+            status="needs_review",
+            resolved=False,
             detected_at=now - timedelta(minutes=50),
         ),
         Discrepancy(
-            id="test-2", trans_id="txn-002", anomaly_type="amount_mismatch",
-            severity="warning", status="assigned", resolved=False,
+            id="test-2",
+            trans_id="txn-002",
+            anomaly_type="amount_mismatch",
+            severity="warning",
+            status="assigned",
+            resolved=False,
             detected_at=now - timedelta(minutes=20),
         ),
         Discrepancy(
-            id="test-3", trans_id="txn-003", anomaly_type="missing_transaction",
-            severity="critical", status="assigned", resolved=True,
+            id="test-3",
+            trans_id="txn-003",
+            anomaly_type="missing_transaction",
+            severity="critical",
+            status="assigned",
+            resolved=True,
             detected_at=now - timedelta(hours=2),
             resolved_at=now - timedelta(hours=1),
         ),
     ]
-    
-    for incident in test_incidents:
-        session.add(incident)
+
+    session.add_all(test_incidents)
     session.commit()
-    
-    with app.test_client() as client:
-        yield client
-    
     session.close()
+
+    with app_2.app.test_client() as client:
+        yield client
 
 
 def test_reconciliation_report(test_client):

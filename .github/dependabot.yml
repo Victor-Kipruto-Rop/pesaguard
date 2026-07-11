@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # To get started with Dependabot version updates, you'll need to specify which
 # package ecosystems to update and where the package manifests are located.
 # Please see the documentation for all configuration options:
@@ -7,5 +8,15 @@ version: 2
 updates:
   - package-ecosystem: "" # See documentation for possible values
     directory: "/" # Location of package manifests
+=======
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+>>>>>>> 89e7d5c (Update PesaGuard project)
     schedule:
       interval: "weekly"

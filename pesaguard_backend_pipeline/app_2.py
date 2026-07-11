@@ -8,9 +8,15 @@ from typing import Any, Dict, List
 from io import StringIO
 import csv
 
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, jsonify, request, send_file, Response, g
+from werkzeug.exceptions import HTTPException
+
+from export_routes import bp as export_bp
+from action_audit import ActionAuditEntry, Base as AuditBase, build_audit_entry
+from dashboard.api.models.roles import has_permission
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from rate_limiter import RateLimiter
 
 
 SLA_WINDOW_MINUTES = 30
@@ -20,11 +26,17 @@ from init_db import main as init_db
 from logging_utils import configure_logging
 from models import Base, Discrepancy, Transaction
 from tenant_settings import TenantSettingsStore
+from auth_rbac import AuthRBAC, require_auth, require_tenant_access, get_current_user
+from security_helpers import is_payload_within_limit, sanitize_error_message
 
 configure_logging()
 logger = logging.getLogger("pesaguard.dashboard")
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("PESAGUARD_API_MAX_BODY_BYTES", "1048576"))
+app.register_blueprint(export_bp)
 settings_store = TenantSettingsStore()
+api_rate_limiter = RateLimiter()
+api_rate_limiter.set_limits(int(os.getenv("PESAGUARD_API_RATE_LIMIT_PER_MINUTE", "60")))
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
@@ -33,21 +45,147 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 @app.before_request
 def _ensure_tables():
-    if not app.config.get("TESTING", False):
-        Base.metadata.create_all(engine)
+    Base.metadata.create_all(engine)
+    AuditBase.metadata.create_all(engine)
+
+
+@app.before_request
+def enforce_api_security():
+    if request.method == "OPTIONS":
+        return None
+
+    if not is_payload_within_limit(request):
+        return jsonify({"error": "request_too_large"}), 413
+
+    if request.path.startswith("/health") or request.path.startswith("/openapi") or request.path.startswith("/docs"):
+        return None
+
+    client_identity = request.remote_addr
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1]
+        user = AuthRBAC.verify_token(token)
+        if user:
+            client_identity = user.user_id
+
+    allowed, status = api_rate_limiter.is_allowed(client_identity, request.path)
+    if not allowed:
+        response = jsonify({"error": "rate_limit_exceeded"})
+        response.status_code = 429
+        response.headers["Retry-After"] = str(status.get("retry_after", 60))
+        return response
+
+    if os.getenv("PESAGUARD_API_AUTH_REQUIRED", "0") == "1":
+        if not auth_header.startswith("Bearer "):
+            return jsonify({"error": "missing_auth_header"}), 401
+
+        token = auth_header.split(" ", 1)[1]
+        user = AuthRBAC.verify_token(token)
+        if not user:
+            return jsonify({"error": "invalid_token"}), 401
+        g.user = user
+
+
+@app.errorhandler(413)
+def handle_request_too_large(_error):
+    return jsonify({"error": "request_too_large"}), 413
 
 
 @app.after_request
 def _after_request(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     return response
+
+
+@app.errorhandler(Exception)
+def handle_internal_error(error):
+    if isinstance(error, HTTPException):
+        return error
+
+    logger.exception("Unhandled exception in dashboard API", exc_info=error)
+    return jsonify({"error": "internal_server_error"}), 500
 
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify(build_health_payload()), 200
+
+
+@app.route("/v1/settings", methods=["POST"])
+def update_settings():
+    payload = request.get_json(silent=True) or {}
+    tenant_id = payload.get("tenant_id")
+    if not tenant_id:
+        return jsonify({"error": "tenant_id is required"}), 400
+
+    role = (request.headers.get("X-Role") or "viewer").lower()
+    if role != "admin":
+        return jsonify({"error": "forbidden"}), 403
+
+    return jsonify(settings_store.update(tenant_id, payload)), 200
+
+
+@app.route("/openapi.json", methods=["GET"])
+def openapi_spec():
+    spec = {
+        "openapi": "3.0.3",
+        "info": {
+            "title": "PesaGuard Dashboard API",
+            "version": "1.0.0",
+            "description": "Operational and customer-facing reconciliation endpoints.",
+        },
+        "paths": {
+            "/discrepancies": {
+                "get": {
+                    "summary": "List discrepancies",
+                    "responses": {"200": {"description": "A paginated list of discrepancies"}},
+                }
+            },
+            "/discrepancies/<discrepancy_id>/resolve": {
+                "post": {
+                    "summary": "Resolve a discrepancy",
+                    "responses": {"200": {"description": "The discrepancy was resolved"}},
+                }
+            },
+            "/discrepancies/bulk-resolve": {
+                "post": {
+                    "summary": "Resolve multiple discrepancies",
+                    "responses": {"200": {"description": "The requested discrepancies were resolved"}},
+                }
+            },
+        },
+    }
+    return jsonify(spec), 200
+
+
+@app.route("/docs", methods=["GET"])
+def docs():
+    html = """
+    <!doctype html>
+    <html lang=\"en\">
+      <head>
+        <meta charset=\"utf-8\">
+        <title>PesaGuard Dashboard API</title>
+        <script src=\"https://cdn.jsdelivr.net/npm/redoc@next/bundles/redoc.standalone.js\"></script>
+        <style>
+          body { margin: 0; font-family: Arial, sans-serif; }
+          .top-bar { background: #0b3d91; color: white; padding: 1rem; }
+          .top-bar a { color: #ffd700; text-decoration: none; }
+        </style>
+      </head>
+      <body>
+        <div class=\"top-bar\">
+          <h1>PesaGuard Dashboard API</h1>
+          <p>Interactive API docs for the reconciliation dashboard.</p>
+          <p><a href=\"/openapi.json\">OpenAPI spec</a></p>
+        </div>
+        <redoc spec-url=\"/openapi.json\"></redoc>
+      </body>
+    </html>
+    """
+    return Response(html, mimetype="text/html"), 200
 
 
 @app.route("/metrics", methods=["GET"])
@@ -113,6 +251,7 @@ def _build_sla_context(item: Discrepancy) -> Dict[str, Any]:
 
 
 @app.route("/discrepancies", methods=["GET"])
+@require_auth("read:discrepancies")
 def discrepancies():
     status = request.args.get("status", "").strip()
     tenant = request.args.get("tenant", "").strip()
@@ -233,6 +372,7 @@ def assignment_queue():
 
 
 @app.route("/discrepancies/<discrepancy_id>/resolve", methods=["POST"])
+@require_auth("write:discrepancies")
 def resolve_discrepancy(discrepancy_id: str):
     session = SessionLocal()
     try:
@@ -244,6 +384,13 @@ def resolve_discrepancy(discrepancy_id: str):
         discrepancy.resolved_at = datetime.now(timezone.utc)
         discrepancy.resolution_note = payload.get("note", discrepancy.resolution_note)
         discrepancy.details = payload.get("note", discrepancy.details)
+        session.add(ActionAuditEntry(
+            id=f"audit-{datetime.now(timezone.utc).timestamp()}",
+            tenant_id=discrepancy.tenant_id or "default",
+            actor=payload.get("actor", "system"),
+            action="resolve_discrepancy",
+            details={"discrepancy_id": discrepancy.id, "note": payload.get("note", "")},
+        ))
         session.commit()
         return jsonify({"status": "resolved", "id": discrepancy.id}), 200
     finally:
@@ -251,6 +398,7 @@ def resolve_discrepancy(discrepancy_id: str):
 
 
 @app.route("/discrepancies/bulk-resolve", methods=["POST"])
+@require_auth("bulk:operations")
 def bulk_resolve_discrepancies():
     session = SessionLocal()
     try:

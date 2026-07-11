@@ -2,6 +2,7 @@
 
 import jwt
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Dict, Any, Optional, List
@@ -10,6 +11,7 @@ from flask import request, jsonify, g
 SECRET_KEY = os.getenv("JWT_SECRET_KEY", "pesaguard-secret-key-change-in-prod")
 ALGORITHM = "HS256"
 TOKEN_EXPIRY_HOURS = 24
+REVOCATION_FILE = os.getenv("JWT_REVOCATION_FILE", "revoked_tokens.txt")
 
 
 class User:
@@ -75,6 +77,7 @@ class AuthRBAC:
             "tenant_id": tenant_id,
             "roles": roles,
             "permissions": permissions,
+            "jti": str(uuid.uuid4()),
             "iat": datetime.now(timezone.utc),
             "exp": datetime.now(timezone.utc) + timedelta(hours=TOKEN_EXPIRY_HOURS),
         }
@@ -85,6 +88,8 @@ class AuthRBAC:
     def verify_token(cls, token: str) -> Optional[User]:
         """Verify JWT token and return User object."""
         try:
+            if cls.is_token_revoked(token):
+                return None
             payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
             user = User(
                 user_id=payload["user_id"],
@@ -107,6 +112,32 @@ class AuthRBAC:
             if role in cls.ROLE_PERMISSIONS:
                 permissions.update(cls.ROLE_PERMISSIONS[role])
         return list(permissions)
+
+    @classmethod
+    def _load_revoked_tokens(cls) -> set[str]:
+        if not hasattr(cls, "_revoked_tokens"):
+            cls._revoked_tokens = set()
+        if os.path.exists(REVOCATION_FILE):
+            with open(REVOCATION_FILE, "r", encoding="utf-8") as handle:
+                cls._revoked_tokens.update({line.strip() for line in handle if line.strip()})
+        return cls._revoked_tokens
+
+    @classmethod
+    def _persist_revoked_token(cls, token: str) -> None:
+        with open(REVOCATION_FILE, "a", encoding="utf-8") as handle:
+            handle.write(f"{token}\n")
+
+    @classmethod
+    def is_token_revoked(cls, token: str) -> bool:
+        revoked_tokens = cls._load_revoked_tokens()
+        return token in revoked_tokens
+
+    @classmethod
+    def revoke_token(cls, token: str) -> None:
+        revoked_tokens = cls._load_revoked_tokens()
+        if token not in revoked_tokens:
+            revoked_tokens.add(token)
+            cls._persist_revoked_token(token)
 
     @classmethod
     def check_permission(cls, user: User, required_permission: str) -> bool:
@@ -162,8 +193,11 @@ def require_tenant_access():
             if not hasattr(g, "user"):
                 return jsonify({"error": "not_authenticated"}), 401
 
-            tenant_id = request.view_args.get("tenant_id") or request.json.get(
-                "tenant_id"
+            json_payload = request.get_json(silent=True) or {}
+            tenant_id = (
+                (request.view_args or {}).get("tenant_id")
+                or json_payload.get("tenant_id")
+                or request.args.get("tenant_id")
             )
             if not tenant_id:
                 return jsonify({"error": "missing_tenant_id"}), 400

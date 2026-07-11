@@ -16,12 +16,18 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from kafka import KafkaConsumer, KafkaProducer
+try:
+    from kafka import KafkaConsumer, KafkaProducer
+except ImportError:  # pragma: no cover - exercised in lightweight test environments
+    KafkaConsumer = None  # type: ignore[assignment]
+    KafkaProducer = None  # type: ignore[assignment]
 
+from alerting_service import AlertingService
 from anomaly_rules import check_for_anomalies
 from base_connector import ConnectorRegistry
 from logging_utils import configure_logging
 from reconciliation_engine import evaluate_transaction
+from tenant_settings import TenantSettingsStore
 
 configure_logging()
 logger = logging.getLogger("pesaguard.reconciliation")
@@ -32,9 +38,24 @@ TOPIC_MATCHED = os.getenv("KAFKA_TOPIC_MATCHED", "mpesa.transactions.matched")
 TOPIC_DISCREPANCIES = os.getenv("KAFKA_TOPIC_DISCREPANCIES", "mpesa.discrepancies")
 TENANT_ID = os.getenv("TENANT_ID", "default")
 WINDOW_MINUTES = int(os.getenv("RECONCILIATION_WINDOW_MINUTES", "15"))
+settings_store = TenantSettingsStore()
+
+
+def dispatch_discrepancy_alert(evaluation: dict, tenant_id: str | None = None, **_: object) -> dict:
+    if evaluation.get("status") not in {"needs_review", "missing_payment"} and not evaluation.get("anomalies"):
+        return {"status": "skipped", "trans_id": evaluation.get("trans_id")}
+
+    service = AlertingService(
+        tenant_settings=settings_store.get(tenant_id or TENANT_ID),
+    )
+    return service.handle_discrepancy(evaluation)
 
 
 def run():
+    if KafkaConsumer is None or KafkaProducer is None:
+        logger.warning("Kafka dependencies are unavailable; reconciliation flow will not consume or publish events")
+        return
+
     consumer = KafkaConsumer(
         TOPIC_RAW,
         bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
@@ -74,6 +95,10 @@ def run():
 
         if evaluation["status"] in {"needs_review", "missing_payment"} or anomalies:
             producer.send(TOPIC_DISCREPANCIES, value=evaluation)
+            try:
+                dispatch_discrepancy_alert(evaluation, tenant_id=TENANT_ID)
+            except TypeError:
+                dispatch_discrepancy_alert(evaluation)
             logger.warning("Discrepancy flagged for %s: %s", trans_id, evaluation)
         else:
             producer.send(TOPIC_MATCHED, value=evaluation)

@@ -7,6 +7,15 @@ import logging
 import os
 
 from flask import Flask, jsonify, request
+from werkzeug.exceptions import HTTPException
+
+from security_helpers import (
+    get_client_ip,
+    is_allowed_source,
+    is_payload_within_limit,
+    sanitize_error_message,
+)
+from rate_limiter import RateLimiter
 
 from event_store import EventStore
 from health import build_health_payload
@@ -18,9 +27,54 @@ configure_logging()
 logger = logging.getLogger("pesaguard.webhook")
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("PESAGUARD_WEBHOOK_MAX_BODY_BYTES", "1048576"))
 event_store = EventStore()
+webhook_rate_limiter = RateLimiter()
+webhook_rate_limiter.set_limits(int(os.getenv("PESAGUARD_WEBHOOK_RATE_LIMIT_PER_MINUTE", "30")))
 
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC_TRANSACTIONS", "mpesa.transactions.raw")
+
+
+@app.errorhandler(413)
+def handle_request_too_large(_error):
+    return jsonify({"ResultCode": 1, "ResultDesc": "Request body too large"}), 413
+
+
+@app.errorhandler(400)
+def handle_bad_request(_error):
+    return jsonify({"ResultCode": 1, "ResultDesc": "Invalid request"}), 400
+
+
+@app.errorhandler(Exception)
+def handle_internal_error(error):
+    if isinstance(error, HTTPException):
+        return error
+
+    logger.exception("Unhandled exception in webhook receiver", exc_info=error)
+    return jsonify({"ResultCode": 1, "ResultDesc": "Internal server error"}), 500
+
+
+@app.before_request
+def enforce_webhook_security():
+    if request.method == "OPTIONS":
+        return None
+
+    if not is_payload_within_limit(request):
+        return jsonify({"ResultCode": 1, "ResultDesc": "Request body too large"}), 413
+
+    if request.path.startswith("/webhook"):
+        if not is_allowed_source(get_client_ip(request), request):
+            return jsonify({"ResultCode": 1, "ResultDesc": "Forbidden source"}), 403
+
+        allowed, status = webhook_rate_limiter.is_allowed(
+            get_client_ip(request),
+            request.path,
+        )
+        if not allowed:
+            response = jsonify({"ResultCode": 1, "ResultDesc": "Rate limit exceeded"})
+            response.status_code = 429
+            response.headers["Retry-After"] = str(status.get("retry_after", 60))
+            return response
 
 
 @app.route("/health", methods=["GET"])
@@ -40,10 +94,13 @@ def mpesa_confirmation():
         logger.warning("Empty or invalid JSON payload received")
         return jsonify({"ResultCode": 1, "ResultDesc": "Invalid payload"}), 400
 
+    if not is_payload_within_limit(request):
+        return jsonify({"ResultCode": 1, "ResultDesc": "Request body too large"}), 413
+
     is_valid, error = validate_daraja_payload(payload)
     if not is_valid:
         logger.warning("Payload validation failed: %s", error)
-        return jsonify({"ResultCode": 1, "ResultDesc": error}), 400
+        return jsonify({"ResultCode": 1, "ResultDesc": sanitize_error_message(error)}), 400
 
     trans_id = payload.get("TransID")
     if event_store.already_processed(str(trans_id)):

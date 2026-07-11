@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Security Policy
 
 PesaGuard handles sensitive financial transaction data (M-Pesa callbacks, reconciliation records, and account details) on behalf of SACCOs, e-commerce operators, and fintechs. We take the security of this data seriously.
@@ -62,3 +63,19 @@ We ask that reporters give us a reasonable window to investigate and patch a vul
 ## Contact
 
 Victor Kipruto Rop — [GitHub](https://github.com/Victor-Kipruto-Rop)
+=======
+# Security and dependency handling
+
+## Vulnerability triage process
+
+1. Review the dependency scan report from CI.
+2. If a finding is high/critical and fixed in a released package, upgrade immediately.
+3. If a finding cannot be fixed right away, record it in the project backlog with an owner, severity, and revisit date.
+4. Acceptable risk decisions must be reviewed by the maintainer and documented in the issue tracker.
+
+## Secrets handling
+
+- Secrets are injected via environment variables and never committed to the repository.
+- Daraja consumer keys and secrets are treated as sensitive and must not be logged at any log level.
+- Rotation guidance is documented in [SECRETS_ROTATION.md](SECRETS_ROTATION.md).
+>>>>>>> 89e7d5c (Update PesaGuard project)

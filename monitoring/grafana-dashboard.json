@@ -1,0 +1,19 @@
+{
+  "title": "PesaGuard Operational Dashboard",
+  "schemaVersion": 38,
+  "version": 1,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Open discrepancies",
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
+      "targets": [{"expr": "pesaguard_open_discrepancies"}]
+    },
+    {
+      "type": "graph",
+      "title": "Alert delivery success rate",
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
+      "targets": [{"expr": "rate(pesaguard_alerts_total[5m])"}]
+    }
+  ]
+}

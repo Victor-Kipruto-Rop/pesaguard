@@ -1,0 +1,22 @@
+{
+  "default": {
+    "alert_channels": [
+      "slack"
+    ],
+    "thresholds": {
+      "warning": 1000,
+      "critical": 5000
+    }
+  },
+  "tenant-a": {
+    "alert_channels": [
+      "slack"
+    ],
+    "thresholds": {
+      "warning": 1000,
+      "critical": 5000
+    },
+    "key": "value",
+    "tenant_id": "tenant-a"
+  }
+}

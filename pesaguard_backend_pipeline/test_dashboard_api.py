@@ -3,6 +3,7 @@ import os
 import tempfile
 
 import pytest
+from auth_rbac import AuthRBAC
 
 
 @pytest.fixture()
@@ -10,6 +11,7 @@ def dashboard_app(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "pesaguard_test.db")
         monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+        monkeypatch.setenv("PESAGUARD_API_AUTH_REQUIRED", "1")
         import app_2
 
         app_2 = importlib.reload(app_2)
@@ -58,10 +60,23 @@ def dashboard_app(monkeypatch):
             yield client, app_2
 
 
-def test_dashboard_filters_and_resolves_discrepancies(dashboard_app):
+@pytest.fixture()
+def dashboard_auth_token():
+    return AuthRBAC.generate_token(
+        user_id="test-admin",
+        username="admin",
+        tenant_id="tenant-a",
+        roles=["admin"],
+    )
+
+
+def test_dashboard_filters_and_resolves_discrepancies(dashboard_app, dashboard_auth_token):
     client, app_module = dashboard_app
 
-    response = client.get("/discrepancies?status=missing_payment")
+    response = client.get(
+        "/discrepancies?status=missing_payment",
+        headers={"Authorization": f"Bearer {dashboard_auth_token}"},
+    )
     assert response.status_code == 200
     payload = response.get_json()
     assert len(payload["items"]) == 1
@@ -69,6 +84,7 @@ def test_dashboard_filters_and_resolves_discrepancies(dashboard_app):
 
     resolve_response = client.post(
         f"/discrepancies/{payload['items'][0]['id']}/resolve",
+        headers={"Authorization": f"Bearer {dashboard_auth_token}"},
         json={"note": "Manual investigation complete"},
     )
     assert resolve_response.status_code == 200
@@ -82,10 +98,13 @@ def test_dashboard_filters_and_resolves_discrepancies(dashboard_app):
         session.close()
 
 
-def test_dashboard_supports_pagination_and_bulk_resolve(dashboard_app):
+def test_dashboard_supports_pagination_and_bulk_resolve(dashboard_app, dashboard_auth_token):
     client, app_module = dashboard_app
 
-    paged_response = client.get("/discrepancies?page=1&per_page=2")
+    paged_response = client.get(
+        "/discrepancies?page=1&per_page=2",
+        headers={"Authorization": f"Bearer {dashboard_auth_token}"},
+    )
     assert paged_response.status_code == 200
     paged_payload = paged_response.get_json()
     assert paged_payload["page"] == 1
@@ -95,6 +114,7 @@ def test_dashboard_supports_pagination_and_bulk_resolve(dashboard_app):
 
     bulk_response = client.post(
         "/discrepancies/bulk-resolve",
+        headers={"Authorization": f"Bearer {dashboard_auth_token}"},
         json={"ids": [item["id"] for item in paged_payload["items"]], "note": "Bulk resolved"},
     )
     assert bulk_response.status_code == 200
@@ -107,3 +127,17 @@ def test_dashboard_supports_pagination_and_bulk_resolve(dashboard_app):
         assert all(item.resolution_note == "Bulk resolved" for item in resolved_items)
     finally:
         session.close()
+
+
+def test_dashboard_exposes_openapi_docs(dashboard_app):
+    client, _ = dashboard_app
+
+    spec_response = client.get("/openapi.json")
+    assert spec_response.status_code == 200
+    spec_payload = spec_response.get_json()
+    assert spec_payload["openapi"] == "3.0.3"
+    assert "/discrepancies" in spec_payload["paths"]
+
+    docs_response = client.get("/docs")
+    assert docs_response.status_code == 200
+    assert b"PesaGuard Dashboard API" in docs_response.data

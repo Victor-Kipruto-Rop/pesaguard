@@ -46,3 +46,9 @@ pytest -q
 - The reconciliation engine treats duplicate callbacks and missing-payment cases as critical and records them in the discrepancy stream.
 - The connector layer is designed to be tenant-scoped so new customers can be onboarded by changing configuration rather than rewriting business logic.
 - If a Daraja callback shape changes, validate it against the sandbox and update the payload validator before production use.
+
+## Alerting, monitoring, and dashboards
+
+- Alerts are routed through the alerting service with severity-aware channels and deduplication support.
+- Prometheus-style metrics can be served through the metrics helper and are available in the monitoring directory.
+- A Grafana dashboard definition is available at [monitoring/grafana-dashboard.json](../monitoring/grafana-dashboard.json) and a runbook is available at [RUNBOOK.md](../RUNBOOK.md).
