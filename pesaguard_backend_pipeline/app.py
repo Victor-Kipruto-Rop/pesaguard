@@ -22,6 +22,8 @@ from health import build_health_payload
 from logging_utils import configure_logging
 from validators import validate_daraja_payload
 from producer import publish_transaction_event
+from tenant_settings import TenantSettingsStore
+from flask import abort
 
 configure_logging()
 logger = logging.getLogger("pesaguard.webhook")
@@ -33,6 +35,74 @@ webhook_rate_limiter = RateLimiter()
 webhook_rate_limiter.set_limits(int(os.getenv("PESAGUARD_WEBHOOK_RATE_LIMIT_PER_MINUTE", "30")))
 
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC_TRANSACTIONS", "mpesa.transactions.raw")
+
+# Simple admin-auth for pilot Admin API endpoints
+tenant_store = TenantSettingsStore()
+
+
+def _require_admin():
+    token = request.headers.get("X-Admin-Token") or request.args.get("admin_token")
+    admin_api_token = os.getenv("PESAGUARD_ADMIN_API_TOKEN")
+    if not admin_api_token or token != admin_api_token:
+        abort(403)
+
+
+@app.route("/admin/tenant/<tenant_id>", methods=["GET"])
+def admin_get_tenant(tenant_id: str):
+    _require_admin()
+    return jsonify(tenant_store.get(tenant_id)), 200
+
+
+@app.route("/admin/tenant/<tenant_id>", methods=["POST"])
+def admin_update_tenant(tenant_id: str):
+    _require_admin()
+    payload = request.get_json(silent=True) or {}
+    updated = tenant_store.update(tenant_id, payload)
+    return jsonify(updated), 200
+
+
+@app.route("/admin/tenant/<tenant_id>/residency", methods=["GET"])
+def admin_get_residency(tenant_id: str):
+    _require_admin()
+    return jsonify(tenant_store.get_residency_context(tenant_id)), 200
+
+
+@app.route("/admin/tenant/<tenant_id>/locale", methods=["POST"])
+def admin_set_locale(tenant_id: str):
+    _require_admin()
+    payload = request.get_json(silent=True) or {}
+    preferred = payload.get("preferred_locale")
+    if not preferred:
+        return jsonify({"error": "preferred_locale required"}), 400
+    updated = tenant_store.update(tenant_id, {"preferred_locale": preferred})
+    return jsonify(updated), 200
+
+
+@app.route("/tenant/current", methods=["GET"])
+def public_get_current_tenant():
+    """Public, read-only endpoint returning limited tenant preferences for the current runtime tenant."""
+    tenant_id = os.getenv("TENANT_ID", "default")
+    settings = tenant_store.get(tenant_id)
+    # Only expose non-sensitive, UX preferences
+    public = {
+        "tenant_id": tenant_id,
+        "preferred_locale": settings.get("preferred_locale"),
+        "deployment_region": settings.get("deployment_region"),
+    }
+    return jsonify(public), 200
+
+
+@app.route("/tenant/current/locale", methods=["POST"])
+def public_set_current_tenant_locale():
+    """Persist the current tenant's preferred locale through the public tenant endpoint."""
+    payload = request.get_json(silent=True) or {}
+    preferred = payload.get("preferred_locale")
+    if not preferred:
+        return jsonify({"error": "preferred_locale required"}), 400
+
+    tenant_id = os.getenv("TENANT_ID", "default")
+    updated = tenant_store.update(tenant_id, {"preferred_locale": preferred})
+    return jsonify({"tenant_id": tenant_id, "preferred_locale": updated.get("preferred_locale")}), 200
 
 
 @app.errorhandler(413)

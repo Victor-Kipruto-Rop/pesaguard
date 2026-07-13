@@ -1,0 +1,6 @@
+Privacy Policy Draft
+====================
+
+PesaGuard processes transaction metadata, anomaly records, account identifiers, and support communications necessary to provide monitoring, reconciliation, and incident support services. Data is retained according to the documented retention policy and may be deleted following the documented offboarding process.
+
+The service applies access controls, logging, rate limiting, and backup practices to protect customer data.

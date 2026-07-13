@@ -1,14 +1,12 @@
 import json
 import logging
-import os
 import uuid
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
-from models import Base, Discrepancy
-from notifier import send_slack_alert, send_sms_alert
+from models import Discrepancy
+from notifier import send_email_alert, send_slack_alert, send_sms_alert
 
 logger = logging.getLogger("pesaguard.alerting.service")
 
@@ -27,13 +25,16 @@ class AlertingService:
         self._alert_ids.add(alert_id)
         severity = (discrepancy.get("severity") or "warning").lower()
         channels = self._resolve_channels(severity)
+        locale = self._resolve_locale(discrepancy)
         deliveries = []
         for channel in channels:
             try:
                 if channel == "slack":
-                    send_slack_alert(discrepancy)
+                    send_slack_alert(discrepancy, locale=locale)
                 elif channel == "sms":
-                    send_sms_alert(discrepancy)
+                    send_sms_alert(discrepancy, locale=locale)
+                elif channel == "email":
+                    send_email_alert(discrepancy, locale=locale)
                 deliveries.append({"channel": channel, "status": "sent"})
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Alert delivery failed", extra={"channel": channel, "alert_id": alert_id})
@@ -49,6 +50,29 @@ class AlertingService:
         if severity == "warning":
             return [channel for channel in configured if channel == "slack"]
         return []
+
+    def _resolve_locale(self, discrepancy: Dict[str, Any]) -> str:
+        tenant_id = str(discrepancy.get("tenant_id", "default"))
+        user_id = discrepancy.get("user_id")
+        if hasattr(self.tenant_settings, "resolve_locale"):
+            return self.tenant_settings.resolve_locale(tenant_id, user_id, fallback_locale="en")
+
+        if isinstance(self.tenant_settings, dict):
+            tenant_settings = self.tenant_settings.get(tenant_id) or self.tenant_settings.get("default") or {}
+            if user_id and isinstance(tenant_settings.get("user_locale_overrides"), dict):
+                override = tenant_settings["user_locale_overrides"].get(user_id) or tenant_settings["user_locale_overrides"].get(str(user_id))
+                if override:
+                    return str(override)
+
+            preferred_locale = tenant_settings.get("preferred_locale") or tenant_settings.get("default_locale")
+            if preferred_locale:
+                return str(preferred_locale)
+
+            default_settings = self.tenant_settings.get("default") or {}
+            if default_settings.get("preferred_locale"):
+                return str(default_settings["preferred_locale"])
+
+        return "en"
 
     def _store_delivery_log(self, alert_id: str, discrepancy: Dict[str, Any], deliveries: List[Dict[str, Any]]) -> None:
         if self.session is None:

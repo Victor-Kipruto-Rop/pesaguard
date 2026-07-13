@@ -1,5 +1,6 @@
 version: '3.9'
 services:
+  # Residency note: keep the selected deployment region consistent with the documented data residency decision for primary data, backups, and logs.
   postgres-staging:
     image: postgres:16
     environment:

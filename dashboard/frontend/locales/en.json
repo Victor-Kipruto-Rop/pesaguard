@@ -1,0 +1,28 @@
+{
+  "nav": {
+    "overview": "Overview",
+    "status": "Status",
+    "support": "Support",
+    "agreements": "Agreements",
+    "policies": "Policies",
+    "settings": "Settings"
+  },
+  "home": {
+    "heroTitle": "Modern reconciliation operations for every tenant",
+    "heroSubtitle": "Monitor exceptions, resolve incidents, and keep payment flows trusted in real time.",
+    "heroCtaPrimary": "Open operations queue",
+    "heroCtaSecondary": "Review alert routing",
+    "heroMeta": [
+      "Live anomaly stream",
+      "SLA-aware escalations",
+      "Audit-ready workflow"
+    ]
+  },
+  "status": {
+    "title": "Pilot Service Status",
+    "summary": "PesaGuard is operating normally, with service monitoring, backup automation, retention enforcement, and incident response controls active across the platform."
+  },
+  "scope": {
+    "label": "Current scope: M-Pesa / Daraja only"
+  }
+}

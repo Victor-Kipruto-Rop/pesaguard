@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000",
+    "test:e2e": "playwright test",
     "build": "next build",
     "start": "next start -p 3000"
   },
@@ -16,6 +17,8 @@
   "devDependencies": {
     "@types/node": "26.1.0",
     "@types/react": "19.2.17",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "@playwright/test": "1.43.0",
+    "playwright": "1.43.0"
   }
 }

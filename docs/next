@@ -1,0 +1,122 @@
+Premium Readiness Pack — Executive Summary
+
+Purpose
+- Provide a polished, customer-facing readiness pack for investors, pilot customers, and compliance reviewers that summarizes current status, key risks, and the practical roadmap required to reach production-grade "Premium" readiness for pilot launch.
+
+High-Level Positioning
+- Pesaguard is pilot-ready with core features completed and documented. To convert pilot readiness into a supported Premium offering we need a short, prioritized engineering and compliance workplan covering residency, localization, alerting parity, formatting, documentation, and legal sign-off. This pack provides the messaging, the implementation roadmap, and the pilot launch materials needed for customer communications and compliance review.
+
+Current Gaps (concise)
+- Data residency: Decision documentation exists but deployment and infrastructure configuration must reflect chosen region/residency posture.
+- Tenant-localization: Frontend locale switcher is browser-scoped and not persisted as a tenant/user preference.
+- Alert localization: SMS and Slack alerts use static templates and are not sourced from tenant language preferences; email alerts are not yet localized.
+- Kenya formatting: Date/time and currency formatting need consistent application across UI and reporting surfaces.
+- Documentation: English onboarding and FAQ content for pilot customers is incomplete.
+
+Next Practical Steps (legal & publish)
+- Obtain a formal legal review to finalize any customer-facing terms and compliance statements; obtain signature/approval for the readiness statements.
+- After legal sign-off, publish the pilot status page and the support channel details in the pilot environment.
+
+Pilot Launch Pack (Customer-Facing Materials)
+
+1) Pilot Executive Summary (for investors / pilots / compliance)
+
+Overview
+- Pesaguard pilot offers core alerting and escalation capabilities with tenant-scoped controls. The pilot includes a dedicated pilot environment, onboarding support, and a commitment to complete a short list of platform hardening tasks prior to a wider Premium rollout.
+
+What you get (pilot)
+- Dedicated pilot tenant and support channel
+- Configurable alert destinations (SMS, Slack, Email)
+- Data residency assurances per the selected hosting region
+- Bilingual experience (English + Kiswahili) with progressive translation coverage
+
+Commitments and Timeline
+- Short-term engineering tasks (2-4 weeks): tenant API for settings, frontend persistence, alert localization, Kenya formatting across dashboards.
+- Compliance & legal review (1-2 weeks): finalize residency posture and customer-facing statements.
+- Pilot publication: status page and support channel will be published on sign-off.
+
+2) Customer Email Template (pilot invite)
+
+Subject: Invitation — Pesaguard Pilot Program (Pilot Start Date)
+
+Hello [Customer Name],
+
+We’re excited to invite you to the Pesaguard pilot. During this pilot we will provide a dedicated tenant, onboarding support, and priority access to our engineering team to ensure smooth rollout.
+
+What we’ll deliver:
+- Dedicated pilot tenant and support channel
+- Onboarding call and setup assistance
+- Access to localized alerts and Kenyan-format reporting
+
+Next steps:
+1. Confirm pilot start date and point of contact
+2. Provide any residency or data handling constraints we should be aware of
+3. Complete the onboarding form (link)
+
+We look forward to partnering with you. Reply to this email to confirm.
+
+Best,
+The Pesaguard Team
+
+3) Rollout Checklist (concise, actionable)
+
+- Pre-launch
+  - Legal review & sign-off on residency and pilot terms
+  - Finalize hosting region & update deployment configs
+  - Create pilot tenant and admin credentials
+  - Prepare onboarding documents and English FAQ
+
+- Launch
+  - Publish status page and support channel in pilot env
+  - Send pilot invitation email to customer contact(s)
+  - Run end-to-end verification: locale persistence, alert localization (SMS/Slack/Email), Kenya formatting
+
+- Post-launch (first 2 weeks)
+  - Collect feedback and triage issues daily
+  - Run operational tests for alert delivery and settings updates
+  - Prepare sign-off summary for Premium readiness
+
+Implementation Roadmap (technical tasks)
+
+Priority (week 1-2)
+- Expose tenant settings through Admin/API: replace file-based store in `tenant_settings.py` with an API-backed store and admin UI.
+- Frontend locale persistence: persist tenant/user locale to backend and ensure locale propagates on page load and refresh.
+
+Priority (week 2-4)
+- Alert localization parity: extend localization to SMS, Slack, and Email; generate messages from tenant language templates.
+- Apply Kenya formatting helpers broadly: ensure date/time and currency formats render consistently in dashboards and exported reports.
+- Add English onboarding and FAQ docs and wire into support flow.
+
+Quality & Hardening
+- Add operational tests for settings updates, email/SMS delivery, residency-aware routing, and translation verification.
+- Create a small runbook for pilot support and incident response in the pilot tenant.
+
+Legal & Compliance
+- Provide the legal reviewer with the residency decision doc and readiness statements; obtain a signed approval copy before publishing the status page.
+
+Owner/ETA (template)
+- Task: Expose tenant settings API — Owner: [engineer] — ETA: [date]
+- Task: Frontend locale persistence — Owner: [engineer] — ETA: [date]
+
+How to Verify Completion (acceptance criteria)
+- Tenant settings changes persist and are surfaced in Admin UI
+- Locale persists across sessions and affects all alert content
+- Alerts sent to SMS/Slack/Email use tenant language and Kenyan formatting
+- Pilot customer receives invitation and onboarding docs
+
+Practical Developer Notes
+- Code changes suggested:
+  - Move `tenant_settings.py` store to a small Admin API in `pesaguard_backend_pipeline/tenant_settings.py` or `api/` routes.
+  - Update frontend to POST locale preferences on login or admin change and read back on app init.
+  - Centralize alert templates and use a simple template-renderer that selects language by tenant.
+  - Reuse `localization_utils.py` helpers and expand formatting coverage across UI components and reporting export functions.
+
+Optional Next Enhancements
+- Expand translation coverage and add a translation verification script to catch missing keys.
+- Add region-specific compliance checks to the deployment pipeline.
+
+Files & Next Steps
+- This Premium Readiness and Pilot Launch pack is published as the canonical pilot artifact in [docs/next](docs/next).
+- Next immediate action: legal review and deployment configuration update for residency.
+
+If you want, I can: generate the Admin API skeleton, patch the frontend locale persistence, or prepare the English onboarding FAQ next. Tell me which task to start with and I’ll add it to the plan and begin implementing.

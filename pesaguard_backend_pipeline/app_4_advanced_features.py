@@ -22,6 +22,7 @@ from escalation_engine import EscalationEngine
 from on_call_service import OnCallService
 from search_engine import AdvancedSearchEngine
 from models import Base, Discrepancy
+from tenant_settings import TenantSettingsStore
 
 configure_logging = lambda: None  # Import from logging_utils if available
 logger = logging.getLogger("pesaguard.advanced_features")
@@ -50,6 +51,18 @@ email_service = EmailService(
     smtp_port=int(os.getenv("SMTP_PORT", 587)),
     from_email=os.getenv("SMTP_FROM_EMAIL", "noreply@pesaguard.local"),
 )
+settings_store = TenantSettingsStore()
+
+
+def resolve_email_locale(tenant_id: str | None, user_id: str | None = None, settings_path=None) -> str:
+    """Resolve the locale to use for email notifications based on tenant settings."""
+    if not tenant_id:
+        tenant_id = "default"
+    if settings_path is not None:
+        store = TenantSettingsStore(str(settings_path))
+    else:
+        store = settings_store
+    return store.resolve_locale(str(tenant_id), user_id=user_id, fallback_locale="en")
 
 
 @app.before_request
@@ -393,8 +406,13 @@ def send_reconciliation_email():
     session = SessionLocal()
 
     try:
+        current_user = get_current_user()
+        locale = resolve_email_locale(
+            tenant_id,
+            user_id=current_user.user_id if current_user else data.get("user_id") or request.args.get("user_id"),
+        )
         result = email_service.send_reconciliation_report(
-            session, tenant_id, recipient, report_data
+            session, tenant_id, recipient, report_data, locale=locale
         )
         return jsonify(result), 200
     finally:
@@ -413,8 +431,13 @@ def send_escalation_email():
     session = SessionLocal()
 
     try:
+        current_user = get_current_user()
+        locale = resolve_email_locale(
+            tenant_id,
+            user_id=current_user.user_id if current_user else data.get("user_id") or request.args.get("user_id"),
+        )
         result = email_service.send_escalation_notification(
-            session, tenant_id, recipient, incident
+            session, tenant_id, recipient, incident, locale=locale
         )
         return jsonify(result), 200
     finally:

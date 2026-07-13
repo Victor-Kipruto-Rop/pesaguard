@@ -1,0 +1,16 @@
+PesaGuard Support Readiness Brief
+================================
+
+Support channels:
+- Email: pilot-support@pesaguard.example
+- Priority incident channel: #pesaguard-pilot
+- Status portal: /status
+
+Response expectations:
+- Critical: 15 minutes
+- High: 1 hour
+- Medium: 4 hours
+
+Operational notes:
+- Incident reports should include tenant context, affected workflow, and relevant transaction identifiers.
+- Support workflows are aligned with the incident response and service status experience.

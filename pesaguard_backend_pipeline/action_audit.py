@@ -1,8 +1,8 @@
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from sqlalchemy import Column, String, Text, DateTime, JSON
+from sqlalchemy import Column, String, DateTime, JSON
 
 from pesaguard_backend_pipeline.models import Base
 

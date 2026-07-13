@@ -1,0 +1,6 @@
+Data Processing Agreement Draft
+===============================
+
+PesaGuard acts as a service provider processing customer transaction and reconciliation data on behalf of the customer. The service applies reasonable administrative, technical, and physical safeguards appropriate to the sensitivity of the data processed.
+
+PesaGuard will provide reasonable support for incident handling, deletion requests, and export assistance in line with the documented retention and offboarding procedures.

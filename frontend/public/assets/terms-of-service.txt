@@ -1,0 +1,6 @@
+Terms of Service Draft
+======================
+
+PesaGuard provides reconciliation, anomaly detection, and alerting services for M-Pesa and related transaction workflows. Customers are responsible for providing accurate configuration and required access information to use the service.
+
+The service is intended for operational monitoring and reconciliation support and should not be treated as a substitute for regulated financial advice or legal compliance services.

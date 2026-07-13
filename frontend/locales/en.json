@@ -1,0 +1,138 @@
+{
+  "nav": {
+    "overview": "Overview",
+    "status": "Status",
+    "support": "Support",
+    "agreements": "Agreements",
+    "policies": "Policies",
+    "settings": "Settings"
+  },
+  "home": {
+    "heroTitle": "Modern reconciliation operations for every tenant",
+    "heroSubtitle": "Monitor exceptions, resolve incidents, and keep payment flows trusted in real time.",
+    "heroCtaPrimary": "Open operations queue",
+    "heroCtaSecondary": "Review alert routing",
+    "heroMeta": [
+      "Live anomaly stream",
+      "SLA-aware escalations",
+      "Audit-ready workflow"
+    ]
+  },
+  "status": {
+    "title": "Pilot Service Status",
+    "summary": "PesaGuard is operating normally, with service monitoring, backup automation, retention enforcement, and incident response controls active across the platform."
+  },
+  "scope": {
+    "label": "Current scope: M-Pesa / Daraja only"
+  },
+  "dashboard": {
+    "heroStats": {
+      "openIncidents": "Open incidents in queue",
+      "latency": "Median resolution latency",
+      "tpm": "Transactions per minute"
+    },
+    "metrics": {
+      "tpm": "Transactions / min",
+      "openExceptions": "Open exceptions",
+      "resolutionRate": "Resolution rate",
+      "latencyP95": "Latency p95"
+    },
+    "charts": {
+      "exceptionTrend": "Exception trend (7 days)"
+    },
+    "operationalHealth": {
+      "title": "Operational health",
+      "discrepancyRate": "Discrepancy rate",
+      "p50Latency": "p50 latency",
+      "resolvedToday": "Resolved today",
+      "severityMix": "Severity mix"
+    },
+    "trends": {
+      "title": "Historical trends & insights",
+      "avgIncidents": "7-day average incidents",
+      "peakHour": "Incident peak hour",
+      "peakHourHint": "Average {value} txn/min",
+      "resolutionEfficiency": "Resolution efficiency",
+      "slaCompliance": "SLA compliance"
+    },
+    "activityFeed": {
+      "title": "Recent activity feed",
+      "pending": "pending"
+    },
+    "assignmentQueue": {
+      "title": "Assignment queue",
+      "assignee": "Assignee:"
+    },
+    "operations": {
+      "title": "Tenant operations",
+      "searchPlaceholder": "Search transaction or anomaly",
+      "allAnomalies": "All anomalies",
+      "statusMissingPayment": "Missing payment",
+      "statusNeedsReview": "Needs review",
+      "statusDuplicate": "Duplicate",
+      "allSeverities": "All severities",
+      "severityCritical": "Critical",
+      "severityWarning": "Warning",
+      "severityInfo": "Info",
+      "all": "All",
+      "open": "Open",
+      "resolved": "Resolved",
+      "refreshing": "Refreshing…",
+      "apply": "Apply",
+      "bulkResolve": "Bulk resolve selected",
+      "selected": "selected",
+      "perPage": "per page",
+      "table": {
+        "transaction": "Transaction",
+        "anomaly": "Anomaly",
+        "status": "Status",
+        "severity": "Severity",
+        "sla": "SLA",
+        "detected": "Detected",
+        "action": "Action",
+        "resolved": "Resolved",
+        "resolving": "Resolving…",
+        "resolve": "Resolve",
+        "slaBreaching": "breaching",
+        "slaWarning": "warning",
+        "slaOnTrack": "on track",
+        "notApplicable": "n/a"
+      },
+      "pagination": {
+        "previous": "Previous",
+        "page": "Page",
+        "of": "of",
+        "next": "Next"
+      }
+    }
+  },
+  "settings": {
+    "title": "Settings and configuration",
+    "subtitle": "Manage alert channels, incident thresholds, and operational policies for your tenant.",
+    "loading": "Loading settings...",
+    "save": "Save settings",
+    "saved": "✓ Settings saved successfully",
+    "sections": {
+      "localization": "Localization and residency",
+      "alertChannels": "Alert channels",
+      "alertChannelsLabel": "Active channels (comma-separated)",
+      "thresholds": "Incident thresholds",
+      "slaPolicy": "SLA policy",
+      "preferredLocale": "Preferred locale",
+      "deploymentRegion": "Deployment region",
+      "backupRegion": "Backup region",
+      "logRegion": "Log region",
+      "crossBorder": "Allow cross-border transfers",
+      "channelsHint": "Configure where incident notifications are sent.",
+      "warningThreshold": "Warning threshold (in units)",
+      "warningThresholdHint": "Discrepancies below this threshold trigger a warning.",
+      "criticalThreshold": "Critical threshold (in units)",
+      "criticalThresholdHint": "Discrepancies above this threshold trigger a critical alert.",
+      "criticalResolutionWindow": "Critical resolution window",
+      "status": "Status",
+      "active": "Active"
+    },
+    "loadError": "Failed to load settings",
+    "saveError": "Failed to save settings"
+  }
+}

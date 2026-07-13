@@ -1,0 +1,138 @@
+{
+  "nav": {
+    "overview": "Muhtasari",
+    "status": "Hali",
+    "support": "Msaada",
+    "agreements": "Mikataba",
+    "policies": "Sera",
+    "settings": "Mipangilio"
+  },
+  "home": {
+    "heroTitle": "Uendeshaji wa upatanishi wa kisasa kwa kila tenant",
+    "heroSubtitle": "Fuata makosa, utatue matukio ya dharura, na uhifadhi mtiririko wa malipo ukitumia uaminifu wa wakati halisi.",
+    "heroCtaPrimary": "Fungua foleni ya uendeshaji",
+    "heroCtaSecondary": "Pitia uelekezaji wa arifa",
+    "heroMeta": [
+      "Mtiririko wa hali halisi wa makosa",
+      "Upelekaji wa arifa unaozingatia SLA",
+      "Mchakato unaokubalika kwa ukaguzi"
+    ]
+  },
+  "status": {
+    "title": "Hali ya huduma ya majaribio",
+    "summary": "PesaGuard inafanya kazi kawaida, kwa ufuatiliaji wa huduma, uboreshaji wa hifadhi, utekelezaji wa sera ya kuhifadhi, na udhibiti wa majibu ya matukio kwenye mfumo mzima."
+  },
+  "scope": {
+    "label": "Upeo wa sasa: M-Pesa / Daraja pekee"
+  },
+  "dashboard": {
+    "heroStats": {
+      "openIncidents": "Matukio ya wazi kwenye foleni",
+      "latency": "Uwezo wa kutatua wa wastani",
+      "tpm": "Miamala kwa dakika"
+    },
+    "metrics": {
+      "tpm": "Miamala / dakika",
+      "openExceptions": "Makosa ya wazi",
+      "resolutionRate": "Kiwango cha utatuzi",
+      "latencyP95": "Latency p95"
+    },
+    "charts": {
+      "exceptionTrend": "Mwelekeo wa makosa (siku 7)"
+    },
+    "operationalHealth": {
+      "title": "Afya ya uendeshaji",
+      "discrepancyRate": "Kiwango cha utofauti",
+      "p50Latency": "latency p50",
+      "resolvedToday": "Zilitatuliwa leo",
+      "severityMix": "Mchanganyiko wa ukali"
+    },
+    "trends": {
+      "title": "Mitindo ya kihistoria na maarifa",
+      "avgIncidents": "Wastani wa matukio kwa siku 7",
+      "peakHour": "Saa ya kilele cha tukio",
+      "peakHourHint": "Wastani wa {value} txn/min",
+      "resolutionEfficiency": "Ufanisi wa utatuzi",
+      "slaCompliance": "Uzingatiaji wa SLA"
+    },
+    "activityFeed": {
+      "title": "Mtiririko wa shughuli za hivi karibuni",
+      "pending": "inategemea"
+    },
+    "assignmentQueue": {
+      "title": "Foleni ya ugawaji",
+      "assignee": "Mwenye kazi:"
+    },
+    "operations": {
+      "title": "Uendeshaji wa tenant",
+      "searchPlaceholder": "Tafuta muamala au anomaly",
+      "allAnomalies": "Makosa yote",
+      "statusMissingPayment": "Malipo hayapo",
+      "statusNeedsReview": "Inahitaji ukaguzi",
+      "statusDuplicate": "Rudufu",
+      "allSeverities": "Ukali wote",
+      "severityCritical": "Kubwa",
+      "severityWarning": "Onyo",
+      "severityInfo": "Taarifa",
+      "all": "Yote",
+      "open": "Wazi",
+      "resolved": "Imetatuliwa",
+      "refreshing": "Inasasisha…",
+      "apply": "Tumia",
+      "bulkResolve": "Tatua zilizochaguliwa kwa wingi",
+      "selected": "zilizochaguliwa",
+      "perPage": "kwa kila ukurasa",
+      "table": {
+        "transaction": "Muamala",
+        "anomaly": "Anomaly",
+        "status": "Hali",
+        "severity": "Ukali",
+        "sla": "SLA",
+        "detected": "Iligunduliwa",
+        "action": "Kitendo",
+        "resolved": "Imetatuliwa",
+        "resolving": "Inatatua…",
+        "resolve": "Tatua",
+        "slaBreaching": "inavunja",
+        "slaWarning": "onyo",
+        "slaOnTrack": "kikomo kiko sawa",
+        "notApplicable": "sio lazima"
+      },
+      "pagination": {
+        "previous": "Iliyotangulia",
+        "page": "Ukurasa",
+        "of": "wa",
+        "next": "Inayofuata"
+      }
+    }
+  },
+  "settings": {
+    "title": "Mipangilio na usanidi",
+    "subtitle": "Dhibiti njia za arifa, vizingiti vya matukio, na sera za uendeshaji kwa tenant yako.",
+    "loading": "Inapakia mipangilio...",
+    "save": "Hifadhi mipangilio",
+    "saved": "✓ Mipangilio imehifadhiwa kwa mafanikio",
+    "sections": {
+      "localization": "Ujanibishaji na makazi",
+      "alertChannels": "Njia za arifa",
+      "alertChannelsLabel": "Njia zinazotumika (zilitenganishwa kwa comma)",
+      "thresholds": "Vizingiti vya matukio",
+      "slaPolicy": "Sera ya SLA",
+      "preferredLocale": "Lugha inayopendelewa",
+      "deploymentRegion": "Mkoa wa uwekaji",
+      "backupRegion": "Mkoa wa chelezo",
+      "logRegion": "Mkoa wa kumbukumbu",
+      "crossBorder": "Ruhusu miamala ya kimataifa",
+      "channelsHint": "Sanidi mahali arifa za matukio zitatumwa.",
+      "warningThreshold": "Kizingiti cha onyo (katika vitengo)",
+      "warningThresholdHint": "Kutojibu chini ya kizingiti hiki husababisha onyo.",
+      "criticalThreshold": "Kizingiti kikubwa (katika vitengo)",
+      "criticalThresholdHint": "Kutojibu juu ya kizingiti hiki husababisha arifa kubwa.",
+      "criticalResolutionWindow": "Dirisha la utatuzi mkubwa",
+      "status": "Hali",
+      "active": "Inatumika"
+    },
+    "loadError": "Imeshindwa kupakia mipangilio",
+    "saveError": "Imeshindwa kuhifadhi mipangilio"
+  }
+}
