@@ -7,12 +7,14 @@ on:
     branches: [ "main" ]
 
 jobs:
-
   build:
-
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Build the Docker image
-      run: docker build . --file Dockerfile --tag my-image-name:$(date +%s)
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build backend Docker image
+        run: docker build . --file Dockerfile --tag pesaguard-backend:$(date +%s)
+      - name: Build frontend Docker image
+        run: docker build . --file Dockerfile.frontend --tag pesaguard-frontend:$(date +%s)
+        continue-on-error: true
