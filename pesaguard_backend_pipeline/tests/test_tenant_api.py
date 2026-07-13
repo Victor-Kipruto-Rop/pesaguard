@@ -1,10 +1,13 @@
 import json
 import os
+import sys
 import tempfile
+
+sys.path.insert(0, 'pesaguard_backend_pipeline')
 
 import pytest
 
-from pesaguard_backend_pipeline import app as flask_app
+import app as flask_app
 
 
 @pytest.fixture

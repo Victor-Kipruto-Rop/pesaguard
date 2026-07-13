@@ -1,6 +1,9 @@
 import os
+import sys
+sys.path.insert(0, 'pesaguard_backend_pipeline')
 
-from pesaguard_backend_pipeline import notifier
+import notifier
+from notifier import send_email_alert, send_sms_alert
 
 
 class DummySMTP:

@@ -1,10 +1,12 @@
 import json
 from pathlib import Path
 
+import sys
+sys.path.insert(0, 'pesaguard_backend_pipeline')
 from localization_utils import format_ke_currency, format_ke_datetime, resolve_translation
-from pesaguard_backend_pipeline.app_4_advanced_features import resolve_email_locale
-from pesaguard_backend_pipeline.email_service import EmailService
-from pesaguard_backend_pipeline.tenant_settings import TenantSettingsStore
+from app_4_advanced_features import resolve_email_locale
+from email_service import EmailService
+from tenant_settings import TenantSettingsStore
 
 
 ROOT = Path(__file__).resolve().parents[1]

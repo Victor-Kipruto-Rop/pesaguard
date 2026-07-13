@@ -1,3 +1,5 @@
+import sys
+sys.path.insert(0, 'pesaguard_backend_pipeline')
 import phase_manager
 
 

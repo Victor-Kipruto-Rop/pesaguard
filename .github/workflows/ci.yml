@@ -19,7 +19,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r pesaguard_backend_pipeline/requirements_3.txt
       - name: Run tests
-        run: pytest pesaguard_backend_pipeline/tests/ -q --tb=short
+        run: pytest -q --tb=short
       - name: Run e2e tests (if setup available)
         run: |
           if [ -f frontend/package.json ]; then
