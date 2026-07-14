@@ -17,7 +17,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r pesaguard_backend_pipeline/requirements_3.txt
       - name: Run backend tests
-        run: pytest pesaguard_backend_pipeline/tests/ -q --tb=short
+        env:
+          PYTHONPATH: .
+        run: pytest tests/ pesaguard_backend_pipeline/tests/ -q --tb=short
       - name: Deploy staging placeholder
         run: echo "Deploy to staging environment"
       - name: Notify deployment

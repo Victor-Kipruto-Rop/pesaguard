@@ -14,7 +14,17 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Build backend Docker image
-        run: docker build . --file Dockerfile --tag pesaguard-backend:$(date +%s)
+        run: |
+          docker build . --file docker/Dockerfile \
+            --tag pesaguard-backend:latest \
+            --tag pesaguard-backend:${{ github.sha }}
       - name: Build frontend Docker image
-        run: docker build . --file Dockerfile.frontend --tag pesaguard-frontend:$(date +%s)
+        run: |
+          docker build . --file docker/Dockerfile.frontend \
+            --tag pesaguard-frontend:latest \
+            --tag pesaguard-frontend:${{ github.sha }}
+        continue-on-error: true
+      - name: Scan backend image for vulnerabilities
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image --severity HIGH,CRITICAL pesaguard-backend:latest
         continue-on-error: true
