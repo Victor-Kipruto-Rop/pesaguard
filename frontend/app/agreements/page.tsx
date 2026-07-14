@@ -48,6 +48,7 @@ export default function AgreementsPage() {
 
       <section className="panel">
         <h2>Agreement pack</h2>
+        <p className="muted">These drafts reflect the current pilot scope, including localized alerting and Kenya-specific delivery requirements for customer notifications.</p>
         <div className="grid">
           {agreements.map((item) => (
             <article key={item.title} className="assetCard">

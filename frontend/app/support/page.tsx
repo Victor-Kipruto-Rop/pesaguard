@@ -26,7 +26,7 @@ export default function SupportPage() {
           <div className="heroBadge">Premium support readiness</div>
           <p className="eyebrow">Pilot Support</p>
           <h1>Fast, expert support for every rollout stage</h1>
-          <p className="muted">Use the pilot support workspace to raise incidents, review status updates, and coordinate onboarding with the PesaGuard team.</p>
+          <p className="muted">Use the pilot support workspace to raise incidents, review status updates, and coordinate onboarding with the PesaGuard team. We also validate localized alerting and customer-facing messaging during pilot scope reviews.</p>
           <div className="heroActions">
             <a className="primaryBtn" href="mailto:pilot-support@pesaguard.example">Email support</a>
             <a className="secondaryBtn" href="/status">View live status</a>

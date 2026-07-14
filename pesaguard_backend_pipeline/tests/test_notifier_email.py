@@ -64,3 +64,52 @@ def test_send_sms_alert_uses_swahili_template(monkeypatch):
 
     assert captured['recipient'] == '254700000000'
     assert 'PesaGuard imegundua tofauti' in captured['message']
+
+
+def test_format_alert_text_uses_swahili_template_and_kenyan_formatting():
+    discrepancy = {
+        'trans_id': 'T123',
+        'severity': 'critical',
+        'status': 'missing_payment',
+        'anomalies': ['missing_payment'],
+        'checked_at': '2026-07-04T00:00:00Z',
+        'amount': 1000.5,
+    }
+
+    text = notifier._format_alert_text(discrepancy, locale='sw-KE')
+    assert 'PesaGuard imegundua tofauti' in text
+    assert 'Muamala' in text
+    assert 'Kiasi: KES 1,000.50' in text
+    assert 'Iligunduliwa saa' in text
+
+
+def test_format_alert_text_normalizes_unknown_locale_to_english():
+    discrepancy = {
+        'trans_id': 'T123',
+        'severity': 'critical',
+        'status': 'missing_payment',
+        'anomalies': ['missing_payment'],
+        'checked_at': '2026-07-04T00:00:00Z',
+        'amount': 1000.5,
+    }
+
+    text = notifier._format_alert_text(discrepancy, locale='EN-US')
+    assert 'PesaGuard discrepancy detected' in text
+    assert 'Transaction' in text
+    assert 'Amount: KES 1,000.50' in text
+    assert 'Detected at' in text
+
+
+def test_alerting_service_resolves_locale_from_tenant_settings(monkeypatch):
+    from alerting_service import AlertingService
+
+    service = AlertingService(session=None, tenant_settings={
+        'default': {'preferred_locale': 'en'},
+        'tenant-a': {
+            'preferred_locale': 'sw',
+            'user_locale_overrides': {'user-1': 'en'},
+        },
+    })
+
+    assert service._resolve_locale({'tenant_id': 'tenant-a'}) == 'sw'
+    assert service._resolve_locale({'tenant_id': 'tenant-a', 'user_id': 'user-1'}) == 'en'

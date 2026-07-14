@@ -98,3 +98,13 @@ def test_nested_settings_updates_merge_without_losing_existing_values(tmp_path):
     saved_settings = store.get("tenant-x")
     assert saved_settings["thresholds"]["warning"] == 2000
     assert saved_settings["thresholds"]["critical"] == 6000
+
+
+def test_locale_updates_are_normalized_on_persist(tmp_path):
+    settings_path = tmp_path / "tenant-settings.json"
+    store = TenantSettingsStore(str(settings_path))
+
+    updated = store.update("tenant-x", {"preferred_locale": "EN-US"})
+
+    assert updated["preferred_locale"] == "en"
+    assert store.resolve_locale("tenant-x") == "en"

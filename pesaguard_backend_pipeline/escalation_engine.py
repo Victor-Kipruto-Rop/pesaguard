@@ -1,11 +1,15 @@
 """Custom escalation rules engine for per-tenant escalation workflows."""
 
 import logging
+import os
 import uuid
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone, timedelta
+import requests
 from sqlalchemy.orm import Session
 from models import EscalationRule, Discrepancy, OnCallRotation
+from email_service import EmailService
+from tenant_settings import TenantSettingsStore
 
 logger = logging.getLogger("pesaguard.escalation")
 
@@ -24,6 +28,8 @@ class EscalationEngine:
 
     def __init__(self, session: Session):
         self.session = session
+        self.email_service = None
+        self.settings_store = TenantSettingsStore(os.getenv("TENANT_SETTINGS_FILE", "tenant_settings.json"))
 
     def create_rule(
         self,
@@ -190,11 +196,32 @@ class EscalationEngine:
         incident: Discrepancy,
     ) -> Dict[str, Any]:
         """Send notification to operator."""
-        # This would integrate with email/SMS/webhook
+        recipient = rule.get("target") or incident.assignee
+        if not recipient:
+            return {"status": "notification_failed", "reason": "no_recipient"}
+
+        if self.email_service is None:
+            self.email_service = EmailService()
+
+        locale = self.settings_store.resolve_locale(incident.tenant_id)
+
+        self.email_service.send_escalation_notification(
+            self.session,
+            incident.tenant_id,
+            recipient,
+            {
+                "anomaly_type": incident.anomaly_type,
+                "severity": incident.severity,
+                "amount": incident.details or "N/A",
+                "trans_id": incident.trans_id,
+                "detected_at": incident.detected_at.isoformat() if incident.detected_at else None,
+            },
+            locale=locale,
+        )
         return {
             "status": "notification_sent",
             "rule": rule["name"],
-            "target": rule.get("target"),
+            "target": recipient,
         }
 
     def _trigger_webhook(
@@ -207,12 +234,32 @@ class EscalationEngine:
         if not webhook_url:
             return {"status": "webhook_error", "reason": "no_webhook_url"}
 
-        # Webhook would be triggered here
-        return {
-            "status": "webhook_triggered",
-            "url": webhook_url,
-            "rule": rule["name"],
+        payload = {
+            "event_type": "escalation",
+            "incident_id": incident.id,
+            "trans_id": incident.trans_id,
+            "severity": incident.severity,
+            "anomaly_type": incident.anomaly_type,
+            "assigned_to": incident.assignee,
+            "rule_applied": rule["name"],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        try:
+            response = requests.post(
+                webhook_url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=10,
+            )
+            return {
+                "status": "webhook_triggered",
+                "url": webhook_url,
+                "rule": rule["name"],
+                "response_status": response.status_code,
+            }
+        except Exception as exc:
+            logger.error("Webhook delivery failed for rule %s: %s", rule["name"], exc)
+            return {"status": "webhook_error", "reason": str(exc)}
 
     def _get_on_call_operator(
         self,

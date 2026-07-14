@@ -2,6 +2,7 @@
 
 import type { ReactNode } from 'react';
 import { usePathname } from 'next/navigation';
+import { useLocale } from '../lib/i18n';
 
 function IconBase({ children }: { children: ReactNode }) {
   return (
@@ -114,6 +115,7 @@ function SettingsIcon() {
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const { t } = useLocale();
 
   const isActive = (path: string) => pathname === path;
 
@@ -123,42 +125,42 @@ export default function Sidebar() {
         <nav className="sidebarNav">
           <a href="/" className={`navItem ${isActive('/') ? 'active' : ''}`}>
             <OperationsIcon />
-            <span>Operations</span>
+            <span>{t('sidebar.operations')}</span>
           </a>
           <a href="/insights" className={`navItem ${isActive('/insights') ? 'active' : ''}`}>
             <InsightsIcon />
-            <span>Insights & Analytics</span>
+            <span>{t('sidebar.insights')}</span>
           </a>
           <a href="/tools" className={`navItem ${isActive('/tools') ? 'active' : ''}`}>
             <ToolsIcon />
-            <span>Advanced Tools</span>
+            <span>{t('sidebar.tools')}</span>
           </a>
           <a href="/status" className={`navItem ${isActive('/status') ? 'active' : ''}`}>
             <StatusIcon />
-            <span>Status</span>
+            <span>{t('sidebar.status')}</span>
           </a>
           <a href="/support" className={`navItem ${isActive('/support') ? 'active' : ''}`}>
             <SupportIcon />
-            <span>Support</span>
+            <span>{t('sidebar.support')}</span>
           </a>
           <a href="/agreements" className={`navItem ${isActive('/agreements') ? 'active' : ''}`}>
             <AgreementsIcon />
-            <span>Agreements</span>
+            <span>{t('sidebar.agreements')}</span>
           </a>
           <a href="/policies" className={`navItem ${isActive('/policies') ? 'active' : ''}`}>
             <PoliciesIcon />
-            <span>Policies</span>
+            <span>{t('sidebar.policies')}</span>
           </a>
           <a href="/settings" className={`navItem ${isActive('/settings') ? 'active' : ''}`}>
             <SettingsIcon />
-            <span>Settings</span>
+            <span>{t('sidebar.settings')}</span>
           </a>
         </nav>
       </div>
       <div className="sidebarFooter">
         <div className="statusIndicator">
           <div className="dot"></div>
-          <span>System nominal</span>
+          <span>{t('sidebar.systemNominal')}</span>
         </div>
       </div>
     </div>

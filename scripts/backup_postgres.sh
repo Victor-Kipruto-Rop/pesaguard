@@ -11,6 +11,10 @@ cd "$ROOT_DIR"
 : "${POSTGRES_PASSWORD:=pesaguard}"
 : "${BACKUP_DIR:=/tmp/pesaguard-backups}"
 : "${S3_BUCKET:=}"
+: "${BACKUP_REGION:=${DEPLOYMENT_REGION:-ke-1}}"
+
+# Backups must stay in BACKUP_REGION per DATA_RESIDENCY.md (RES-4).
+# When using S3, ensure the bucket resides in the same jurisdiction as primary data.
 
 mkdir -p "$BACKUP_DIR"
 TS="$(date +%F-%H%M%S)"

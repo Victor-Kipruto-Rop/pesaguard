@@ -1,0 +1,47 @@
+version: '3.9'
+
+# Data residency (Addendum III): keep DEPLOYMENT_REGION, BACKUP_REGION, and LOG_REGION
+# consistent with DATA_RESIDENCY.md. Pilot default is ke-1 (Kenya / East Africa).
+# Backups inherit BACKUP_REGION — do not store off-shore without documented legal basis.
+
+x-residency-env: &residency-env
+  DEPLOYMENT_REGION: ${DEPLOYMENT_REGION:-ke-1}
+  BACKUP_REGION: ${BACKUP_REGION:-ke-1}
+  LOG_REGION: ${LOG_REGION:-ke-1}
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      <<: *residency-env
+      POSTGRES_DB: pesaguard
+      POSTGRES_USER: pesaguard
+      POSTGRES_PASSWORD: pesaguard
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  kafka:
+    image: bitnami/kafka:3.7
+    environment:
+      <<: *residency-env
+      KAFKA_CFG_NODE_ID: 1
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      ALLOW_PLAINTEXT_LISTENER: yes
+    ports:
+      - "9092:9092"
+
+  redis:
+    image: redis:7
+    environment:
+      <<: *residency-env
+    ports:
+      - "6379:6379"
+
+volumes:
+  pgdata:

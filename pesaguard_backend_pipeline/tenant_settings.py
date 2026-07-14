@@ -34,10 +34,30 @@ class TenantSettingsStore:
         with open(self.path, "w", encoding="utf-8") as handle:
             json.dump(self._data, handle, indent=2)
 
+    def _normalize_setting_value(self, key: str, value: Any) -> Any:
+        if key in {"preferred_locale", "default_locale"} and isinstance(value, str):
+            return normalise_locale(value)
+        if key == "user_locale_overrides" and isinstance(value, dict):
+            return {
+                user_id: (normalise_locale(str(locale)) if isinstance(locale, str) else locale)
+                for user_id, locale in value.items()
+            }
+        if isinstance(value, dict):
+            return {nested_key: self._normalize_setting_value(nested_key, nested_value) for nested_key, nested_value in value.items()}
+        return value
+
+    def _normalize_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {key: self._normalize_setting_value(key, value) for key, value in payload.items()}
+
     def get(self, tenant_id: str) -> Dict[str, Any]:
         default_settings = self._data.get("default", {})
         tenant_settings = self._data.get(tenant_id, {})
-        return {**default_settings, **tenant_settings}
+        merged = {**default_settings, **tenant_settings}
+        if isinstance(merged.get("preferred_locale"), str):
+            merged["preferred_locale"] = normalise_locale(merged["preferred_locale"])
+        if isinstance(merged.get("default_locale"), str):
+            merged["default_locale"] = normalise_locale(merged["default_locale"])
+        return merged
 
     def resolve_locale(self, tenant_id: str, user_id: Optional[str] = None, fallback_locale: str = "en") -> str:
         tenant_settings = self.get(tenant_id)
@@ -65,11 +85,12 @@ class TenantSettingsStore:
     def update(self, tenant_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         existing = self._data.get(tenant_id, {})
         merged = dict(existing)
-        for key, value in payload.items():
+        normalized_payload = self._normalize_payload(payload)
+        for key, value in normalized_payload.items():
             if isinstance(value, dict) and isinstance(existing.get(key), dict):
                 merged[key] = {**existing[key], **value}
             else:
                 merged[key] = value
         self._data[tenant_id] = merged
         self.save()
-        return self._data[tenant_id]
+        return self.get(tenant_id)

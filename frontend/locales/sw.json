@@ -7,6 +7,42 @@
     "policies": "Sera",
     "settings": "Mipangilio"
   },
+  "sidebar": {
+    "operations": "Uendeshaji",
+    "insights": "Maarifa na uchambuzi",
+    "tools": "Zana za hali ya juu",
+    "status": "Hali",
+    "support": "Msaada",
+    "agreements": "Mikataba",
+    "policies": "Sera",
+    "settings": "Mipangilio",
+    "systemNominal": "Mfumo uko sawa"
+  },
+  "brand": {
+    "name": "PesaGuard",
+    "subtitle": "Kituo cha amri cha upatanishi wa hali ya juu"
+  },
+  "topbar": {
+    "liveOps": "Uendeshaji wa moja kwa moja"
+  },
+  "sidebar": {
+    "operations": "Uendeshaji",
+    "insights": "Maarifa na uchambuzi",
+    "tools": "Zana za hali ya juu",
+    "status": "Hali",
+    "support": "Msaada",
+    "agreements": "Mikataba",
+    "policies": "Sera",
+    "settings": "Mipangilio",
+    "systemNominal": "Mfumo uko sawa"
+  },
+  "brand": {
+    "name": "PesaGuard",
+    "subtitle": "Kituo cha amri cha upatanishi wa hali ya juu"
+  },
+  "topbar": {
+    "liveOps": "Uendeshaji wa moja kwa moja"
+  },
   "home": {
     "heroTitle": "Uendeshaji wa upatanishi wa kisasa kwa kila tenant",
     "heroSubtitle": "Fuata makosa, utatue matukio ya dharura, na uhifadhi mtiririko wa malipo ukitumia uaminifu wa wakati halisi.",

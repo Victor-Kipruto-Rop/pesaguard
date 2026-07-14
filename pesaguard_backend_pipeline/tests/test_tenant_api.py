@@ -55,3 +55,13 @@ def test_public_locale_endpoint_persists_preference(client):
     public_resp = client.get('/tenant/current')
     assert public_resp.status_code == 200
     assert public_resp.get_json().get('preferred_locale') == 'sw'
+
+
+def test_public_locale_endpoint_normalizes_locale_values(client):
+    resp = client.post('/tenant/current/locale', json={'preferred_locale': 'EN-US'})
+    assert resp.status_code == 200
+    assert resp.get_json().get('preferred_locale') == 'en'
+
+    public_resp = client.get('/tenant/current')
+    assert public_resp.status_code == 200
+    assert public_resp.get_json().get('preferred_locale') == 'en'

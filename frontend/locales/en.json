@@ -7,6 +7,42 @@
     "policies": "Policies",
     "settings": "Settings"
   },
+  "sidebar": {
+    "operations": "Operations",
+    "insights": "Insights & Analytics",
+    "tools": "Advanced Tools",
+    "status": "Status",
+    "support": "Support",
+    "agreements": "Agreements",
+    "policies": "Policies",
+    "settings": "Settings",
+    "systemNominal": "System nominal"
+  },
+  "brand": {
+    "name": "PesaGuard",
+    "subtitle": "Premium reconciliation command center"
+  },
+  "topbar": {
+    "liveOps": "Live ops"
+  },
+  "sidebar": {
+    "operations": "Operations",
+    "insights": "Insights & Analytics",
+    "tools": "Advanced Tools",
+    "status": "Status",
+    "support": "Support",
+    "agreements": "Agreements",
+    "policies": "Policies",
+    "settings": "Settings",
+    "systemNominal": "System nominal"
+  },
+  "brand": {
+    "name": "PesaGuard",
+    "subtitle": "Premium reconciliation command center"
+  },
+  "topbar": {
+    "liveOps": "Live ops"
+  },
   "home": {
     "heroTitle": "Modern reconciliation operations for every tenant",
     "heroSubtitle": "Monitor exceptions, resolve incidents, and keep payment flows trusted in real time.",

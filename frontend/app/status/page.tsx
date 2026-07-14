@@ -27,7 +27,7 @@ export default function StatusPage() {
           <div className="heroBadge">Premium readiness pack</div>
           <p className="eyebrow">Pilot Service Status</p>
           <h1>Reliable, transparent operations for every pilot customer</h1>
-          <p className="muted">PesaGuard is operating normally, with service monitoring, backup automation, retention enforcement, and incident response controls active across the platform.</p>
+          <p className="muted">PesaGuard is operating normally, with service monitoring, backup automation, retention enforcement, and incident response controls active across the platform. Tenant locale preferences are persisted and alert text is localized for pilot customers.</p>
           <div className="heroActions">
             <a className="primaryBtn" href="/support">Open support</a>
             <a className="secondaryBtn" href="/agreements">Review pilot terms</a>

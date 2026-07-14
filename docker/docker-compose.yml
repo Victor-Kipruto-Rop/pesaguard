@@ -1,5 +1,14 @@
 version: "3.8"
 
+# Data residency (Addendum III): set DEPLOYMENT_REGION, BACKUP_REGION, and LOG_REGION
+# to the chosen hosting jurisdiction before go-live. See DATA_RESIDENCY.md.
+# Pilot default: ke-1 (Kenya / East Africa). Backups must stay in BACKUP_REGION.
+
+x-residency-env: &residency-env
+  DEPLOYMENT_REGION: ${DEPLOYMENT_REGION:-ke-1}
+  BACKUP_REGION: ${BACKUP_REGION:-ke-1}
+  LOG_REGION: ${LOG_REGION:-ke-1}
+
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.6.0
@@ -13,6 +22,7 @@ services:
     ports:
       - "9092:9092"
     environment:
+      <<: *residency-env
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
@@ -25,6 +35,7 @@ services:
   postgres:
     image: postgres:16
     environment:
+      <<: *residency-env
       POSTGRES_USER: pesaguard
       POSTGRES_PASSWORD: pesaguard
       POSTGRES_DB: pesaguard
@@ -39,6 +50,8 @@ services:
       - "5000:5000"
     env_file:
       - ../.env
+    environment:
+      <<: *residency-env
     depends_on:
       - kafka
 
@@ -48,6 +61,8 @@ services:
       dockerfile: streaming/flink_jobs/Dockerfile
     env_file:
       - ../.env
+    environment:
+      <<: *residency-env
     depends_on:
       - kafka
       - postgres
@@ -60,6 +75,8 @@ services:
       - "5001:5001"
     env_file:
       - ../.env
+    environment:
+      <<: *residency-env
     depends_on:
       - postgres
 

@@ -108,6 +108,7 @@ def _format_alert_text(discrepancy: dict, locale: str = "en") -> str:
 
 
 def _get_template(locale_code: str) -> dict[str, str]:
+    """Return localized alert field labels. Reference copies: alerting/templates/sms_template_sw.md, slack_template_sw.md."""
     if locale_code == "sw":
         return {
             "title": "PesaGuard imegundua tofauti",
