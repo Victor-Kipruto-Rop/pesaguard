@@ -21,7 +21,7 @@ from email_service import EmailService
 from escalation_engine import EscalationEngine
 from on_call_service import OnCallService
 from search_engine import AdvancedSearchEngine
-from models import Base, Discrepancy
+from models import Base, Discrepancy, Report, DeadLetter
 from tenant_settings import TenantSettingsStore
 
 configure_logging = lambda: None  # Import from logging_utils if available
@@ -527,6 +527,84 @@ def structured_search():
             offset=request.args.get("offset", 0, type=int),
         )
         return jsonify(result), 200
+    finally:
+        session.close()
+
+
+# Public/customer-facing endpoints for tenants to pull their own data
+@app.route("/public/customers/<tenant_id>/reconciliations", methods=["GET"])
+@require_auth("read:discrepancies")
+@require_tenant_access()
+def public_get_reconciliations(tenant_id: str):
+    """Return recent reconciliation outcomes for the tenant."""
+    limit = request.args.get("limit", 50, type=int)
+    offset = request.args.get("offset", 0, type=int)
+    session = SessionLocal()
+
+    try:
+        q = (
+            session.query(Discrepancy)
+            .filter(Discrepancy.tenant_id == tenant_id)
+            .order_by(Discrepancy.detected_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        rows = q.all()
+        return jsonify({
+            "tenant_id": tenant_id,
+            "count": len(rows),
+            "reconciliations": [
+                {
+                    "id": r.id,
+                    "trans_id": r.trans_id,
+                    "anomaly_type": r.anomaly_type,
+                    "status": r.status,
+                    "severity": r.severity,
+                    "details": r.details,
+                    "detected_at": r.detected_at.isoformat() if r.detected_at else None,
+                    "resolved": bool(r.resolved),
+                }
+                for r in rows
+            ],
+        }), 200
+    finally:
+        session.close()
+
+
+@app.route("/public/customers/<tenant_id>/reports", methods=["GET"])
+@require_auth("read:analytics")
+@require_tenant_access()
+def public_get_reports(tenant_id: str):
+    """Return generated reports for the tenant (daily/weekly)."""
+    limit = request.args.get("limit", 50, type=int)
+    offset = request.args.get("offset", 0, type=int)
+    session = SessionLocal()
+
+    try:
+        q = (
+            session.query(Report)
+            .filter(Report.tenant_id == tenant_id)
+            .order_by(Report.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        rows = q.all()
+        return jsonify({
+            "tenant_id": tenant_id,
+            "count": len(rows),
+            "reports": [
+                {
+                    "id": r.id,
+                    "report_type": r.report_type,
+                    "period_start": r.period_start.isoformat() if r.period_start else None,
+                    "period_end": r.period_end.isoformat() if r.period_end else None,
+                    "status": r.status,
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "content": r.content,
+                }
+                for r in rows
+            ],
+        }), 200
     finally:
         session.close()
 

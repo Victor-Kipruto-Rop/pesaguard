@@ -127,3 +127,35 @@ class EmailNotification(Base):
     error_message = Column(Text, nullable=True)
     sent_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class DeadLetter(Base):
+    """Store malformed or rejected webhook payloads for later inspection/replay."""
+
+    __tablename__ = "dead_letters"
+
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, nullable=True)
+    reason = Column(String, nullable=False)  # e.g., validation_failed, invalid_json
+    payload = Column(JSON, nullable=True)
+    error_detail = Column(Text, nullable=True)
+    attempts = Column(Integer, default=0)
+    processed = Column(Boolean, default=False)
+    processed_at = Column(DateTime, nullable=True)
+    received_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+class Report(Base):
+    """Scheduled/adhoc generated reports (daily, weekly) for tenants."""
+
+    __tablename__ = "reports"
+
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, nullable=False)
+    report_type = Column(String, nullable=False)  # "daily", "weekly", "monthly"
+    period_start = Column(DateTime, nullable=False)
+    period_end = Column(DateTime, nullable=False)
+    content = Column(JSON, nullable=True)
+    status = Column(String, nullable=False, default="generated")  # generated, delivered
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    delivered_at = Column(DateTime, nullable=True)

@@ -86,7 +86,8 @@ def run():
 
         connector = connector_registry.get_connector(TENANT_ID)
         internal_records = connector.fetch_recent_records(since_minutes=WINDOW_MINUTES) if connector else []
-        evaluation = evaluate_transaction(event, internal_records, seen_trans_ids, window_minutes=WINDOW_MINUTES)
+        tenant_cfg = settings_store.get(TENANT_ID)
+        evaluation = evaluate_transaction(event, internal_records, seen_trans_ids, window_minutes=WINDOW_MINUTES, tenant_settings=tenant_cfg)
         evaluation["tenant_id"] = TENANT_ID
         evaluation["event"] = event
         evaluation["checked_at"] = datetime.now(timezone.utc).isoformat()

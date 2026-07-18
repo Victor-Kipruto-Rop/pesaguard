@@ -6,7 +6,7 @@ validates payload, and pushes to Kafka for downstream reconciliation.
 import logging
 import os
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response
 from werkzeug.exceptions import HTTPException
 
 from security_helpers import (
@@ -21,8 +21,10 @@ from event_store import EventStore
 from health import build_health_payload
 from logging_utils import configure_logging
 from validators import validate_daraja_payload
+from background_tasks import enqueue_transaction_event
 from producer import publish_transaction_event
 from tenant_settings import TenantSettingsStore
+from metrics import build_metrics_payload
 from flask import abort
 
 configure_logging()
@@ -92,6 +94,26 @@ def public_get_current_tenant():
     return jsonify(public), 200
 
 
+@app.route("/tenant/current/locale", methods=["GET"])
+def public_get_current_locale():
+    """Return tenant default, optional user override, and effective locale."""
+    tenant_id = os.getenv("TENANT_ID", "default")
+    user_id = request.args.get("user_id")
+    settings = tenant_store.get(tenant_id)
+    user_locale = None
+    if user_id:
+        overrides = settings.get("user_locale_overrides") or {}
+        if isinstance(overrides, dict):
+            user_locale = overrides.get(user_id) or overrides.get(str(user_id))
+    effective = tenant_store.resolve_locale(tenant_id, user_id)
+    return jsonify({
+        "tenant_id": tenant_id,
+        "preferred_locale": settings.get("preferred_locale"),
+        "user_locale": user_locale,
+        "effective_locale": effective,
+    }), 200
+
+
 @app.route("/tenant/current/locale", methods=["POST"])
 def public_set_current_tenant_locale():
     """Persist the current tenant's preferred locale through the public tenant endpoint."""
@@ -103,6 +125,32 @@ def public_set_current_tenant_locale():
     tenant_id = os.getenv("TENANT_ID", "default")
     updated = tenant_store.update(tenant_id, {"preferred_locale": preferred})
     return jsonify({"tenant_id": tenant_id, "preferred_locale": updated.get("preferred_locale")}), 200
+
+
+@app.route("/tenant/current/user-locale", methods=["POST"])
+def public_set_user_locale():
+    """Persist a per-user locale override for the current tenant."""
+    payload = request.get_json(silent=True) or {}
+    user_id = payload.get("user_id")
+    preferred = payload.get("preferred_locale")
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+
+    tenant_id = os.getenv("TENANT_ID", "default")
+    existing = tenant_store.get(tenant_id)
+    overrides = dict(existing.get("user_locale_overrides") or {})
+    if preferred is None or preferred == "":
+        overrides.pop(str(user_id), None)
+    else:
+        overrides[str(user_id)] = preferred
+    tenant_store.update(tenant_id, {"user_locale_overrides": overrides})
+    effective = tenant_store.resolve_locale(tenant_id, str(user_id))
+    return jsonify({
+        "tenant_id": tenant_id,
+        "user_id": str(user_id),
+        "user_locale": overrides.get(str(user_id)),
+        "effective_locale": effective,
+    }), 200
 
 
 @app.errorhandler(413)
@@ -147,9 +195,16 @@ def enforce_webhook_security():
             return response
 
 
+@app.route("/metrics", methods=["GET"])
+def metrics():
+    return Response(build_metrics_payload(), mimetype="text/plain; version=0.0.4")
+
+
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify(build_health_payload()), 200
+    payload = build_health_payload()
+    status_code = 200 if payload.get("status") == "ok" else 503
+    return jsonify(payload), status_code
 
 
 @app.route("/webhook/mpesa/confirmation", methods=["POST"])
@@ -162,6 +217,11 @@ def mpesa_confirmation():
 
     if not payload:
         logger.warning("Empty or invalid JSON payload received")
+        try:
+            # persist malformed payload for later inspection
+            event_store.write_dead_letter(None, reason="invalid_json", error_detail="empty_or_invalid_json", tenant_id=os.getenv("TENANT_ID", "default"))
+        except Exception:
+            logger.debug("Failed to persist dead-letter for invalid JSON payload", exc_info=True)
         return jsonify({"ResultCode": 1, "ResultDesc": "Invalid payload"}), 400
 
     if not is_payload_within_limit(request):
@@ -170,6 +230,10 @@ def mpesa_confirmation():
     is_valid, error = validate_daraja_payload(payload)
     if not is_valid:
         logger.warning("Payload validation failed: %s", error)
+        try:
+            event_store.write_dead_letter(payload, reason="validation_failed", error_detail=str(error), tenant_id=os.getenv("TENANT_ID", "default"))
+        except Exception:
+            logger.debug("Failed to persist dead-letter for validation failure", exc_info=True)
         return jsonify({"ResultCode": 1, "ResultDesc": sanitize_error_message(error)}), 400
 
     trans_id = payload.get("TransID")
@@ -177,9 +241,25 @@ def mpesa_confirmation():
         logger.info("Duplicate transaction already stored", extra={"tenant_id": os.getenv("TENANT_ID", "default"), "trans_id": trans_id})
         return jsonify({"ResultCode": 0, "ResultDesc": "Accepted (duplicate ignored)"}), 200
 
+    # [Task Requirement] Redis caching for duplicate lookups to avoid DB bottleneck
+    try:
+        import redis
+        redis_conn = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), socket_connect_timeout=2)
+        cache_key = f"processed_trans_id:{trans_id}"
+        if redis_conn.get(cache_key):
+            logger.info("Duplicate transaction already stored (detected via Redis cache)", extra={"tenant_id": os.getenv("TENANT_ID", "default"), "trans_id": trans_id})
+            return jsonify({"ResultCode": 0, "ResultDesc": "Accepted (duplicate ignored)"}), 200
+        # set cache key with a 1-day TTL
+        redis_conn.set(cache_key, "1", ex=86400)
+    except Exception as e:
+        logger.warning(f"Failed to check duplicate-check cache: {e}. Falling back to DB check.")
+
     try:
         event_store.mark_processed(payload)
-        publish_transaction_event(KAFKA_TOPIC, payload)
+        # [Task Requirement] Background job queue (Celery/RQ) once webhook volume causes delays
+        queued = enqueue_transaction_event(KAFKA_TOPIC, payload)
+        if queued.get("status") != "queued":
+            publish_transaction_event(KAFKA_TOPIC, payload)
     except Exception:  # noqa: BLE001
         logger.exception("Failed to publish event to Kafka", extra={"tenant_id": os.getenv("TENANT_ID", "default"), "trans_id": trans_id})
         # Still return 200 to M-Pesa to prevent retries storming us;
