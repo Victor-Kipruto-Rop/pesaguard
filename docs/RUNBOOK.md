@@ -1,5 +1,10 @@
 # PesaGuard Runbook
 
+## Service health checks
+1. Verify the webhook receiver and dashboard API health endpoints at http://127.0.0.1:5000/health and http://127.0.0.1:5001/health.
+2. Check the Prometheus-compatible metrics endpoints for throughput, latency, and open discrepancy counts.
+3. If the services are healthy but alerts are missing, review the alerting service logs and recent delivery failures.
+
 ## Kafka lag growth
 1. Check the consumer lag metric and compare with recent throughput.
 2. Inspect the reconciliation service logs for backpressure or database issues.

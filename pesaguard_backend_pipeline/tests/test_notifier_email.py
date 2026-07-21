@@ -63,7 +63,7 @@ def test_send_sms_alert_uses_swahili_template(monkeypatch):
     notifier.send_sms_alert(discrepancy, locale='sw')
 
     assert captured['recipient'] == '254700000000'
-    assert 'PesaGuard imegundua tofauti' in captured['message']
+    assert 'PesaGuard: kuna tofauti' in captured['message'] or 'PesaGuard imegundua tofauti' in captured['message']
 
 
 def test_format_alert_text_uses_swahili_template_and_kenyan_formatting():

@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="900" viewBox="0 0 1400 900" font-family="Arial, Helvetica, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#4B5563"/>
+    </marker>
+  </defs>
+
+  <rect width="1400" height="900" fill="#0F172A"/>
+
+  <text x="700" y="45" text-anchor="middle" fill="#F8FAFC" font-size="30" font-weight="bold">PesaGuard — Real-Time M-Pesa Reconciliation &amp; Anomaly Detection</text>
+  <text x="700" y="72" text-anchor="middle" fill="#94A3B8" font-size="15">System Architecture Overview</text>
+
+  <!-- Sources -->
+  <rect x="40" y="120" width="220" height="140" rx="10" fill="#1E293B" stroke="#334155"/>
+  <text x="150" y="145" text-anchor="middle" fill="#38BDF8" font-size="15" font-weight="bold">Data Sources</text>
+  <text x="150" y="172" text-anchor="middle" fill="#E2E8F0" font-size="13">Safaricom Daraja API</text>
+  <text x="150" y="194" text-anchor="middle" fill="#E2E8F0" font-size="13">(STK Push, C2B, B2C)</text>
+  <text x="150" y="218" text-anchor="middle" fill="#E2E8F0" font-size="13">Internal Ledger / POS</text>
+  <text x="150" y="240" text-anchor="middle" fill="#E2E8F0" font-size="13">Accounting Systems (CSV/API)</text>
+
+  <!-- Ingestion -->
+  <rect x="330" y="120" width="220" height="140" rx="10" fill="#1E293B" stroke="#334155"/>
+  <text x="440" y="145" text-anchor="middle" fill="#38BDF8" font-size="15" font-weight="bold">Ingestion Layer</text>
+  <text x="440" y="172" text-anchor="middle" fill="#E2E8F0" font-size="13">Webhook Receivers</text>
+  <text x="440" y="194" text-anchor="middle" fill="#E2E8F0" font-size="13">Apache Kafka</text>
+  <text x="440" y="216" text-anchor="middle" fill="#E2E8F0" font-size="13">(transaction topics)</text>
+  <text x="440" y="238" text-anchor="middle" fill="#E2E8F0" font-size="13">Schema Validation</text>
+
+  <!-- Stream Processing -->
+  <rect x="620" y="120" width="220" height="140" rx="10" fill="#1E293B" stroke="#334155"/>
+  <text x="730" y="145" text-anchor="middle" fill="#38BDF8" font-size="15" font-weight="bold">Stream Processing</text>
+  <text x="730" y="172" text-anchor="middle" fill="#E2E8F0" font-size="13">Apache PyFlink</text>
+  <text x="730" y="194" text-anchor="middle" fill="#E2E8F0" font-size="13">Real-time Reconciliation</text>
+  <text x="730" y="216" text-anchor="middle" fill="#E2E8F0" font-size="13">Anomaly Detection Rules</text>
+  <text x="730" y="238" text-anchor="middle" fill="#E2E8F0" font-size="13">/ ML Scoring</text>
+
+  <!-- Alerting -->
+  <rect x="910" y="120" width="220" height="140" rx="10" fill="#1E293B" stroke="#334155"/>
+  <text x="1020" y="145" text-anchor="middle" fill="#38BDF8" font-size="15" font-weight="bold">Alerting &amp; Actions</text>
+  <text x="1020" y="172" text-anchor="middle" fill="#E2E8F0" font-size="13">Mismatch Flags</text>
+  <text x="1020" y="194" text-anchor="middle" fill="#E2E8F0" font-size="13">Fraud/Anomaly Alerts</text>
+  <text x="1020" y="216" text-anchor="middle" fill="#E2E8F0" font-size="13">SMS / Email / Webhook</text>
+  <text x="1020" y="238" text-anchor="middle" fill="#E2E8F0" font-size="13">Notifications</text>
+
+  <!-- Storage layer -->
+  <rect x="330" y="320" width="220" height="140" rx="10" fill="#1E293B" stroke="#334155"/>
+  <text x="440" y="345" text-anchor="middle" fill="#34D399" font-size="15" font-weight="bold">Storage Layer</text>
+  <text x="440" y="372" text-anchor="middle" fill="#E2E8F0" font-size="13">PostgreSQL</text>
+  <text x="440" y="394" text-anchor="middle" fill="#E2E8F0" font-size="13">(transactions, ledgers,</text>
+  <text x="440" y="414" text-anchor="middle" fill="#E2E8F0" font-size="13">reconciliation results)</text>
+  <text x="440" y="436" text-anchor="middle" fill="#E2E8F0" font-size="13">Object Storage (raw events)</text>
+
+  <!-- Transformation -->
+  <rect x="620" y="320" width="220" height="140" rx="10" fill="#1E293B" stroke="#334155"/>
+  <text x="730" y="345" text-anchor="middle" fill="#34D399" font-size="15" font-weight="bold">Transformation</text>
+  <text x="730" y="372" text-anchor="middle" fill="#E2E8F0" font-size="13">dbt Models</text>
+  <text x="730" y="394" text-anchor="middle" fill="#E2E8F0" font-size="13">Aggregations &amp; Marts</text>
+  <text x="730" y="416" text-anchor="middle" fill="#E2E8F0" font-size="13">Reporting Views</text>
+
+  <!-- Orchestration -->
+  <rect x="910" y="320" width="220" height="140" rx="10" fill="#1E293B" stroke="#334155"/>
+  <text x="1020" y="345" text-anchor="middle" fill="#34D399" font-size="15" font-weight="bold">Orchestration</text>
+  <text x="1020" y="372" text-anchor="middle" fill="#E2E8F0" font-size="13">Apache Airflow</text>
+  <text x="1020" y="394" text-anchor="middle" fill="#E2E8F0" font-size="13">Batch Jobs, Backfills</text>
+  <text x="1020" y="416" text-anchor="middle" fill="#E2E8F0" font-size="13">Data Quality Checks</text>
+
+  <!-- API layer -->
+  <rect x="330" y="520" width="500" height="100" rx="10" fill="#1E293B" stroke="#334155"/>
+  <text x="580" y="548" text-anchor="middle" fill="#FBBF24" font-size="15" font-weight="bold">API Layer</text>
+  <text x="580" y="574" text-anchor="middle" fill="#E2E8F0" font-size="13">REST API (transactions, reconciliation status, alerts, reports)</text>
+  <text x="580" y="596" text-anchor="middle" fill="#E2E8F0" font-size="13">Auth &amp; Multi-tenant Access Control</text>
+
+  <!-- Frontend -->
+  <rect x="910" y="520" width="220" height="100" rx="10" fill="#1E293B" stroke="#334155"/>
+  <text x="1020" y="548" text-anchor="middle" fill="#FBBF24" font-size="15" font-weight="bold">Dashboard</text>
+  <text x="1020" y="574" text-anchor="middle" fill="#E2E8F0" font-size="13">SACCO / Merchant Portal</text>
+  <text x="1020" y="596" text-anchor="middle" fill="#E2E8F0" font-size="13">Reports &amp; Alerts UI</text>
+
+  <!-- Infra footer -->
+  <rect x="40" y="680" width="1090" height="90" rx="10" fill="#111827" stroke="#334155" stroke-dasharray="4"/>
+  <text x="585" y="708" text-anchor="middle" fill="#94A3B8" font-size="14" font-weight="bold">Infrastructure &amp; Deployment</text>
+  <text x="585" y="734" text-anchor="middle" fill="#CBD5E1" font-size="13">Docker (containerization) · Kubernetes (orchestration) · Terraform (IaC) · CI/CD</text>
+  <text x="585" y="756" text-anchor="middle" fill="#CBD5E1" font-size="13">Deployed across dev / staging / prod environments</text>
+
+  <!-- Users -->
+  <rect x="1160" y="520" width="200" height="100" rx="10" fill="#1E293B" stroke="#334155"/>
+  <text x="1260" y="555" text-anchor="middle" fill="#F472B6" font-size="15" font-weight="bold">End Users</text>
+  <text x="1260" y="580" text-anchor="middle" fill="#E2E8F0" font-size="13">SACCOs</text>
+  <text x="1260" y="600" text-anchor="middle" fill="#E2E8F0" font-size="13">E-commerce / Fintechs</text>
+
+  <!-- Arrows: top row -->
+  <line x1="260" y1="190" x2="328" y2="190" stroke="#4B5563" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="550" y1="190" x2="618" y2="190" stroke="#4B5563" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="840" y1="190" x2="908" y2="190" stroke="#4B5563" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- Arrows: down from stream processing to storage/transform/orchestration -->
+  <line x1="440" y1="260" x2="440" y2="318" stroke="#4B5563" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="730" y1="260" x2="730" y2="318" stroke="#4B5563" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="1020" y1="260" x2="1020" y2="318" stroke="#4B5563" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- storage <-> transform -->
+  <line x1="550" y1="390" x2="618" y2="390" stroke="#4B5563" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="840" y1="390" x2="908" y2="390" stroke="#4B5563" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- storage/transform down to API -->
+  <line x1="440" y1="460" x2="480" y2="518" stroke="#4B5563" stroke-width="2" marker-end="url(#arrow)"/>
+  <line x1="730" y1="460" x2="680" y2="518" stroke="#4B5563" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- API to dashboard -->
+  <line x1="830" y1="570" x2="908" y2="570" stroke="#4B5563" stroke-width="2" marker-end="url(#arrow)"/>
+  <!-- Dashboard to Users -->
+  <line x1="1130" y1="570" x2="1158" y2="570" stroke="#4B5563" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <text x="700" y="850" text-anchor="middle" fill="#64748B" font-size="12">DataForge — PesaGuard System Design</text>
+</svg>

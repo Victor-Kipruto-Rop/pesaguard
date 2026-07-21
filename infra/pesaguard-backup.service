@@ -1,0 +1,23 @@
+[Unit]
+Description=PesaGuard PostgreSQL Daily Backup
+After=network.target postgresql.service
+Wants=pesaguard-backup.timer
+
+[Service]
+Type=oneshot
+User=postgres
+Group=postgres
+Environment="DATABASE_URL=postgresql://pesaguard:pesaguard@localhost:5432/pesaguard"
+Environment="PESAGUARD_BACKUP_DIR=/var/backups/pesaguard"
+Environment="PESAGUARD_BACKUP_RETENTION_DAYS=30"
+Environment="LOG_LEVEL=INFO"
+ExecStart=/usr/bin/python3 /opt/pesaguard/pesaguard_backend_pipeline/backup_postgres.py --backup
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pesaguard-backup
+
+# Retry on failure
+OnFailure=pesaguard-backup-failed.service
+
+[Install]
+WantedBy=multi-user.target

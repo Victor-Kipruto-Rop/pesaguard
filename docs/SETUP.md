@@ -50,5 +50,7 @@ pytest -q
 ## Alerting, monitoring, and dashboards
 
 - Alerts are routed through the alerting service with severity-aware channels and deduplication support.
-- Prometheus-style metrics can be served through the metrics helper and are available in the monitoring directory.
-- A Grafana dashboard definition is available at [monitoring/grafana-dashboard.json](../monitoring/grafana-dashboard.json) and a runbook is available at [RUNBOOK.md](../RUNBOOK.md).
+- Each service exposes a Prometheus-compatible /metrics endpoint, and the dashboard API returns a text/plain payload for Prometheus scraping.
+- A Grafana dashboard definition is available at [monitoring/grafana-dashboard.json](../monitoring/grafana-dashboard.json).
+- For local verification, run the backend services and scrape http://127.0.0.1:5000/metrics and http://127.0.0.1:5001/metrics.
+- A simple operator runbook should cover Kafka lag, connector auth failures, and unexpected Daraja callback spikes.

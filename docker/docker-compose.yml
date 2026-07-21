@@ -1,5 +1,3 @@
-version: "3.8"
-
 # Data residency (Addendum III): set DEPLOYMENT_REGION, BACKUP_REGION, and LOG_REGION
 # to the chosen hosting jurisdiction before go-live. See DATA_RESIDENCY.md.
 # Pilot default: ke-1 (Kenya / East Africa). Backups must stay in BACKUP_REGION.
@@ -44,25 +42,38 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
   webhook_receiver:
-    build: ../ingestion/webhook_receiver
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ["python", "pesaguard_backend_pipeline/app.py"]
     ports:
       - "5000:5000"
     env_file:
       - ../.env
     environment:
       <<: *residency-env
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://pesaguard:pesaguard@postgres:5432/pesaguard}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS_DOCKER:-kafka:9092}
     depends_on:
       - kafka
 
   reconciliation_job:
     build:
       context: ..
-      dockerfile: streaming/flink_jobs/Dockerfile
+      dockerfile: docker/Dockerfile
+    command: ["python", "pesaguard_backend_pipeline/reconciliation_job.py"]
     env_file:
       - ../.env
     environment:
       <<: *residency-env
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://pesaguard:pesaguard@postgres:5432/pesaguard}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS_DOCKER:-kafka:9092}
     depends_on:
       - kafka
       - postgres
@@ -70,15 +81,35 @@ services:
   dashboard_api:
     build:
       context: ..
-      dockerfile: dashboard/api/Dockerfile
+      dockerfile: docker/Dockerfile
+    command: ["python", "pesaguard_backend_pipeline/app_2.py"]
     ports:
       - "5001:5001"
     env_file:
       - ../.env
     environment:
       <<: *residency-env
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://pesaguard:pesaguard@postgres:5432/pesaguard}
     depends_on:
       - postgres
+
+  rq_worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ["/bin/sh", "pesaguard_backend_pipeline/worker_entrypoint.sh"]
+    env_file:
+      - ../.env
+    environment:
+      <<: *residency-env
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://pesaguard:pesaguard@postgres:5432/pesaguard}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS_DOCKER:-kafka:9092}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      RQ_QUEUE_NAME: ${RQ_QUEUE_NAME:-transaction_events}
+    depends_on:
+      - redis
+      - postgres
+      - kafka
 
 volumes:
   pgdata:

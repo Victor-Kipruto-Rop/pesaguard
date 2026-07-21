@@ -14,3 +14,4 @@ Response expectations:
 Operational notes:
 - Incident reports should include tenant context, affected workflow, and relevant transaction identifiers.
 - Support workflows are aligned with the incident response and service status experience.
+- Pilot customers can expect localized alerting, tenant locale persistence, and Kenya-friendly reporting during onboarding and rollout.

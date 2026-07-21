@@ -21,6 +21,7 @@ from email_service import EmailService
 from escalation_engine import EscalationEngine
 from on_call_service import OnCallService
 from search_engine import AdvancedSearchEngine
+from action_audit import ActionAuditEntry
 from models import Base, Discrepancy, Report, DeadLetter
 from tenant_settings import TenantSettingsStore
 
@@ -63,6 +64,21 @@ def resolve_email_locale(tenant_id: str | None, user_id: str | None = None, sett
     else:
         store = settings_store
     return store.resolve_locale(str(tenant_id), user_id=user_id, fallback_locale="en")
+
+
+def _record_action_audit(session, tenant_id: str, actor: str, action: str, details: dict | None = None) -> None:
+    try:
+        entry = ActionAuditEntry(
+            id=f"audit_{uuid.uuid4().hex[:12]}",
+            tenant_id=tenant_id,
+            actor=actor,
+            action=action,
+            details=details or {},
+        )
+        session.add(entry)
+        session.commit()
+    except Exception:
+        logger.exception("Failed to persist audit entry", exc_info=True)
 
 
 @app.before_request
@@ -164,6 +180,13 @@ def create_webhook():
             retry_attempts=data.get("retry_attempts", 3),
             timeout_seconds=data.get("timeout_seconds", 10),
         )
+        _record_action_audit(
+            session,
+            tenant_id=tenant_id,
+            actor=get_current_user().user_id if get_current_user() else "system",
+            action="create_webhook",
+            details={"webhook_id": result.get("id"), "url": data.get("url"), "event_types": result.get("event_types")},
+        )
         return jsonify(result), 201
     finally:
         session.close()
@@ -207,6 +230,13 @@ def update_webhook(webhook_id):
     try:
         webhook_mgr = WebhookManager(session)
         result = webhook_mgr.update_webhook(webhook_id, **data)
+        _record_action_audit(
+            session,
+            tenant_id=data.get("tenant_id", get_current_user().tenant_id if get_current_user() else "default"),
+            actor=get_current_user().user_id if get_current_user() else "system",
+            action="update_webhook",
+            details={"webhook_id": webhook_id, **data},
+        )
         return jsonify(result), 200
     finally:
         session.close()
@@ -256,6 +286,13 @@ def create_escalation_rule():
             target=data.get("target"),
             webhook_url=data.get("webhook_url"),
             priority=data.get("priority", 0),
+        )
+        _record_action_audit(
+            session,
+            tenant_id=tenant_id,
+            actor=get_current_user().user_id if get_current_user() else "system",
+            action="create_escalation_rule",
+            details={"rule_id": result.get("id"), "name": data.get("name")},
         )
         return jsonify(result), 201
     finally:
@@ -324,6 +361,13 @@ def create_on_call_rotation():
             shift_end=shift_end,
             escalation_level=data.get("escalation_level", 1),
         )
+        _record_action_audit(
+            session,
+            tenant_id=tenant_id,
+            actor=get_current_user().user_id if get_current_user() else "system",
+            action="create_on_call_rotation",
+            details={"operator_id": data.get("operator_id"), "shift_start": shift_start.isoformat(), "shift_end": shift_end.isoformat()},
+        )
         return jsonify(result), 201
     finally:
         session.close()
@@ -385,6 +429,13 @@ def bulk_create_on_call():
     try:
         service = OnCallService(session)
         result = service.bulk_create_rotations(tenant_id, rotations_data)
+        _record_action_audit(
+            session,
+            tenant_id=tenant_id,
+            actor=get_current_user().user_id if get_current_user() else "system",
+            action="bulk_create_on_call_rotations",
+            details={"created": result.get("created", 0)},
+        )
         return jsonify(result), 201
     finally:
         session.close()
@@ -414,6 +465,13 @@ def send_reconciliation_email():
         result = email_service.send_reconciliation_report(
             session, tenant_id, recipient, report_data, locale=locale
         )
+        _record_action_audit(
+            session,
+            tenant_id=tenant_id,
+            actor=get_current_user().user_id if get_current_user() else "system",
+            action="send_reconciliation_email",
+            details={"recipient": recipient, "report_data": report_data},
+        )
         return jsonify(result), 200
     finally:
         session.close()
@@ -438,6 +496,13 @@ def send_escalation_email():
         )
         result = email_service.send_escalation_notification(
             session, tenant_id, recipient, incident, locale=locale
+        )
+        _record_action_audit(
+            session,
+            tenant_id=tenant_id,
+            actor=get_current_user().user_id if get_current_user() else "system",
+            action="send_escalation_email",
+            details={"recipient": recipient, "incident": incident},
         )
         return jsonify(result), 200
     finally:

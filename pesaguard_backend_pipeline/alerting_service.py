@@ -20,13 +20,19 @@ class AlertingService:
     def handle_discrepancy(self, discrepancy: Dict[str, Any]) -> Dict[str, Any]:
         alert_id = discrepancy.get("id") or discrepancy.get("trans_id") or str(uuid.uuid4())
         if alert_id in self._alert_ids:
-            return {"status": "deduped", "alert_id": alert_id, "deliveries": []}
+            return {"status": "deduped", "alert_id": alert_id, "deliveries": [], "delivery_mode": "deduped"}
 
         self._alert_ids.add(alert_id)
         severity = (discrepancy.get("severity") or "warning").lower()
         channels = self._resolve_channels(severity)
         locale = self._resolve_locale(discrepancy)
         deliveries = []
+        delivery_mode = self._resolve_delivery_mode(severity, channels)
+
+        if delivery_mode == "digest":
+            self._store_delivery_log(alert_id, discrepancy, deliveries)
+            return {"status": "queued", "alert_id": alert_id, "deliveries": deliveries, "delivery_mode": "digest"}
+
         for channel in channels:
             try:
                 if channel == "slack":
@@ -41,15 +47,22 @@ class AlertingService:
                 deliveries.append({"channel": channel, "status": "failed", "error": str(exc)})
 
         self._store_delivery_log(alert_id, discrepancy, deliveries)
-        return {"status": "queued", "alert_id": alert_id, "deliveries": deliveries}
+        return {"status": "queued", "alert_id": alert_id, "deliveries": deliveries, "delivery_mode": delivery_mode}
 
     def _resolve_channels(self, severity: str) -> List[str]:
         configured = self.tenant_settings.get("alert_channels") or ["slack"]
         if severity == "critical":
-            return [channel for channel in configured if channel in {"slack", "sms"}]
+            return [channel for channel in configured if channel in {"slack", "sms", "email"}]
         if severity == "warning":
             return [channel for channel in configured if channel == "slack"]
         return []
+
+    def _resolve_delivery_mode(self, severity: str, channels: List[str]) -> str:
+        if severity == "info":
+            return "digest"
+        if channels:
+            return "realtime"
+        return "digest"
 
     def _resolve_locale(self, discrepancy: Dict[str, Any]) -> str:
         tenant_id = str(discrepancy.get("tenant_id", "default"))

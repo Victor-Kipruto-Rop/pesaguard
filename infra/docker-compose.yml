@@ -2,6 +2,8 @@ version: '3.9'
 
 # Data residency (Addendum III): keep DEPLOYMENT_REGION, BACKUP_REGION, and LOG_REGION
 # consistent with DATA_RESIDENCY.md. Pilot default is ke-1 (Kenya / East Africa).
+# This default should map to an in-region or East Africa–adjacent cloud deployment
+# (for example AWS af-south-1) until in-country hosting is confirmed.
 # Backups inherit BACKUP_REGION — do not store off-shore without documented legal basis.
 
 x-residency-env: &residency-env
@@ -42,6 +44,22 @@ services:
       <<: *residency-env
     ports:
       - "6379:6379"
+
+  rq-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    environment:
+      <<: *residency-env
+      DATABASE_URL: ${DATABASE_URL:-postgresql://pesaguard:pesaguard@postgres:5432/pesaguard}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      RQ_QUEUE_NAME: ${RQ_QUEUE_NAME:-transaction_events}
+      TENANT_ID: ${TENANT_ID:-default}
+    depends_on:
+      - postgres
+      - kafka
+      - redis
 
 volumes:
   pgdata:

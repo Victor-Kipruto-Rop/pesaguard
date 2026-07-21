@@ -1,0 +1,43 @@
+<svg width="640" height="200" viewBox="0 0 640 200" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#124A3B"/>
+      <stop offset="100%" stop-color="#0B2E24"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Icon: shield with reconciliation checkmark -->
+  <g transform="translate(20,20)">
+    <path d="M80 0
+             L150 26
+             L150 84
+             C150 128 122 158 80 176
+             C38 158 10 128 10 84
+             L10 26
+             Z"
+          fill="url(#shieldGrad)"/>
+
+    <!-- inner hairline shield outline for precision/trust cue -->
+    <path d="M80 14
+             L138 36
+             L138 84
+             C138 121 114 146 80 162
+             C46 146 22 121 22 84
+             L22 36
+             Z"
+          fill="none" stroke="#2ECC87" stroke-width="1.5" opacity="0.55"/>
+
+    <!-- checkmark, drawn as a single continuous reconciliation tick -->
+    <path d="M46 88 L70 112 L114 58"
+          fill="none" stroke="#2ECC87" stroke-width="11"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <!-- Wordmark -->
+  <g transform="translate(210,78)">
+    <text x="0" y="0" font-family="'Helvetica Neue', Arial, sans-serif"
+          font-size="52" font-weight="700" letter-spacing="0.5" fill="#0B2E24">Pesa<tspan fill="#124A3B">Guard</tspan></text>
+    <text x="2" y="30" font-family="'Helvetica Neue', Arial, sans-serif"
+          font-size="15" font-weight="500" letter-spacing="2.5" fill="#2ECC87">REAL-TIME M-PESA RECONCILIATION</text>
+  </g>
+</svg>

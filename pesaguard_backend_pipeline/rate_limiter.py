@@ -1,4 +1,25 @@
-"""Rate limiting for bulk operations to prevent abuse."""
+"""Rate limiting for bulk operations to prevent abuse.
+
+Token Bucket Implementation:
+  - Each (user_id/IP, endpoint) pair gets a token bucket
+  - Tokens are refilled at configurable rate (e.g., 30 per minute = 0.5 tokens/sec)
+  - Each request consumes 1 token by default
+  - If no tokens available, request is rejected with 429 Too Many Requests
+
+Webhook Rate Limiting:
+  - Applied in app.py::enforce_webhook_security() before_request hook
+  - Uses source IP as user identifier (Daraja callbacks are not authenticated)
+  - Default: 30 requests/min per IP (configurable via PESAGUARD_WEBHOOK_RATE_LIMIT_PER_MINUTE)
+  - Protects against DDoS and accidental webhook storms
+  
+Dashboard Rate Limiting:
+  - Can be applied per-endpoint using @rate_limit decorator
+  - Uses authenticated user ID when available, falls back to IP
+  
+Environment Variables:
+  - PESAGUARD_WEBHOOK_RATE_LIMIT_PER_MINUTE: max requests per minute for webhook endpoint (default 30)
+  - Rate limiter is instance-scoped; multiple workers should use Redis/external store for distributed rate limiting
+"""
 
 import time
 from typing import Dict, Tuple

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import en from '../locales/en.json';
 import sw from '../locales/sw.json';
+import { getUserId } from './userId';
 
 export type LocaleCode = 'en' | 'sw';
 
@@ -51,7 +52,7 @@ export function getInitialLocale(): LocaleCode {
   return browserLocale;
 }
 
-export function setLocale(locale: LocaleCode) {
+function applyLocaleLocally(locale: LocaleCode) {
   if (typeof window === 'undefined') {
     return;
   }
@@ -60,6 +61,15 @@ export function setLocale(locale: LocaleCode) {
   window.__PESAGUARD_LOCALE__ = locale;
   window.__PESAGUARD_PREFERENCES__ = { ...(window.__PESAGUARD_PREFERENCES__ || {}), locale };
   document.documentElement.lang = locale;
+}
+
+export function setLocale(locale: LocaleCode) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  applyLocaleLocally(locale);
+
   void (async () => {
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -67,16 +77,55 @@ export function setLocale(locale: LocaleCode) {
       if (adminToken) {
         headers['X-Admin-Token'] = adminToken;
       }
-      await fetch('/tenant/current/locale', {
+      await fetch('/tenant/current/user-locale', {
         method: 'POST',
         headers,
-        body: JSON.stringify({ preferred_locale: locale }),
+        body: JSON.stringify({ user_id: getUserId(), preferred_locale: locale }),
       });
     } catch (error) {
       console.error(error);
     }
   })();
+
   window.dispatchEvent(new Event(EVENT_NAME));
+}
+
+export function clearUserLocale() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  window.localStorage.removeItem(STORAGE_KEY);
+
+  void (async () => {
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const adminToken = window.localStorage.getItem('pesaguard.admin_token');
+      if (adminToken) {
+        headers['X-Admin-Token'] = adminToken;
+      }
+      const resp = await fetch('/tenant/current/user-locale', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ user_id: getUserId(), preferred_locale: null }),
+      });
+      if (resp.ok) {
+        const json = await resp.json();
+        const next = normalizeLocaleCandidate(json?.effective_locale) ?? 'en';
+        applyLocaleLocally(next);
+        window.dispatchEvent(new Event(EVENT_NAME));
+      }
+    } catch (error) {
+      console.error(error);
+    }
+  })();
+}
+
+export function formatText(template: string, vars: Record<string, string | number>): string {
+  return Object.entries(vars).reduce(
+    (result, [key, value]) => result.replace(new RegExp(`\\{${key}\\}`, 'g'), String(value)),
+    template,
+  );
 }
 
 function getValueByKey(source: Record<string, unknown>, key: string, useCamelCaseFallback = false): unknown {
@@ -112,12 +161,12 @@ export function getText<T = string>(key: string, locale: LocaleCode = getInitial
   const fallback = translations.en;
 
   const value = getValueByKey(current, key);
-  if (typeof value === 'string' || Array.isArray(value)) {
+  if (value !== undefined) {
     return value as T;
   }
 
   const fallbackValue = getValueByKey(fallback, key, true);
-  if (typeof fallbackValue === 'string' || Array.isArray(fallbackValue)) {
+  if (fallbackValue !== undefined) {
     return fallbackValue as T;
   }
 
@@ -134,23 +183,34 @@ export function useLocale() {
 
     window.addEventListener(EVENT_NAME, listener);
 
-    // Fetch tenant preferences from the backend once on mount and apply preferred locale
-    // if the client has not already chosen a locale.
     (async () => {
       try {
+        const userId = getUserId();
+        const resp = await fetch(`/tenant/current/locale?user_id=${encodeURIComponent(userId)}`);
+        if (resp.ok) {
+          const json = await resp.json();
+          const candidate = normalizeLocaleCandidate(json?.effective_locale);
+          if (candidate) {
+            applyLocaleLocally(candidate);
+            setLocaleState(candidate);
+            return;
+          }
+        }
+
         const saved = window.localStorage.getItem(STORAGE_KEY);
         if (!saved) {
-          const resp = await fetch('/tenant/current');
-          if (resp && resp.ok) {
-            const json = await resp.json();
-            const candidate = normalizeLocaleCandidate(json?.preferred_locale);
-            if (candidate) {
-              setLocale(candidate);
+          const tenantResp = await fetch('/tenant/current');
+          if (tenantResp.ok) {
+            const json = await tenantResp.json();
+            const tenantLocale = normalizeLocaleCandidate(json?.preferred_locale);
+            if (tenantLocale) {
+              applyLocaleLocally(tenantLocale);
+              setLocaleState(tenantLocale);
             }
           }
         }
-      } catch (e) {
-        // network failures should not block the app; silently ignore
+      } catch {
+        // network failures should not block the app
       }
     })();
 
@@ -160,6 +220,8 @@ export function useLocale() {
   return {
     locale,
     setLocale: (next: LocaleCode) => setLocale(next),
+    clearUserLocale,
     t: <T = string>(key: string) => getText<T>(key, locale),
+    format: (key: string, vars: Record<string, string | number>) => formatText(getText<string>(key, locale), vars),
   };
 }

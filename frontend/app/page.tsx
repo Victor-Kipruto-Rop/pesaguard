@@ -56,7 +56,7 @@ interface QueueItem {
 }
 
 export default function HomePage() {
-  const { t, locale } = useLocale();
+  const { t, locale, format } = useLocale();
   const [discrepancies, setDiscrepancies] = useState<Discrepancy[]>([]);
   const [metrics, setMetrics] = useState<Metrics>({
     transactions_per_minute: 0,
@@ -273,7 +273,7 @@ export default function HomePage() {
           <div className="trendMetric">
             <div className="label">{t('dashboard.trends.peakHour')}</div>
             <div className="value">3:00 PM</div>
-            <div className="muted small">{t('dashboard.trends.peakHourHint', { value: Math.round(metrics.transactions_per_minute * 1.4) })}</div>
+            <div className="muted small">{format('dashboard.trends.peakHourHint', { value: Math.round(metrics.transactions_per_minute * 1.4) })}</div>
           </div>
           <div className="trendMetric">
             <div className="label">{t('dashboard.trends.resolutionEfficiency')}</div>

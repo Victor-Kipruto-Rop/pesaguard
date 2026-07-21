@@ -2,7 +2,7 @@
 SQLAlchemy models for PesaGuard's Postgres store.
 Kept minimal for MVP — add indices/partitioning once volume grows.
 """
-from sqlalchemy import Column, String, Float, DateTime, Boolean, Text, JSON, Integer
+from sqlalchemy import Column, String, Float, DateTime, Boolean, Text, JSON, Integer, UniqueConstraint, Index
 from sqlalchemy.orm import declarative_base
 from datetime import datetime, timezone
 
@@ -11,6 +11,11 @@ Base = declarative_base()
 
 class Transaction(Base):
     __tablename__ = "transactions"
+    __table_args__ = (
+        UniqueConstraint('trans_id', name='uq_transaction_trans_id'),
+        Index('ix_transaction_trans_id', 'trans_id'),
+        Index('ix_transaction_created_at', 'created_at'),
+    )
 
     trans_id = Column(String, primary_key=True)
     trans_amount = Column(Float, nullable=False)
@@ -21,8 +26,39 @@ class Transaction(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
+class ProcessedTransaction(Base):
+    """Explicit idempotency ledger: tracks which webhook callbacks have been processed.
+    
+    Separate from Transaction table for audit clarity. Used by event_store.already_processed()
+    and by webhook endpoint to prevent duplicate processing. Unique constraint ensures
+    Daraja retries are silently ignored without double-processing.
+    """
+    __tablename__ = "processed_transactions"
+    __table_args__ = (
+        UniqueConstraint('daraja_trans_id', name='uq_daraja_trans_id'),
+        Index('ix_processed_daraja_id', 'daraja_trans_id'),
+        Index('ix_processed_received_at', 'received_at'),
+    )
+
+    id = Column(String, primary_key=True)  # UUID for audit trail
+    daraja_trans_id = Column(String, nullable=False)  # Daraja M-Pesa TransID
+    tenant_id = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="received")  # received, validated, stored, failed
+    processing_time_ms = Column(Integer, nullable=True)  # latency from webhook receipt to DB store
+    received_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))  # webhook receipt timestamp
+    webhook_attempt_number = Column(Integer, default=1)  # which retry attempt from Daraja
+    source_ip = Column(String, nullable=True)  # IP of Daraja callback source
+    signature_verified = Column(Boolean, default=False)  # whether HMAC signature was valid
+    error_reason = Column(String, nullable=True)  # if status=failed, why
+
+
 class Discrepancy(Base):
     __tablename__ = "discrepancies"
+    __table_args__ = (
+        Index('ix_discrepancy_trans_id', 'trans_id'),
+        Index('ix_discrepancy_tenant_id', 'tenant_id'),
+        Index('ix_discrepancy_detected_at', 'detected_at'),
+    )
 
     id = Column(String, primary_key=True)  # e.g. f"{trans_id}-{rule_name}"
     trans_id = Column(String, nullable=False)

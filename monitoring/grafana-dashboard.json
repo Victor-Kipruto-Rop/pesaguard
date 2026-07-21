@@ -1,19 +1,37 @@
 {
   "title": "PesaGuard Operational Dashboard",
   "schemaVersion": 38,
-  "version": 1,
+  "version": 2,
   "panels": [
     {
       "type": "stat",
       "title": "Open discrepancies",
       "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
-      "targets": [{"expr": "pesaguard_open_discrepancies"}]
+      "targets": [{"expr": "pesaguard_discrepancies_open"}]
     },
     {
-      "type": "graph",
-      "title": "Alert delivery success rate",
+      "type": "timeseries",
+      "title": "Transactions per minute",
       "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
-      "targets": [{"expr": "rate(pesaguard_alerts_total[5m])"}]
+      "targets": [{"expr": "rate(pesaguard_transactions_total[5m])"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Reconciliation latency (p95)",
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+      "targets": [{"expr": "pesaguard_reconciliation_latency_seconds_sum / pesaguard_reconciliation_latency_seconds_count"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Alert delivery failures",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "targets": [{"expr": "rate(pesaguard_alert_delivery_failures_total[5m])"}]
+    },
+    {
+      "type": "stat",
+      "title": "Alert volume",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "targets": [{"expr": "pesaguard_alerts_total"}]
     }
   ]
 }

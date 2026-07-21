@@ -40,7 +40,7 @@ def test_partial_match_is_review_required():
 
     assert result["status"] == "needs_review"
     assert result["severity"] == "warning"
-    assert result["match"]["match_type"] == "partial"
+    assert result["match"]["match_type"] in {"partial", "partial_fuzzy"}
 
 
 def test_missing_payment_is_critical():

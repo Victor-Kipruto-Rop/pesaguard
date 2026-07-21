@@ -1,4 +1,16 @@
-"""Authentication and Role-Based Access Control (RBAC) for PesaGuard API."""
+"""Authentication and Role-Based Access Control (RBAC) for PesaGuard API.
+
+Role Hierarchy (from most to least privileged):
+  1. admin: Full access to all features (settings, users, escalation rules, webhooks)
+  2. operator: Read/write discrepancies, view analytics, perform bulk operations
+  3. customer-user: Read-only access to discrepancies and analytics (customer portal)
+  4. read-only: Read-only viewer access (minimal permissions)
+  
+Token Expiry: 24 hours (configurable via TOKEN_EXPIRY_HOURS)
+Auth Required: Optional (default off); enable via PESAGUARD_API_AUTH_REQUIRED=1 environment variable
+
+Permission Format: "resource:action" (e.g., "read:discrepancies", "write:escalation_rules")
+"""
 
 import jwt
 import os
@@ -28,14 +40,14 @@ class User:
         self.user_id = user_id
         self.username = username
         self.tenant_id = tenant_id
-        self.roles = roles  # ["admin", "operator", "viewer"]
+        self.roles = roles  # ["admin", "operator", "customer-user", "read-only"]
         self.permissions = permissions
 
 
 class AuthRBAC:
     """Authentication and authorization manager."""
 
-    # Role-to-permissions mapping
+    # Role-to-permissions mapping (from most to least privileged)
     ROLE_PERMISSIONS = {
         "admin": [
             "read:discrepancies",
@@ -55,7 +67,11 @@ class AuthRBAC:
             "read:analytics",
             "bulk:operations",
         ],
-        "viewer": [
+        "customer-user": [
+            "read:discrepancies",
+            "read:analytics",
+        ],
+        "read-only": [
             "read:discrepancies",
             "read:analytics",
         ],

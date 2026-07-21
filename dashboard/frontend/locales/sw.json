@@ -25,23 +25,19 @@
   "topbar": {
     "liveOps": "Uendeshaji wa moja kwa moja"
   },
-  "sidebar": {
-    "operations": "Uendeshaji",
-    "insights": "Maarifa na uchambuzi",
-    "tools": "Zana za hali ya juu",
-    "status": "Hali",
-    "support": "Msaada",
-    "agreements": "Mikataba",
-    "policies": "Sera",
-    "settings": "Mipangilio",
-    "systemNominal": "Mfumo uko sawa"
-  },
-  "brand": {
-    "name": "PesaGuard",
-    "subtitle": "Kituo cha amri cha upatanishi wa hali ya juu"
-  },
-  "topbar": {
-    "liveOps": "Uendeshaji wa moja kwa moja"
+  "common": {
+    "signal": "Ishara",
+    "value": "Thamani",
+    "control": "Udhibiti",
+    "policy": "Sera",
+    "draft": "Rasimu",
+    "download": "Pakua",
+    "preview": "Hakiki",
+    "open": "Fungua",
+    "live": "Moja kwa moja",
+    "operational": "Inafanya kazi",
+    "scheduled": "Imepangwa",
+    "loading": "Inapakia…"
   },
   "home": {
     "heroTitle": "Uendeshaji wa upatanishi wa kisasa kwa kila tenant",
@@ -54,12 +50,219 @@
       "Mchakato unaokubalika kwa ukaguzi"
     ]
   },
+  "scope": {
+    "label": "Upeo wa sasa: M-Pesa / Daraja pekee",
+    "detail": "PesaGuard kwa sasa inaoanisha tu miamala ya M-Pesa / Daraja; njia nyingine za malipo ziko nje ya upeo wa majaribio."
+  },
+  "onboarding": {
+    "title": "Miongozo ya kuanza kwa wateja",
+    "subtitle": "Pitia hatua za kuanza na maswali yanayoulizwa mara kwa mara kwa majaribio.",
+    "gettingStarted": "Mwongozo wa kuanza",
+    "faq": "Maswali yanayoulizwa mara kwa mara"
+  },
+  "statusPage": {
+    "badge": "Kifurushi cha utayari wa hali ya juu",
+    "eyebrow": "Hali ya huduma ya majaribio",
+    "title": "Uendeshaji wa kuaminika na uwazi kwa kila mteja wa majaribio",
+    "summary": "PesaGuard inafanya kazi kawaida, kwa ufuatiliaji wa huduma, uboreshaji wa hifadhi, utekelezaji wa sera ya kuhifadhi, na udhibiti wa majibu ya matukio kwenye mfumo mzima. Mapendeleo ya lugha ya tenant huhifadhiwa na maandishi ya arifa yamejanibishwa kwa wateja wa majaribio.",
+    "openSupport": "Fungua msaada",
+    "reviewTerms": "Pitia masharti ya majaribio",
+    "highlights": [
+      { "title": "Uwazi wa uendeshaji", "body": "Uzoefu thabiti wa hali huhakikisha wadau wa majaribio wanaelewa afya ya huduma kila wakati." },
+      { "title": "Utayari wa utawala", "body": "Uboreshaji wa hifadhi, utekelezaji wa kuhifadhi, na mchakato wa majibu yameandikwa na yanafanya kazi." },
+      { "title": "Uaminifu wa wateja", "body": "Uzoefu umeundwa kwa ukaguzi wa wawekezaji, utii, na wateja wa majaribio." }
+    ],
+    "serviceHealth": "Afya ya huduma ya sasa",
+    "operationalPosture": "Mwelekeo wa uendeshaji",
+    "postureItems": [
+      "Uboreshaji wa hifadhi wa kila siku umewezeshwa na kuthibitishwa",
+      "Uthibitishaji wa kurejesha umeandaliwa kwa majaribio ya mazingira ya majaribio",
+      "Mchakato wa majibu ya matukio unaendelea kwa matukio muhimu",
+      "Mawasiliano ya msaada na hali yameunganishwa kwa wateja"
+    ],
+    "recentUpdates": "Masasisho ya hivi karibuni",
+    "downloadAssets": "Mali za utayari zinazoweza kupakuliwa",
+    "downloadSummary": "Pakua muhtasari wa utayari",
+    "downloadBrief": "Pakua muhtasari wa msaada",
+    "components": [
+      { "name": "Upokeaji wa webhook", "statusKey": "operational", "detail": "Mwito wa ndani unachakatwa kwa ucheleweshaji mdogo." },
+      { "name": "Injini ya upatanishi", "statusKey": "operational", "detail": "Ugunduzi wa tofauti na uoanishaji bado unafanya kazi kikamilifu." },
+      { "name": "Uwasilishaji wa arifa", "statusKey": "operational", "detail": "Arifa zinaelekezwa kwa kuondoa marudio na kushughulikia ukali." },
+      { "name": "Hifadhi na kuhifadhi", "statusKey": "scheduled", "detail": "Kazi za hifadhi za kila siku na utekelezaji wa kuhifadhi zinaendelea kama ilivyopangwa." }
+    ],
+    "updates": [
+      { "title": "Ufunuo wa ufuatiliaji", "message": "Huduma zote muhimu zinafuatiliwa kwa arifa za kiotomatiki na upelekaji wa juu wa matukio.", "time": "Dakika 2 zilizopita" },
+      { "title": "Uboreshaji wa hifadhi", "message": "Mzunguko wa hifadhi wa hivi karibuni umekamilika kwa mafanikio na unahifadhiwa kulingana na sera.", "time": "Dakika 45 zilizopita" },
+      { "title": "Utayari wa msaada", "message": "Njia za msaada na mchakato wa matukio vinafanya kazi kwa wateja wa majaribio.", "time": "Saa 2 zilizopita" }
+    ]
+  },
+  "supportPage": {
+    "badge": "Utayari wa msaada wa hali ya juu",
+    "eyebrow": "Msaada wa majaribio",
+    "title": "Msaada wa haraka na wa kitaalamu kwa kila hatua ya uzinduzi",
+    "summary": "Tumia nafasi ya msaada wa majaribio kuwasilisha matukio, kukagua masasisho ya hali, na kuratibu uanzishaji na timu ya PesaGuard. Tunathibitisha arifa zilizojanibishwa na ujumbe unaomwelekea mteja wakati wa ukaguzi wa upeo wa majaribio.",
+    "emailSupport": "Tuma barua pepe kwa msaada",
+    "viewStatus": "Angalia hali ya moja kwa moja",
+    "promise": "Ahadi ya msaada",
+    "highlights": [
+      { "title": "Uchambuzi wa haraka", "body": "Kila ripoti inaelekezwa kupitia mchakato wa msaada uliofafanuliwa na umiliki wazi." },
+      { "title": "Upelekaji wa juu wa uwazi", "body": "Matukio muhimu yanapata umakini wa haraka na masasisho yanayoonekana kwa wateja." },
+      { "title": "Uendelevu wa uendeshaji", "body": "Mfano wa msaada unaendana na majibu ya matukio na viwango vya ripoti." }
+    ],
+    "channelsTitle": "Njia za msaada",
+    "reportTitle": "Nini ujumuishwe katika ripoti yako",
+    "reportItems": [
+      "Jina la tenant au mazingira",
+      "Wakati wa tukio na mchakato ulioathiriwa",
+      "Vitambulisho vya muamala au tofauti vinavyohusika",
+      "Picha za skrini, sampuli za webhook, au data ya kuhamisha inayohitajika kwa uchambuzi"
+    ],
+    "responseTargets": "Malengo ya majibu",
+    "downloadAssets": "Mali za msaada zinazoweza kupakuliwa",
+    "downloadBrief": "Pakua muhtasari wa msaada",
+    "downloadSummary": "Pakua muhtasari wa utayari",
+    "channels": [
+      { "label": "Barua pepe", "value": "pilot-support@pesaguard.example", "detail": "Bora kwa maswali ya uanzishaji, maombi ya sera, na masuala yasiyo ya dharura." },
+      { "label": "Njia ya matukio ya kipaumbele", "value": "#pesaguard-pilot", "detail": "Njia ya haraka zaidi kwa matukio ya moja kwa moja na yanayoathiri wateja." },
+      { "label": "Masasisho ya hali", "value": "/status", "detail": "Kagua mwelekeo wa huduma ya sasa na taarifa za uendeshaji za hivi karibuni." }
+    ],
+    "slaLevels": [
+      { "title": "Muhimu", "target": "Dakika 15", "detail": "Kukatika kwa uzalishaji, upatanishi ulioshindwa, au tukio linaloathiri wateja kwa kiasi kikubwa." },
+      { "title": "Juu", "target": "Saa 1", "detail": "Kushuka kwa uwezo kwa kiwango kikubwa kunachoathiri mchakato muhimu au uzoefu wa tenant." },
+      { "title": "Wastani", "target": "Saa 4", "detail": "Suala lisilozuia linalohitaji uchunguzi au mwongozo wa mchakato." }
+    ]
+  },
+  "agreementsPage": {
+    "badge": "Kifurushi cha makubaliano ya hali ya juu",
+    "eyebrow": "Mikataba ya majaribio",
+    "title": "Masharti ya kibiashara na uendeshaji wazi kwa wateja wa majaribio",
+    "summary": "Nyenzo hizi hutoa msingi wa kuaminika kwa uaminifu wa wateja, ukaguzi wa utii, na mazungumzo ya uanzishaji.",
+    "packTitle": "Kifurushi cha makubaliano",
+    "packSummary": "Rasimu hizi zinaonyesha upeo wa sasa wa majaribio, ikiwa ni pamoja na arifa zilizojanibishwa na mahitaji ya uwasilishaji maalum ya Kenya kwa arifa za wateja.",
+    "highlights": [
+      { "title": "Uwazi wa kibiashara", "body": "Masharti ya majaribio ni rahisi kukagua na yanalingana na matarajio ya wateja." },
+      { "title": "Utayari wa ukaguzi", "body": "Masharti yaliyoandikwa huimarisha ukaguzi wa utii na mazungumzo ya ununuzi." },
+      { "title": "Uaminifu wa uendeshaji", "body": "Kifurushi cha makubaliano kinasaidia uaminifu kwa upelekaji wa juu na mwelekeo wa msaada wazi." }
+    ],
+    "items": [
+      { "title": "Makubaliano ya majaribio", "summary": "Inafafanua upeo, muda, matarajio ya msaada, na vigezo vya kumaliza majaribio.", "href": "/assets/pilot-agreement.txt" },
+      { "title": "Masharti ya huduma", "summary": "Inaeleza mipaka ya huduma, majukumu ya wateja, na ahadi za msaada.", "href": "/assets/terms-of-service.txt" },
+      { "title": "Makubaliano ya uchakataji wa data", "summary": "Inafafanua ushughulikiaji wa data, matarajio ya usalama, na majukumu ya kufuta.", "href": "/assets/data-processing-agreement.txt" }
+    ]
+  },
+  "policiesPage": {
+    "badge": "Seti ya sera za hali ya juu",
+    "eyebrow": "Sera na udhibiti",
+    "title": "Sera za uendeshaji zinazohimiza uaminifu na utii",
+    "summary": "Miongozo hii ya sera inafanya mwelekeo wako wa utawala uwe wazi kwa majaribio, wawekezaji, na wakaguzi wa utii.",
+    "libraryTitle": "Maktaba ya sera",
+    "highlights": [
+      { "title": "Usanifu wa uaminifu", "body": "Sera zimepangwa kusaidia uanzishaji wa majaribio na mazungumzo ya utii." },
+      { "title": "Nidhamu ya data", "body": "Matarajio ya kuhifadhi na kufuta yameandikwa wazi na kutekelezwa." },
+      { "title": "Ukuaji wa udhibiti", "body": "Mazoea ya usalama na msaada yanaonekana thabiti, wazi, na yanayoweza kukaguliwa." }
+    ],
+    "items": [
+      { "title": "Sera ya faragha", "summary": "Inaeleza jinsi data ya wateja na walipaji inavyokusanywa, kutumika, kuhifadhiwa, na kufutwa.", "href": "/assets/privacy-policy.txt" },
+      { "title": "Uhifadhi wa data", "summary": "Inafafanua vipindi vya kuhifadhi, ushughulikiaji wa hifadhi, na michakato ya kuondoka.", "href": "/assets/readiness-pack-summary.txt" },
+      { "title": "Sera ya usalama", "summary": "Inatoa muhtasari wa udhibiti wa ufikiaji, ufuatiliaji, kumbukumbu, na utayari wa majibu.", "href": "/assets/support-readiness-brief.txt" }
+    ]
+  },
+  "insightsPage": {
+    "eyebrow": "Uchambuzi na maarifa",
+    "title": "Vipimo vya uendeshaji na utendaji",
+    "summary": "Fuata afya ya mfumo, uzingatiaji wa SLA, ufanisi wa utatuzi, na utendaji wa waendeshaji.",
+    "loading": "Inapakia uchambuzi…",
+    "exceptionTrend": "Mwelekeo wa makosa (siku 7)",
+    "incidentsBySeverity": "Matukio kwa ukali",
+    "slaCompliance": "Uzingatiaji wa SLA",
+    "onTrack": "Kikomo kiko sawa",
+    "warningZone": "Eneo la onyo",
+    "breaching": "Inavunja",
+    "totalSlaIncidents": "Jumla ya matukio ya SLA",
+    "noSlaData": "Hakuna data ya SLA",
+    "resolutionMetrics": "Vipimo vya utatuzi",
+    "averageTime": "Wastani wa muda",
+    "medianTime": "Muda wa kati",
+    "p95Time": "Muda wa P95",
+    "targetCritical": "Lengo (muhimu)",
+    "noResolutionData": "Hakuna data ya utatuzi",
+    "operatorPerformance": "Utendaji wa waendeshaji",
+    "operator": "Mwendeshaji",
+    "assigned": "Imegawiwa",
+    "resolved": "Imetatuliwa",
+    "avgTime": "Muda wa wastani",
+    "noOperatorStats": "Bado hakuna takwimu za waendeshaji",
+    "systemVitals": "Vipimo muhimu vya mfumo",
+    "transactionsPerMin": "Miamala/dakika",
+    "latencyP50": "Latency P50",
+    "latencyP95": "Latency P95",
+    "discrepancyRate": "Kiwango cha utofauti",
+    "openVsResolved": "Wazi dhidi ya zilizotatuliwa",
+    "openIncidents": "Matukio ya wazi",
+    "resolvedIncidents": "Matukio yaliyotatuliwa",
+    "totalIncidents": "Jumla ya matukio"
+  },
+  "toolsPage": {
+    "eyebrow": "Zana za hali ya juu",
+    "title": "Shughuli za wingi na ripoti",
+    "summary": "Hamisha CSV, uchambuzi wa mwelekeo, upelekaji wa juu wa kiotomatiki, na ripoti za upatanishi.",
+    "autoEscalation": "Upelekaji wa juu wa kiotomatiki",
+    "escalateAfter": "Peleka juu baada ya (dakika)",
+    "escalateHint": "Peleka juu kiotomatiki matukio muhimu yasiyotatuliwa kwa Mkuu wa Zamu",
+    "escalateNow": "Peleka juu sasa",
+    "exportDownload": "Hamisha na pakua",
+    "exportHint": "Hamisha matukio yote kama faili la CSV",
+    "downloadCsv": "Pakua CSV",
+    "reconciliationReport": "Ripoti ya upatanishi",
+    "reportPeriod": "Kipindi cha ripoti (siku)",
+    "generating": "Inazalisha…",
+    "generateReport": "Zalisha ripoti",
+    "bulkAssign": "Ugawaji wa wingi",
+    "operatorPlaceholder": "Jina la mwendeshaji",
+    "assign": "Gawa",
+    "reportResults": "Matokeo ya ripoti",
+    "totalIncidents": "Jumla ya matukio",
+    "resolved": "Imetatuliwa",
+    "open": "Wazi",
+    "resolutionRate": "Kiwango cha utatuzi",
+    "slaCompliance": "Uzingatiaji wa SLA",
+    "critical": "Muhimu",
+    "bySeverity": "Kwa ukali",
+    "byStatus": "Kwa hali",
+    "incidentTrends": "Mwelekeo wa matukio",
+    "last4Weeks": "Wiki 4 zilizopita",
+    "last12Months": "Miezi 12 iliyopita",
+    "refreshTrends": "Onyesha upya mwelekeo",
+    "getStarted": "Chagua zana hapo juu kuanza",
+    "feedback": {
+      "reportGenerated": "Ripoti imezalishwa kwa mafanikio",
+      "reportFailed": "Imeshindwa kuzalisha ripoti",
+      "trendsLoaded": "Mwelekeo umepakiwa",
+      "trendsFailed": "Imeshindwa kupakia mwelekeo",
+      "csvExported": "CSV imehamishwa kwa mafanikio",
+      "csvFailed": "Imeshindwa kuhamisha CSV",
+      "escalated": "Matukio {count} muhimu yamepelekwa juu kiotomatiki",
+      "assignFailed": "Imeshindwa kugawa kwa wingi",
+      "enterAssignee": "Tafadhali weka jina la mwendeshaji",
+      "assigned": "Matukio {count} yamegawiwa kwa {assignee}",
+      "escalateFailed": "Imeshindwa kupeleka juu kiotomatiki"
+    }
+  },
+  "loginPage": {
+    "badge": "Kituo cha Udhibiti cha PesaGuard",
+    "title": "Udhibiti wa ufikiaji",
+    "summary": "Uthibitishaji wa majaribio salama. Tabaka la uthibitishaji la uzalishaji linaweza kuunganishwa baadaye.",
+    "email": "Barua pepe",
+    "password": "Nenosiri",
+    "emailPlaceholder": "ops@pesaguard.io",
+    "passwordPlaceholder": "••••••••",
+    "signIn": "Ingia",
+    "invalidCredentials": "Tafadhali weka barua pepe na nenosiri halali.",
+    "demoHint": "Vitambulisho vya majaribio:"
+  },
   "status": {
     "title": "Hali ya huduma ya majaribio",
     "summary": "PesaGuard inafanya kazi kawaida, kwa ufuatiliaji wa huduma, uboreshaji wa hifadhi, utekelezaji wa sera ya kuhifadhi, na udhibiti wa majibu ya matukio kwenye mfumo mzima."
-  },
-  "scope": {
-    "label": "Upeo wa sasa: M-Pesa / Daraja pekee"
   },
   "dashboard": {
     "heroStats": {
@@ -154,7 +357,10 @@
       "alertChannelsLabel": "Njia zinazotumika (zilitenganishwa kwa comma)",
       "thresholds": "Vizingiti vya matukio",
       "slaPolicy": "Sera ya SLA",
-      "preferredLocale": "Lugha inayopendelewa",
+      "preferredLocale": "Lugha chaguo-msingi ya tenant",
+      "userLocale": "Mapendeleo yako ya lugha",
+      "userLocaleHint": "Hubadilisha chaguo-msingi la tenant kwa kipindi chako cha kivinjari. Arifa zitatumia lugha hii inapowezekana.",
+      "useTenantDefault": "Tumia chaguo-msingi la tenant",
       "deploymentRegion": "Mkoa wa uwekaji",
       "backupRegion": "Mkoa wa chelezo",
       "logRegion": "Mkoa wa kumbukumbu",
@@ -169,6 +375,7 @@
       "active": "Inatumika"
     },
     "loadError": "Imeshindwa kupakia mipangilio",
-    "saveError": "Imeshindwa kuhifadhi mipangilio"
+    "saveError": "Imeshindwa kuhifadhi mipangilio",
+    "userLocaleSaved": "✓ Mapendeleo ya lugha yamehifadhiwa"
   }
 }

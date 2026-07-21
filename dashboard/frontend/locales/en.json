@@ -25,23 +25,19 @@
   "topbar": {
     "liveOps": "Live ops"
   },
-  "sidebar": {
-    "operations": "Operations",
-    "insights": "Insights & Analytics",
-    "tools": "Advanced Tools",
-    "status": "Status",
-    "support": "Support",
-    "agreements": "Agreements",
-    "policies": "Policies",
-    "settings": "Settings",
-    "systemNominal": "System nominal"
-  },
-  "brand": {
-    "name": "PesaGuard",
-    "subtitle": "Premium reconciliation command center"
-  },
-  "topbar": {
-    "liveOps": "Live ops"
+  "common": {
+    "signal": "Signal",
+    "value": "Value",
+    "control": "Control",
+    "policy": "Policy",
+    "draft": "Draft",
+    "download": "Download",
+    "preview": "Preview",
+    "open": "Open",
+    "live": "Live",
+    "operational": "Operational",
+    "scheduled": "Scheduled",
+    "loading": "Loading…"
   },
   "home": {
     "heroTitle": "Modern reconciliation operations for every tenant",
@@ -54,12 +50,219 @@
       "Audit-ready workflow"
     ]
   },
+  "scope": {
+    "label": "Current scope: M-Pesa / Daraja only",
+    "detail": "PesaGuard currently reconciles only M-Pesa / Daraja transactions; other payment rails are outside pilot scope."
+  },
+  "onboarding": {
+    "title": "Customer onboarding guides",
+    "subtitle": "Review getting started steps and frequently asked questions for the pilot.",
+    "gettingStarted": "Getting started guide",
+    "faq": "FAQ"
+  },
+  "statusPage": {
+    "badge": "Premium readiness pack",
+    "eyebrow": "Pilot Service Status",
+    "title": "Reliable, transparent operations for every pilot customer",
+    "summary": "PesaGuard is operating normally, with service monitoring, backup automation, retention enforcement, and incident response controls active across the platform. Tenant locale preferences are persisted and alert text is localized for pilot customers.",
+    "openSupport": "Open support",
+    "reviewTerms": "Review pilot terms",
+    "highlights": [
+      { "title": "Operational transparency", "body": "A consistent status experience ensures pilot stakeholders always understand service health." },
+      { "title": "Governance readiness", "body": "Backup automation, retention enforcement, and response workflows are documented and active." },
+      { "title": "Customer confidence", "body": "The experience is designed for investor, compliance, and pilot-customer review." }
+    ],
+    "serviceHealth": "Current service health",
+    "operationalPosture": "Operational posture",
+    "postureItems": [
+      "Daily backup automation enabled and verified",
+      "Restore validation is prepared for pilot environment testing",
+      "Incident response workflow remains active for critical events",
+      "Support and status communications are synchronized for customers"
+    ],
+    "recentUpdates": "Recent updates",
+    "downloadAssets": "Downloadable readiness assets",
+    "downloadSummary": "Download readiness summary",
+    "downloadBrief": "Download support brief",
+    "components": [
+      { "name": "Webhook ingestion", "statusKey": "operational", "detail": "Incoming callbacks are being processed with low latency." },
+      { "name": "Reconciliation engine", "statusKey": "operational", "detail": "Discrepancy detection and matching remain fully active." },
+      { "name": "Alert delivery", "statusKey": "operational", "detail": "Notifications are routed with deduplication and severity-aware handling." },
+      { "name": "Backup and retention", "statusKey": "scheduled", "detail": "Daily backup jobs and retention enforcement are running as planned." }
+    ],
+    "updates": [
+      { "title": "Monitoring coverage", "message": "All critical services are being observed with automated alerts and incident escalation.", "time": "2 min ago" },
+      { "title": "Backup automation", "message": "The latest backup cycle completed successfully and is retained per policy.", "time": "45 min ago" },
+      { "title": "Support readiness", "message": "Support channels and incident workflows are active for pilot customers.", "time": "2 hrs ago" }
+    ]
+  },
+  "supportPage": {
+    "badge": "Premium support readiness",
+    "eyebrow": "Pilot Support",
+    "title": "Fast, expert support for every rollout stage",
+    "summary": "Use the pilot support workspace to raise incidents, review status updates, and coordinate onboarding with the PesaGuard team. We also validate localized alerting and customer-facing messaging during pilot scope reviews.",
+    "emailSupport": "Email support",
+    "viewStatus": "View live status",
+    "promise": "Support promise",
+    "highlights": [
+      { "title": "Fast triage", "body": "Every report is routed through a defined support workflow with clear ownership." },
+      { "title": "Transparent escalation", "body": "Critical incidents receive immediate attention and customer-visible updates." },
+      { "title": "Operational continuity", "body": "The support model is aligned with incident response and reporting standards." }
+    ],
+    "channelsTitle": "Support channels",
+    "reportTitle": "What to include in your report",
+    "reportItems": [
+      "Tenant or environment name",
+      "Time of incident and affected workflow",
+      "Relevant transaction or discrepancy IDs",
+      "Any screenshots, webhook samples, or export data needed for triage"
+    ],
+    "responseTargets": "Response targets",
+    "downloadAssets": "Downloadable support assets",
+    "downloadBrief": "Download support brief",
+    "downloadSummary": "Download readiness summary",
+    "channels": [
+      { "label": "Email", "value": "pilot-support@pesaguard.example", "detail": "Best for onboarding questions, policy requests, and non-urgent issues." },
+      { "label": "Priority incident channel", "value": "#pesaguard-pilot", "detail": "Fastest route for live incidents and customer-impacting issues." },
+      { "label": "Status updates", "value": "/status", "detail": "Review the current service posture and recent operational notices." }
+    ],
+    "slaLevels": [
+      { "title": "Critical", "target": "15 mins", "detail": "Production outage, failed reconciliation, or material customer-impacting incident." },
+      { "title": "High", "target": "1 hour", "detail": "Severe degradation affecting a key workflow or tenant experience." },
+      { "title": "Medium", "target": "4 hours", "detail": "Non-blocking issue requiring investigation or workflow guidance." }
+    ]
+  },
+  "agreementsPage": {
+    "badge": "Premium agreement pack",
+    "eyebrow": "Pilot Agreements",
+    "title": "Clear commercial and operating terms for pilot customers",
+    "summary": "These materials provide a dependable foundation for customer trust, compliance review, and onboarding conversations.",
+    "packTitle": "Agreement pack",
+    "packSummary": "These drafts reflect the current pilot scope, including localized alerting and Kenya-specific delivery requirements for customer notifications.",
+    "highlights": [
+      { "title": "Commercial clarity", "body": "Pilot terms are easy to review and align with customer expectations." },
+      { "title": "Audit readiness", "body": "Documented terms strengthen compliance review and procurement discussions." },
+      { "title": "Operational confidence", "body": "The agreement pack supports trust with clear escalation and support posture." }
+    ],
+    "items": [
+      { "title": "Pilot agreement", "summary": "Defines scope, duration, support expectations, and pilot termination criteria.", "href": "/assets/pilot-agreement.txt" },
+      { "title": "Terms of service", "summary": "Outlines service boundaries, customer responsibilities, and support commitments.", "href": "/assets/terms-of-service.txt" },
+      { "title": "Data processing agreement", "summary": "Clarifies data handling, security expectations, and deletion responsibilities.", "href": "/assets/data-processing-agreement.txt" }
+    ]
+  },
+  "policiesPage": {
+    "badge": "Premium policy suite",
+    "eyebrow": "Policies & Controls",
+    "title": "Operational policies that reinforce trust and compliance",
+    "summary": "These policy views make your governance posture clear to pilots, investors, and compliance reviewers.",
+    "libraryTitle": "Policy library",
+    "highlights": [
+      { "title": "Trust architecture", "body": "Policies are structured to support pilot onboarding and compliance conversations." },
+      { "title": "Data discipline", "body": "Retention and deletion expectations are clearly documented and operationalized." },
+      { "title": "Control maturity", "body": "Security and support practices appear consistent, explicit, and reviewable." }
+    ],
+    "items": [
+      { "title": "Privacy policy", "summary": "Explains how customer and payer data is collected, used, retained, and deleted.", "href": "/assets/privacy-policy.txt" },
+      { "title": "Data retention", "summary": "Defines retention windows, backup handling, and offboarding disposal processes.", "href": "/assets/readiness-pack-summary.txt" },
+      { "title": "Security policy", "summary": "Summarizes controls for access, monitoring, logging, and response readiness.", "href": "/assets/support-readiness-brief.txt" }
+    ]
+  },
+  "insightsPage": {
+    "eyebrow": "Analytics & Insights",
+    "title": "Operational metrics and performance",
+    "summary": "Track system health, SLA compliance, resolution efficiency, and operator performance.",
+    "loading": "Loading analytics…",
+    "exceptionTrend": "Exception trend (7 days)",
+    "incidentsBySeverity": "Incidents by severity",
+    "slaCompliance": "SLA compliance",
+    "onTrack": "On track",
+    "warningZone": "Warning zone",
+    "breaching": "Breaching",
+    "totalSlaIncidents": "Total SLA incidents",
+    "noSlaData": "No SLA data available",
+    "resolutionMetrics": "Resolution metrics",
+    "averageTime": "Average time",
+    "medianTime": "Median time",
+    "p95Time": "P95 time",
+    "targetCritical": "Target (critical)",
+    "noResolutionData": "No resolution data available",
+    "operatorPerformance": "Operator performance",
+    "operator": "Operator",
+    "assigned": "Assigned",
+    "resolved": "Resolved",
+    "avgTime": "Avg time",
+    "noOperatorStats": "No operator statistics available yet",
+    "systemVitals": "System vitals",
+    "transactionsPerMin": "Transactions/min",
+    "latencyP50": "Latency P50",
+    "latencyP95": "Latency P95",
+    "discrepancyRate": "Discrepancy rate",
+    "openVsResolved": "Open vs Resolved",
+    "openIncidents": "Open incidents",
+    "resolvedIncidents": "Resolved incidents",
+    "totalIncidents": "Total incidents"
+  },
+  "toolsPage": {
+    "eyebrow": "Advanced Tools",
+    "title": "Bulk operations & reporting",
+    "summary": "CSV exports, trend analysis, auto-escalation, and reconciliation reports.",
+    "autoEscalation": "Auto-escalation",
+    "escalateAfter": "Escalate after (minutes)",
+    "escalateHint": "Automatically escalate unresolved critical incidents to On-Call Lead",
+    "escalateNow": "Escalate Now",
+    "exportDownload": "Export & Download",
+    "exportHint": "Export all incidents as CSV file",
+    "downloadCsv": "Download CSV",
+    "reconciliationReport": "Reconciliation Report",
+    "reportPeriod": "Report period (days)",
+    "generating": "Generating…",
+    "generateReport": "Generate Report",
+    "bulkAssign": "Bulk Assign",
+    "operatorPlaceholder": "Operator name",
+    "assign": "Assign",
+    "reportResults": "Report Results",
+    "totalIncidents": "Total Incidents",
+    "resolved": "Resolved",
+    "open": "Open",
+    "resolutionRate": "Resolution Rate",
+    "slaCompliance": "SLA Compliance",
+    "critical": "Critical",
+    "bySeverity": "By Severity",
+    "byStatus": "By Status",
+    "incidentTrends": "Incident Trends",
+    "last4Weeks": "Last 4 Weeks",
+    "last12Months": "Last 12 Months",
+    "refreshTrends": "Refresh Trends",
+    "getStarted": "Select a tool above to get started",
+    "feedback": {
+      "reportGenerated": "Report generated successfully",
+      "reportFailed": "Failed to generate report",
+      "trendsLoaded": "Trends loaded",
+      "trendsFailed": "Failed to load trends",
+      "csvExported": "CSV exported successfully",
+      "csvFailed": "Failed to export CSV",
+      "escalated": "Auto-escalated {count} critical incidents",
+      "escalateFailed": "Failed to auto-escalate",
+      "enterAssignee": "Please enter an assignee",
+      "assigned": "Assigned {count} incidents to {assignee}",
+      "assignFailed": "Failed to bulk assign"
+    }
+  },
+  "loginPage": {
+    "badge": "PesaGuard Control Center",
+    "title": "Access control",
+    "summary": "Secure demo authentication. Production auth layer can be integrated later.",
+    "email": "Email",
+    "password": "Password",
+    "emailPlaceholder": "ops@pesaguard.io",
+    "passwordPlaceholder": "••••••••",
+    "signIn": "Sign in",
+    "invalidCredentials": "Please enter a valid email and password.",
+    "demoHint": "Demo credentials:"
+  },
   "status": {
     "title": "Pilot Service Status",
     "summary": "PesaGuard is operating normally, with service monitoring, backup automation, retention enforcement, and incident response controls active across the platform."
-  },
-  "scope": {
-    "label": "Current scope: M-Pesa / Daraja only"
   },
   "dashboard": {
     "heroStats": {
@@ -154,7 +357,10 @@
       "alertChannelsLabel": "Active channels (comma-separated)",
       "thresholds": "Incident thresholds",
       "slaPolicy": "SLA policy",
-      "preferredLocale": "Preferred locale",
+      "preferredLocale": "Tenant default locale",
+      "userLocale": "Your language preference",
+      "userLocaleHint": "Overrides the tenant default for your browser session. Alerts sent to you will use this language when configured.",
+      "useTenantDefault": "Use tenant default",
       "deploymentRegion": "Deployment region",
       "backupRegion": "Backup region",
       "logRegion": "Log region",
@@ -169,6 +375,7 @@
       "active": "Active"
     },
     "loadError": "Failed to load settings",
-    "saveError": "Failed to save settings"
+    "saveError": "Failed to save settings",
+    "userLocaleSaved": "✓ Language preference saved"
   }
 }

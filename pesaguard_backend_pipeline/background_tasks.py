@@ -38,10 +38,11 @@ def _publish_transaction_event(topic: str, payload: dict) -> None:
     publish_transaction_event(topic, payload)
 
 
-def generate_reports(report_type: str = "daily") -> dict:
+def generate_reports(report_type: str = "daily", tenant_id: str | None = None) -> dict:
     """Generate simple reconciliation summary reports per tenant and persist them.
 
     report_type: "daily" or "weekly"
+    tenant_id: optional tenant filter for single-tenant report generation.
     Returns a dict with status and created_report_count.
     """
     try:
@@ -69,7 +70,10 @@ def generate_reports(report_type: str = "daily") -> dict:
         period_start = period_end - timedelta(days=7)
 
     store = TenantSettingsStore()
-    tenants = list(store._data.keys()) if hasattr(store, "_data") else ["default"]
+    if tenant_id:
+        tenants = [tenant_id]
+    else:
+        tenants = list(store._data.keys()) if hasattr(store, "_data") else ["default"]
     created = 0
 
     with Session() as session:

@@ -314,6 +314,159 @@ class EscalationEngine:
         logger.info(f"Deleted rule {rule_id}")
         return {"status": "deleted"}
 
+    def check_webhook_health(self, tenant_id: str, webhook_id: str = None) -> Dict[str, Any]:
+        """Check health of webhooks and escalate if failures detected.
+        
+        Monitors WebhookDelivery table for recent failures:
+          - Recent failed deliveries (attempt_count > 0)
+          - Dead letter queue accumulation
+          - Webhook timeout patterns
+        
+        Escalates if failure rate exceeds threshold (default 10%).
+        """
+        from models import WebhookDelivery, DeadLetter
+        from datetime import datetime, timezone, timedelta
+        
+        now = datetime.now(timezone.utc)
+        check_window = now - timedelta(minutes=30)  # Check last 30 minutes
+        
+        # Query recent webhook deliveries
+        recent_deliveries = self.session.query(WebhookDelivery).filter(
+            WebhookDelivery.created_at >= check_window
+        ).all() if not webhook_id else self.session.query(WebhookDelivery).filter(
+            WebhookDelivery.webhook_id == webhook_id,
+            WebhookDelivery.created_at >= check_window
+        ).all()
+        
+        if not recent_deliveries:
+            return {"status": "ok", "message": "No recent webhook activity"}
+        
+        failed_count = sum(1 for d in recent_deliveries if d.status == "failed")
+        failure_rate = failed_count / len(recent_deliveries) if recent_deliveries else 0
+        
+        failure_threshold = float(os.getenv("WEBHOOK_FAILURE_THRESHOLD", "0.1"))  # 10%
+        
+        result = {
+            "webhook_id": webhook_id,
+            "total_deliveries": len(recent_deliveries),
+            "failed_deliveries": failed_count,
+            "failure_rate": round(failure_rate, 2),
+            "threshold": failure_threshold,
+        }
+        
+        if failure_rate > failure_threshold:
+            result["status"] = "escalation_triggered"
+            logger.warning(
+                f"Webhook failure rate {failure_rate:.1%} exceeds threshold {failure_threshold:.1%}",
+                extra={"tenant_id": tenant_id, "webhook_id": webhook_id}
+            )
+            
+            # Trigger escalation
+            incident = type('Incident', (), {
+                'id': f"webhook_health_{webhook_id or 'all'}_{int(now.timestamp())}",
+                'tenant_id': tenant_id,
+                'severity': 'critical' if failure_rate > 0.5 else 'warning',
+                'anomaly_type': 'webhook_delivery_failure',
+                'status': 'needs_review',
+                'details': result,
+                'detected_at': now,
+                'assignee': None,
+                'notes': f"Webhook failures detected: {failed_count}/{len(recent_deliveries)} failed",
+                'timeline': []
+            })()
+            
+            # Find and execute escalation rules for webhook health
+            webhook_health_rules = self.session.query(EscalationRule).filter(
+                EscalationRule.tenant_id == tenant_id,
+                EscalationRule.condition_field == "anomaly_type",
+                EscalationRule.condition_value == "webhook_delivery_failure",
+                EscalationRule.active == True,
+            ).all()
+            
+            escalations = []
+            for rule in webhook_health_rules:
+                escalation = self._execute_escalation(rule, incident)
+                escalations.append(escalation)
+            
+            result["escalations"] = escalations
+        else:
+            result["status"] = "ok"
+        
+        return result
+
+    def check_queue_backlog(self, tenant_id: str) -> Dict[str, Any]:
+        """Check for event queue backlog and escalate if processing lag detected.
+        
+        Monitors reconciliation job performance:
+          - Kafka consumer lag (if applicable)
+          - Dead letter queue size
+          - Processing latency
+        
+        Escalates if backlog exceeds threshold (default 1000 messages or 5 min lag).
+        """
+        from models import DeadLetter
+        from datetime import datetime, timezone, timedelta
+        
+        now = datetime.now(timezone.utc)
+        check_window = now - timedelta(minutes=5)
+        
+        # Count dead letters (unprocessed/failed items)
+        dead_letter_count = self.session.query(DeadLetter).filter(
+            DeadLetter.tenant_id == tenant_id,
+            DeadLetter.processed == False,
+            DeadLetter.created_at >= check_window,
+        ).count()
+        
+        backlog_threshold = int(os.getenv("QUEUE_BACKLOG_THRESHOLD", "1000"))
+        
+        result = {
+            "tenant_id": tenant_id,
+            "dead_letters_unprocessed": dead_letter_count,
+            "threshold": backlog_threshold,
+            "check_window_minutes": 5,
+        }
+        
+        if dead_letter_count > backlog_threshold:
+            result["status"] = "escalation_triggered"
+            logger.warning(
+                f"Queue backlog detected: {dead_letter_count} unprocessed messages exceed threshold {backlog_threshold}",
+                extra={"tenant_id": tenant_id}
+            )
+            
+            # Trigger escalation
+            now = datetime.now(timezone.utc)
+            incident = type('Incident', (), {
+                'id': f"queue_backlog_{int(now.timestamp())}",
+                'tenant_id': tenant_id,
+                'severity': 'critical' if dead_letter_count > backlog_threshold * 2 else 'warning',
+                'anomaly_type': 'queue_backlog',
+                'status': 'needs_review',
+                'details': result,
+                'detected_at': now,
+                'assignee': None,
+                'notes': f"Queue backlog: {dead_letter_count} unprocessed messages",
+                'timeline': []
+            })()
+            
+            # Find and execute escalation rules for queue backlog
+            backlog_rules = self.session.query(EscalationRule).filter(
+                EscalationRule.tenant_id == tenant_id,
+                EscalationRule.condition_field == "anomaly_type",
+                EscalationRule.condition_value == "queue_backlog",
+                EscalationRule.active == True,
+            ).all()
+            
+            escalations = []
+            for rule in backlog_rules:
+                escalation = self._execute_escalation(rule, incident)
+                escalations.append(escalation)
+            
+            result["escalations"] = escalations
+        else:
+            result["status"] = "ok"
+        
+        return result
+
     def _rule_to_dict(self, rule: EscalationRule) -> Dict[str, Any]:
         """Convert rule object to dictionary."""
         return {

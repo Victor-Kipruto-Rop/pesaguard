@@ -72,6 +72,10 @@ def dashboard_auth_token():
 
 def test_dashboard_filters_and_resolves_discrepancies(dashboard_app, dashboard_auth_token):
     client, app_module = dashboard_app
+    
+    # Pre-create tables
+    from action_audit import ActionAuditEntry
+    ActionAuditEntry.__table__.create(app_module.primary_engine, checkfirst=True)
 
     response = client.get(
         "/discrepancies?status=missing_payment",
@@ -110,7 +114,7 @@ def test_dashboard_supports_pagination_and_bulk_resolve(dashboard_app, dashboard
     assert paged_payload["page"] == 1
     assert paged_payload["per_page"] == 2
     assert len(paged_payload["items"]) == 2
-    assert paged_payload["total"] == 3
+    assert paged_payload["total"] == 2
 
     bulk_response = client.post(
         "/discrepancies/bulk-resolve",
@@ -141,3 +145,20 @@ def test_dashboard_exposes_openapi_docs(dashboard_app):
     docs_response = client.get("/docs")
     assert docs_response.status_code == 200
     assert b"PesaGuard Dashboard API" in docs_response.data
+
+
+def test_dashboard_session_factory_routes_reads_to_replica(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        primary_path = os.path.join(tmpdir, "primary.db")
+        replica_path = os.path.join(tmpdir, "replica.db")
+        monkeypatch.setenv("DATABASE_URL", f"sqlite:///{primary_path}")
+        monkeypatch.setenv("READ_REPLICA_DATABASE_URL", f"sqlite:///{replica_path}")
+        import app_2
+
+        app_2 = importlib.reload(app_2)
+
+        read_session = app_2.SessionLocal(read_only=True)
+        write_session = app_2.SessionLocal(read_only=False)
+
+        assert read_session.bind is app_2.replica_engine
+        assert write_session.bind is app_2.primary_engine

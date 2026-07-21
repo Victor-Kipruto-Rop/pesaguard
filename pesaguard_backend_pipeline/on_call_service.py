@@ -247,3 +247,128 @@ class OnCallService:
             "escalation_level": rotation.escalation_level,
             "created_at": rotation.created_at.isoformat(),
         }
+
+    def notify_escalation(
+        self,
+        tenant_id: str,
+        incident_id: str,
+        severity: str,
+        message: str,
+        escalation_level: int = 1,
+    ) -> Dict[str, Any]:
+        """Notify on-call operator of escalation.
+        
+        Finds active on-call operator at specified escalation level
+        and sends alert via SMS/email/slack.
+        
+        Args:
+            tenant_id: Tenant identifier
+            incident_id: Unique incident ID
+            severity: Severity level (critical, warning, info)
+            message: Alert message
+            escalation_level: Which tier of on-call to notify (1=first line, 2=second, etc.)
+            
+        Returns:
+            Dict with notification status and operator contacted
+        """
+        from notifier import send_sms_alert, send_email_alert
+        import logging
+        logger = logging.getLogger("pesaguard.on_call")
+        
+        # Get active on-call operator at this escalation level
+        active_ops = self.get_active_rotations(tenant_id, escalation_level=escalation_level)
+        
+        if not active_ops:
+            logger.warning(
+                f"No active on-call operator at level {escalation_level} for tenant {tenant_id}",
+                extra={"tenant_id": tenant_id, "escalation_level": escalation_level}
+            )
+            return {
+                "status": "failed",
+                "reason": "no_active_operator",
+                "escalation_level": escalation_level,
+            }
+        
+        # Use first active operator
+        operator = active_ops[0]
+        operator_id = operator.get("operator_id")
+        operator_name = operator.get("operator_name")
+        operator_email = operator.get("operator_email")
+        operator_phone = operator.get("operator_phone")
+        
+        # Build alert dict for notifier
+        discrepancy = {
+            "trans_id": incident_id,
+            "severity": severity,
+            "status": "escalated",
+            "tenant_id": tenant_id,
+            "anomalies": [message],
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+        
+        notifications_sent = []
+        
+        # Send SMS if phone available
+        if operator_phone:
+            try:
+                sms_result = send_sms_alert(discrepancy)
+                notifications_sent.append({"channel": "sms", "status": "sent" if sms_result else "failed"})
+            except Exception as e:
+                logger.error(f"Failed to send SMS to {operator_phone}: {e}")
+                notifications_sent.append({"channel": "sms", "status": "error", "error": str(e)})
+        
+        # Send email if email available
+        if operator_email:
+            try:
+                email_result = send_email_alert(discrepancy)
+                notifications_sent.append({"channel": "email", "status": "sent" if email_result else "failed"})
+            except Exception as e:
+                logger.error(f"Failed to send email to {operator_email}: {e}")
+                notifications_sent.append({"channel": "email", "status": "error", "error": str(e)})
+        
+        logger.info(
+            f"Escalation notification sent to {operator_name} (level {escalation_level})",
+            extra={
+                "tenant_id": tenant_id,
+                "operator_id": operator_id,
+                "incident_id": incident_id,
+                "escalation_level": escalation_level
+            }
+        )
+        
+        return {
+            "status": "sent",
+            "operator_id": operator_id,
+            "operator_name": operator_name,
+            "escalation_level": escalation_level,
+            "notifications": notifications_sent,
+        }
+
+    def get_escalation_chain(
+        self,
+        tenant_id: str,
+        start_level: int = 1,
+        max_levels: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """Get escalation chain (sequence of on-call operators by level).
+        
+        Used to determine who to contact if primary on-call is unavailable.
+        
+        Args:
+            tenant_id: Tenant identifier
+            start_level: Starting escalation level
+            max_levels: Maximum levels to retrieve
+            
+        Returns:
+            List of active operators ordered by escalation level
+        """
+        chain = []
+        for level in range(start_level, start_level + max_levels):
+            active_ops = self.get_active_rotations(tenant_id, escalation_level=level)
+            if active_ops:
+                chain.extend(active_ops)
+            else:
+                # Stop if no operator at this level
+                break
+        
+        return chain

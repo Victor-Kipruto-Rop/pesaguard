@@ -7,7 +7,7 @@
       "warning": 1000,
       "critical": 5000
     },
-    "preferred_locale": "sw",
+    "preferred_locale": "en",
     "deployment_region": "ke-1",
     "backup_region": "ke-1",
     "log_region": "ke-1",

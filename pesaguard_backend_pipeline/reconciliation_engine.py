@@ -191,3 +191,90 @@ def _parse_event_time(value: Any) -> Optional[datetime]:
 
 def _parse_record_time(value: Any) -> Optional[datetime]:
     return _parse_event_time(value)
+
+
+def reconcile_with_idempotency(
+    event: Dict[str, Any],
+    internal_records: Sequence[Dict[str, Any]],
+    event_store,
+    discrepancy_dao,
+    session,
+    tenant_id: str = None,
+    tenant_settings: Optional[Dict[str, Any]] = None,
+    window_minutes: int = 15,
+) -> Dict[str, Any]:
+    """Atomically evaluate and record reconciliation within a transaction.
+    
+    Wraps both idempotency check and reconciliation write in a single DB transaction
+    to ensure that if a duplicate is detected, no reconciliation record is written.
+    
+    Args:
+        event: Daraja webhook event dict
+        internal_records: Internal ledger records to match against
+        event_store: EventStore instance for idempotency tracking
+        discrepancy_dao: DAO for persisting Discrepancy records
+        session: SQLAlchemy session with transaction context
+        tenant_id: Optional tenant identifier
+        tenant_settings: Per-tenant reconciliation settings
+        window_minutes: Reconciliation time window
+        
+    Returns:
+        Reconciliation evaluation result dict with status/severity/match
+    """
+    trans_id = str(event.get("TransID", "unknown"))
+    
+    try:
+        # Begin transaction (implicit in SQLAlchemy with session context)
+        
+        # Step 1: Idempotency check within transaction
+        if event_store.already_processed(trans_id):
+            logger.info("Idempotency: duplicate trans_id=%s detected, skipping reconciliation", trans_id)
+            return {
+                "trans_id": trans_id,
+                "status": "duplicate_ignored",
+                "severity": "info",
+                "anomalies": ["duplicate_transaction_id"],
+            }
+        
+        # Step 2: Evaluate reconciliation
+        seen_trans_ids = set()  # Transaction-scoped set for local dedup
+        evaluation = evaluate_transaction(
+            event,
+            internal_records,
+            seen_trans_ids,
+            window_minutes=window_minutes,
+            tenant_settings=tenant_settings,
+        )
+        evaluation["tenant_id"] = tenant_id
+        evaluation["event"] = event
+        
+        # Step 3: Persist reconciliation outcome
+        if evaluation.get("status") in {"needs_review", "missing_payment"} or evaluation.get("anomalies"):
+            # Create Discrepancy record within same transaction
+            if discrepancy_dao:
+                disc_id = f"{trans_id}-{evaluation.get('status', 'unknown')}"
+                discrepancy_dao.save_discrepancy(
+                    session=session,
+                    id=disc_id,
+                    trans_id=trans_id,
+                    tenant_id=tenant_id,
+                    anomaly_type=evaluation.get("status", "unknown"),
+                    severity=evaluation.get("severity", "warning"),
+                    details=evaluation,
+                )
+        
+        # Step 4: Mark as processed
+        event_store.mark_processed(
+            event,
+            tenant_id=tenant_id,
+            source_ip=None,
+            signature_verified=False,
+        )
+        
+        # Transaction commits here (implicit on session.commit() or context exit)
+        return evaluation
+        
+    except Exception as e:
+        logger.exception("Error during atomic reconciliation for trans_id=%s", trans_id)
+        session.rollback()  # Ensure rollback on error
+        raise

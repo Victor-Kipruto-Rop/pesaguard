@@ -1,10 +1,12 @@
 Pilot Agreement Draft
 =====================
 
-This pilot agreement defines the scope of the PesaGuard pilot, including support expectations, commercial terms, and termination conditions. The pilot is intended to validate reconciliation monitoring, anomaly detection, and operational support services.
+This pilot agreement defines the scope of the PesaGuard pilot, including support expectations, commercial terms, and termination conditions. The pilot is intended to validate reconciliation monitoring, anomaly detection, localized alerting, and operational support services.
 
 Key points:
 - Scope covers pilot deployment and support for agreed workflows.
 - Duration is defined by the agreed pilot period unless terminated earlier.
 - Support and incident handling will follow the documented pilot support process.
 - Data handling will follow the retention, deletion, and security documentation.
+- The pilot includes access to the documented status, support, and readiness experience for customer review.
+- Alert delivery will be validated for tenant language preferences and Kenya-specific formatting during the pilot.

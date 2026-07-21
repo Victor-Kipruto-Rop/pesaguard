@@ -2,7 +2,7 @@
 
 ## Primary support route
 - Shared Slack channel: `#pesaguard-pilot`
-- Email: `pilot-support@pesaguard.example`
+- Email: `pilot-support@pesaguard.gmail.com`
 - On-call contact: designated pilot operator
 
 ## Response expectations
