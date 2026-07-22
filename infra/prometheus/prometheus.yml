@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: 'pesaguard'
+    static_configs:
+      - targets: ['host.docker.internal:5000']
+        labels:
+          service: pesaguard
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+# Note: When running Prometheus inside Docker on Linux, replace 'host.docker.internal'
+# with the host IP or run Prometheus on the host directly and scrape http://localhost:5000

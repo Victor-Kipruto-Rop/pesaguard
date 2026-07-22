@@ -10,6 +10,17 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 from enum import Enum
+import threading
+
+# Prometheus metrics (optional)
+try:
+    from prometheus_client import Counter
+except Exception:  # pragma: no cover - prometheus optional
+    Counter = None
+try:
+    from prometheus_client import Histogram
+except Exception:
+    Histogram = None
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -50,18 +61,47 @@ class EventStore:
         self.engine = None
         self.Session = None
         self._initialized = False
+        self._init_lock = threading.Lock()
 
     def _ensure_ready(self) -> None:
         if self._initialized:
             return
 
-        self.engine = create_engine(
-            self.database_url,
-            isolation_level=self.isolation_level if self.database_url.startswith("postgresql") else None,
-        )
-        Base.metadata.create_all(self.engine)
-        self.Session = sessionmaker(bind=self.engine)
-        self._initialized = True
+        # Serialize DDL and engine/session setup to avoid concurrent create_all races
+        with self._init_lock:
+            if self._initialized:
+                return
+            self.engine = create_engine(
+                self.database_url,
+                isolation_level=self.isolation_level if self.database_url.startswith("postgresql") else None,
+            )
+            Base.metadata.create_all(self.engine)
+            self.Session = sessionmaker(bind=self.engine)
+            self._initialized = True
+
+        # Initialize Prometheus counters if available
+        if Counter is not None and not hasattr(self, "_metrics_initialized"):
+            try:
+                # module-level counters shared across EventStore instances
+                global MARK_PROCESSED_STORED, MARK_PROCESSED_DUPLICATE, MARK_PROCESSED_ERROR
+                MARK_PROCESSED_STORED = Counter(
+                    "pesaguard_mark_processed_stored_total", "Processed transactions stored"
+                )
+                MARK_PROCESSED_DUPLICATE = Counter(
+                    "pesaguard_mark_processed_duplicate_total", "Processed transactions duplicates"
+                )
+                MARK_PROCESSED_ERROR = Counter(
+                    "pesaguard_mark_processed_error_total", "Processed transactions errors"
+                )
+                # latency distribution (seconds)
+                MARK_PROCESSED_LATENCY = Histogram(
+                    "pesaguard_mark_processed_processing_seconds",
+                    "Processing latency for mark_processed",
+                    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+                )
+                self._metrics_initialized = True
+            except Exception:
+                pass
 
     def already_processed(self, trans_id: str, source_ip: str = None) -> bool:
         """Check if a webhook callback has already been processed (idempotency gate).
@@ -97,6 +137,32 @@ class EventStore:
                 trans_id,
             )
             return True
+
+    def get_processed(self, trans_id: str) -> Optional[dict]:
+        """Return a dict representation of the ProcessedTransaction for `trans_id` or None."""
+        try:
+            self._ensure_ready()
+            with self.Session() as session:
+                pt = session.query(ProcessedTransaction).filter(
+                    ProcessedTransaction.daraja_trans_id == str(trans_id)
+                ).first()
+                if not pt:
+                    return None
+                return {
+                    "id": pt.id,
+                    "daraja_trans_id": pt.daraja_trans_id,
+                    "tenant_id": pt.tenant_id,
+                    "status": pt.status,
+                    "processing_time_ms": pt.processing_time_ms,
+                    "received_at": pt.received_at.isoformat() if pt.received_at else None,
+                    "webhook_attempt_number": pt.webhook_attempt_number,
+                    "source_ip": pt.source_ip,
+                    "signature_verified": bool(pt.signature_verified),
+                    "error_reason": pt.error_reason,
+                }
+        except SQLAlchemyError:
+            logger.exception("get_processed() DB error for trans_id=%s", trans_id)
+            return None
 
     def mark_processed(
         self,
@@ -161,6 +227,11 @@ class EventStore:
                 session.add(t_record)
 
                 session.commit()
+                try:
+                    if Counter is not None:
+                        MARK_PROCESSED_STORED.inc()
+                except Exception:
+                    pass
                 return ProcessResult.STORED
 
         except IntegrityError:
@@ -172,6 +243,11 @@ class EventStore:
                 "Duplicate webhook callback ignored for trans_id=%s (unique constraint)",
                 trans_id,
             )
+            try:
+                if Counter is not None:
+                    MARK_PROCESSED_DUPLICATE.inc()
+            except Exception:
+                pass
             return ProcessResult.DUPLICATE
 
         except SQLAlchemyError:
@@ -182,6 +258,11 @@ class EventStore:
                 "duplicate — this transaction was NOT stored and needs retry/investigation.",
                 trans_id,
             )
+            try:
+                if Counter is not None:
+                    MARK_PROCESSED_ERROR.inc()
+            except Exception:
+                pass
             return ProcessResult.ERROR
 
     def mark_processed_in_session(
@@ -257,7 +338,21 @@ class EventStore:
                 "unique constraint)",
                 trans_id,
             )
+            try:
+                if Counter is not None:
+                    MARK_PROCESSED_DUPLICATE.inc()
+            except Exception:
+                pass
             return ProcessResult.DUPLICATE
+
+        # If we made it here, the session holds the new rows — increment stored
+        # (Don't commit here; caller owns the transaction boundary)
+        # Note: we increment the counter now because the DB flush succeeded.
+        try:
+            if Counter is not None:
+                MARK_PROCESSED_STORED.inc()
+        except Exception:
+            pass
 
         return ProcessResult.STORED
 
@@ -281,6 +376,12 @@ class EventStore:
                         pt_record.error_reason = error_reason
                     if processing_time_ms is not None:
                         pt_record.processing_time_ms = processing_time_ms
+                        try:
+                            if Histogram is not None:
+                                # processing_time_ms -> seconds
+                                MARK_PROCESSED_LATENCY.observe(float(processing_time_ms) / 1000.0)
+                        except Exception:
+                            pass
                     session.commit()
                 else:
                     logger.warning(
