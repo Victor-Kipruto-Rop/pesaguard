@@ -10,7 +10,7 @@ from flask import Blueprint, Response, jsonify, request
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
 from models import Discrepancy
-from models import DeadLetter, Report, Transaction
+from models import DeadLetter, InternalRecord, Report, Transaction
 from action_audit import ActionAuditEntry
 
 bp = Blueprint("export_routes", __name__, url_prefix="/v1")
@@ -138,5 +138,49 @@ def customer_transactions(tenant_id: str):
             "created_at": t.created_at.isoformat() if t.created_at else None,
         } for t in rows.limit(200).all()]
         return jsonify({"items": items}), 200
+    finally:
+        session.close()
+
+
+@bp.route("/customers/<tenant_id>/transactions/<trans_id>", methods=["GET"])
+def customer_transaction_detail(tenant_id: str, trans_id: str):
+    """Return the full record for a single transaction, including the raw
+    Daraja payload and a best-effort matched internal record, for the
+    transaction detail side panel."""
+    from app_2 import SessionLocal
+
+    session = SessionLocal()
+    try:
+        txn = session.query(Transaction).filter(Transaction.trans_id == trans_id).first()
+        if not txn:
+            return jsonify({"error": "not found"}), 404
+
+        matched_record = None
+        candidate = (
+            session.query(InternalRecord)
+            .filter(InternalRecord.phone_number == txn.msisdn)
+            .order_by(InternalRecord.synced_at.desc())
+            .first()
+        )
+        if candidate is not None and abs((candidate.amount or 0) - (txn.trans_amount or 0)) < 0.01:
+            matched_record = {
+                "internal_ref": candidate.internal_ref,
+                "amount": candidate.amount,
+                "phone_number": candidate.phone_number,
+                "status": candidate.status,
+                "synced_at": candidate.synced_at.isoformat() if candidate.synced_at else None,
+            }
+
+        payload = {
+            "trans_id": txn.trans_id,
+            "trans_amount": txn.trans_amount,
+            "msisdn": txn.msisdn,
+            "business_short_code": txn.business_short_code,
+            "trans_time": txn.trans_time,
+            "created_at": txn.created_at.isoformat() if txn.created_at else None,
+            "raw_payload": txn.raw_payload,
+            "matched_record": matched_record,
+        }
+        return jsonify(payload), 200
     finally:
         session.close()
