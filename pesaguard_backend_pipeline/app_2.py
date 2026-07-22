@@ -4,8 +4,8 @@ import logging
 import os
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
-from io import StringIO
+from typing import Any, Dict, List, Optional
+from io import BytesIO
 import csv
 
 from flask import Flask, jsonify, request, send_file, Response, g, has_request_context
@@ -45,20 +45,22 @@ primary_engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 engine = primary_engine
 replica_engine = create_engine(READ_REPLICA_DATABASE_URL or DATABASE_URL, pool_pre_ping=True) if READ_REPLICA_DATABASE_URL else None
 
+# CHANGED: default is now "1" (auth required). A financial reconciliation API
+# should never be silently open by default — opting OUT should require a
+# deliberate action (e.g. local dev), not opting in for production.
+API_AUTH_REQUIRED = os.getenv("PESAGUARD_API_AUTH_REQUIRED", "1") == "1"
+
 
 def _resolve_engine(read_only: bool | None = None):
-    # [Task Requirement] Read replicas once reporting queries compete with reconciliation writes
-    # Logic: Force reporting/GET queries to use replica_engine if available.
     if read_only is True:
         return replica_engine if replica_engine else primary_engine
     if read_only is False:
         return primary_engine
-        
+
     if has_request_context():
-        # Dashboards and reporting endpoints are GET; Reconciliation and action endpoints are POST/PUT/DELETE
         if request.method in {"GET", "HEAD", "OPTIONS"}:
             return replica_engine if replica_engine else primary_engine
-            
+
     return primary_engine
 
 
@@ -67,11 +69,33 @@ def SessionLocal(read_only: bool | None = None):
     return sessionmaker(bind=engine, expire_on_commit=False)()
 
 
+def _current_tenant_id() -> Optional[str]:
+    """Tenant of the authenticated caller, or None if unauthenticated (only
+    reachable at all when API_AUTH_REQUIRED is False, e.g. local dev)."""
+    user = get_current_user()
+    return user.tenant_id if user else None
+
+
+def _tenant_scoped_get(session, model, record_id: str, tenant_id: Optional[str]):
+    """Fetch a record by ID, but ONLY if it belongs to the caller's tenant.
+
+    Replaces the previous pattern of `session.get(Model, id)` with no tenant
+    check, which let a valid token for tenant A read/modify tenant B's
+    records just by guessing or enumerating IDs (IDOR). When tenant_id is
+    None (auth disabled, e.g. local dev), falls back to the old unscoped
+    lookup so local testing still works.
+    """
+    record = session.get(model, record_id)
+    if record is None:
+        return None
+    if tenant_id is not None and getattr(record, "tenant_id", None) != tenant_id:
+        return None
+    return record
+
+
 @app.before_request
 def _ensure_tables():
-    # Skip table creation during request if in-memory or if it might fail (handled by init_db.py generally)
     if os.getenv("USE_IN_MEMORY_TEST_DB") == "true":
-        # Make sure in memory SQLite creates tables
         try:
             Base.metadata.create_all(primary_engine)
             AuditBase.metadata.create_all(primary_engine)
@@ -114,7 +138,11 @@ def enforce_api_security():
         response.headers["Retry-After"] = str(status.get("retry_after", 60))
         return response
 
-    if os.getenv("PESAGUARD_API_AUTH_REQUIRED", "0") == "1":
+    # CHANGED: this now runs by default (API_AUTH_REQUIRED defaults True).
+    # Every route in this file handles real customer financial/reconciliation
+    # data — none of them should be reachable without a valid token unless a
+    # developer has explicitly opted out for local testing.
+    if API_AUTH_REQUIRED:
         if not auth_header.startswith("Bearer "):
             return jsonify({"error": "missing_auth_header"}), 401
 
@@ -155,15 +183,21 @@ def health():
 
 
 @app.route("/v1/settings", methods=["POST"])
+@require_auth("write:settings")
 def update_settings():
+    """CHANGED: was gated by a spoofable `X-Role: admin` request header with
+    no signature behind it — anyone could set that header themselves. Now
+    uses the same AuthRBAC/require_auth flow as the rest of the API, plus a
+    tenant check so a valid token for tenant A can't update tenant B's
+    settings just by passing a different tenant_id in the body."""
     payload = request.get_json(silent=True) or {}
     tenant_id = payload.get("tenant_id")
     if not tenant_id:
         return jsonify({"error": "tenant_id is required"}), 400
 
-    role = (request.headers.get("X-Role") or "viewer").lower()
-    if role != "admin":
-        return jsonify({"error": "forbidden"}), 403
+    current_tenant = _current_tenant_id()
+    if current_tenant is not None and tenant_id != current_tenant:
+        return jsonify({"error": "tenant_access_denied"}), 403
 
     return jsonify(settings_store.update(tenant_id, payload)), 200
 
@@ -230,13 +264,19 @@ def docs():
 
 
 @app.route("/metrics", methods=["GET"])
+@require_auth("read:metrics")
 def metrics():
     if "text/plain" in request.headers.get("Accept", ""):
         return Response(build_metrics_payload(), mimetype="text/plain; version=0.0.4")
 
-    session = SessionLocal()
+    tenant_id = _current_tenant_id()
+    session = SessionLocal(read_only=True)
     try:
-        discrepancies = session.query(Discrepancy).all()
+        query = session.query(Discrepancy)
+        if tenant_id is not None:
+            query = query.filter(Discrepancy.tenant_id == tenant_id)
+        discrepancies = query.all()
+
         open_count = sum(1 for item in discrepancies if not item.resolved)
         resolved_count = len(discrepancies) - open_count
         severity_breakdown = Counter(item.severity or "unknown" for item in discrepancies)
@@ -247,11 +287,13 @@ def metrics():
             day = datetime.now(timezone.utc).date() - timedelta(days=offset)
             day_start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
             day_end = day_start + timedelta(days=1)
-            count = session.query(Discrepancy).filter(
+            day_query = session.query(Discrepancy).filter(
                 Discrepancy.detected_at >= day_start,
                 Discrepancy.detected_at < day_end,
-            ).count()
-            trend_series.append(count)
+            )
+            if tenant_id is not None:
+                day_query = day_query.filter(Discrepancy.tenant_id == tenant_id)
+            trend_series.append(day_query.count())
 
         return jsonify({
             "transactions_per_minute": 128,
@@ -310,18 +352,13 @@ def discrepancies():
     if current_user and requested_tenant and requested_tenant != current_user.tenant_id:
         return jsonify({"error": "tenant_access_denied"}), 403
 
-    session = SessionLocal()
+    session = SessionLocal(read_only=True)
     try:
         rows = session.query(Discrepancy)
         if status:
             rows = rows.filter((Discrepancy.anomaly_type == status) | (Discrepancy.status == status))
         if severity:
             rows = rows.filter(Discrepancy.severity == severity)
-        # [Task Requirement] Multi-tenant data isolation verification
-        # Ensure all discrepancy queries are scoped to the authenticated tenant when provided.
-        # If no tenant/context is provided, do not implicitly restrict results here so
-        # test and admin views can query across tenants. Production deployments should
-        # enforce tenant scoping via authentication and API gateway policies.
         if tenant:
             rows = rows.filter(Discrepancy.tenant_id == tenant)
         if resolved == "open":
@@ -362,20 +399,38 @@ def discrepancies():
 
 
 @app.route("/tenants/<tenant_id>/settings", methods=["GET", "POST"])
+@require_auth("read:settings")
 def tenant_settings(tenant_id: str):
+    """CHANGED: previously had NO auth check at all — any request could read
+    or overwrite any tenant's settings just by supplying a tenant_id in the
+    URL. Now requires auth, and a POST additionally requires write permission
+    plus a tenant match."""
+    current_tenant = _current_tenant_id()
+    if current_tenant is not None and tenant_id != current_tenant:
+        return jsonify({"error": "tenant_access_denied"}), 403
+
     if request.method == "GET":
         return jsonify(settings_store.get(tenant_id)), 200
+
+    user = get_current_user()
+    if user is not None and not has_permission(user, "write:settings"):
+        return jsonify({"error": "forbidden"}), 403
 
     payload = request.get_json(silent=True) or {}
     return jsonify(settings_store.update(tenant_id, payload)), 200
 
 
 @app.route("/activity-feed", methods=["GET"])
+@require_auth("read:discrepancies")
 def activity_feed():
-    limit = int(request.args.get("limit", "5"))
-    session = SessionLocal()
+    limit = min(int(request.args.get("limit", "5")), 100)
+    tenant_id = _current_tenant_id()
+    session = SessionLocal(read_only=True)
     try:
-        discrepancies = session.query(Discrepancy).order_by(Discrepancy.detected_at.desc()).limit(limit).all()
+        query = session.query(Discrepancy)
+        if tenant_id is not None:
+            query = query.filter(Discrepancy.tenant_id == tenant_id)
+        discrepancies = query.order_by(Discrepancy.detected_at.desc()).limit(limit).all()
         items = []
         for item in discrepancies:
             timeline = item.timeline or []
@@ -404,10 +459,15 @@ def activity_feed():
 
 
 @app.route("/assignment-queue", methods=["GET"])
+@require_auth("read:discrepancies")
 def assignment_queue():
-    session = SessionLocal()
+    tenant_id = _current_tenant_id()
+    session = SessionLocal(read_only=True)
     try:
-        discrepancies = session.query(Discrepancy).filter(Discrepancy.resolved.is_(False)).order_by(Discrepancy.detected_at.desc()).all()
+        query = session.query(Discrepancy).filter(Discrepancy.resolved.is_(False))
+        if tenant_id is not None:
+            query = query.filter(Discrepancy.tenant_id == tenant_id)
+        discrepancies = query.order_by(Discrepancy.detected_at.desc()).all()
         items = []
         for item in discrepancies:
             queue_status = "assigned" if item.assignee else "needs_assignment"
@@ -428,16 +488,22 @@ def assignment_queue():
 @app.route("/discrepancies/<discrepancy_id>/resolve", methods=["POST"])
 @require_auth("write:discrepancies")
 def resolve_discrepancy(discrepancy_id: str):
+    tenant_id = _current_tenant_id()
     session = SessionLocal()
     try:
-        discrepancy = session.get(Discrepancy, discrepancy_id)
+        discrepancy = _tenant_scoped_get(session, Discrepancy, discrepancy_id, tenant_id)
         if not discrepancy:
             return jsonify({"error": "not found"}), 404
         payload = request.get_json(silent=True) or {}
         discrepancy.resolved = True
         discrepancy.resolved_at = datetime.now(timezone.utc)
         discrepancy.resolution_note = payload.get("note", discrepancy.resolution_note)
-        discrepancy.details = payload.get("note", discrepancy.details)
+        # REMOVED: `discrepancy.details = payload.get("note", discrepancy.details)`
+        # This was overwriting the original reconciliation evaluation (the raw
+        # event, match details, anomaly reasons) with a plain resolution note
+        # the moment an incident was closed — permanently destroying the audit
+        # trail for exactly the records someone would later want to review.
+        # `details` is left untouched; `resolution_note` already captures the note.
         session.add(ActionAuditEntry(
             id=f"audit-{datetime.now(timezone.utc).timestamp()}",
             tenant_id=discrepancy.tenant_id or "default",
@@ -454,20 +520,25 @@ def resolve_discrepancy(discrepancy_id: str):
 @app.route("/discrepancies/bulk-resolve", methods=["POST"])
 @require_auth("bulk:operations")
 def bulk_resolve_discrepancies():
+    tenant_id = _current_tenant_id()
     session = SessionLocal()
     try:
         payload = request.get_json(silent=True) or {}
         ids = payload.get("ids", [])
         note = payload.get("note", "Bulk resolved")
         updated = 0
+        skipped_ids = []
         for discrepancy_id in ids:
-            discrepancy = session.get(Discrepancy, discrepancy_id)
+            discrepancy = _tenant_scoped_get(session, Discrepancy, discrepancy_id, tenant_id)
             if not discrepancy:
+                skipped_ids.append(discrepancy_id)
                 continue
             discrepancy.resolved = True
             discrepancy.resolved_at = datetime.now(timezone.utc)
             discrepancy.resolution_note = note
-            discrepancy.details = note
+            # REMOVED: `discrepancy.details = note` — same audit-trail loss bug
+            # as resolve_discrepancy above; details must never be overwritten
+            # by a resolution note.
             discrepancy.timeline = discrepancy.timeline or []
             discrepancy.timeline.append({
                 "ts": datetime.now(timezone.utc).isoformat(),
@@ -476,16 +547,18 @@ def bulk_resolve_discrepancies():
             })
             updated += 1
         session.commit()
-        return jsonify({"status": "resolved", "updated": updated}), 200
+        return jsonify({"status": "resolved", "updated": updated, "skipped_ids": skipped_ids}), 200
     finally:
         session.close()
 
 
 @app.route("/discrepancies/<discrepancy_id>/notes", methods=["POST"])
+@require_auth("write:discrepancies")
 def save_notes(discrepancy_id: str):
+    tenant_id = _current_tenant_id()
     session = SessionLocal()
     try:
-        discrepancy = session.get(Discrepancy, discrepancy_id)
+        discrepancy = _tenant_scoped_get(session, Discrepancy, discrepancy_id, tenant_id)
         if not discrepancy:
             return jsonify({"error": "not found"}), 404
         payload = request.get_json(silent=True) or {}
@@ -505,10 +578,12 @@ def save_notes(discrepancy_id: str):
 
 
 @app.route("/discrepancies/<discrepancy_id>/assign", methods=["POST"])
+@require_auth("write:discrepancies")
 def assign_discrepancy(discrepancy_id: str):
+    tenant_id = _current_tenant_id()
     session = SessionLocal()
     try:
-        discrepancy = session.get(Discrepancy, discrepancy_id)
+        discrepancy = _tenant_scoped_get(session, Discrepancy, discrepancy_id, tenant_id)
         if not discrepancy:
             return jsonify({"error": "not found"}), 404
         payload = request.get_json(silent=True) or {}
@@ -527,25 +602,27 @@ def assign_discrepancy(discrepancy_id: str):
 
 
 @app.route("/analytics/sla-metrics", methods=["GET"])
+@require_auth("read:discrepancies")
 def analytics_sla_metrics():
     """Returns SLA compliance statistics for critical incidents."""
-    session = SessionLocal()
+    tenant_id = _current_tenant_id()
+    session = SessionLocal(read_only=True)
     try:
-        discrepancies = session.query(Discrepancy).filter(Discrepancy.severity == "critical").all()
-        on_track = 0
-        warning = 0
-        breaching = 0
-        
+        query = session.query(Discrepancy).filter(Discrepancy.severity == "critical")
+        if tenant_id is not None:
+            query = query.filter(Discrepancy.tenant_id == tenant_id)
+        discrepancies = query.all()
+        on_track = warning = breaching = 0
+
         for item in discrepancies:
-            sla_context = _build_sla_context(item)
-            sla_status = sla_context.get("sla_status", "on_track")
+            sla_status = _build_sla_context(item).get("sla_status", "on_track")
             if sla_status == "on_track":
                 on_track += 1
             elif sla_status == "warning":
                 warning += 1
             elif sla_status == "breaching":
                 breaching += 1
-        
+
         return jsonify({
             "on_track": on_track,
             "warning": warning,
@@ -557,44 +634,40 @@ def analytics_sla_metrics():
 
 
 @app.route("/analytics/resolution-times", methods=["GET"])
+@require_auth("read:discrepancies")
 def analytics_resolution_times():
     """Returns average resolution times for resolved incidents."""
-    session = SessionLocal()
+    tenant_id = _current_tenant_id()
+    session = SessionLocal(read_only=True)
     try:
-        resolved_items = session.query(Discrepancy).filter(
+        query = session.query(Discrepancy).filter(
             Discrepancy.resolved.is_(True),
             Discrepancy.resolved_at.isnot(None),
             Discrepancy.detected_at.isnot(None),
-        ).all()
-        
+        )
+        if tenant_id is not None:
+            query = query.filter(Discrepancy.tenant_id == tenant_id)
+        resolved_items = query.all()
+
         if not resolved_items:
-            return jsonify({
-                "average_resolution_time": 0,
-                "median_resolution_time": 0,
-                "p95_resolution_time": 0,
-            }), 200
-        
+            return jsonify({"average_resolution_time": 0, "median_resolution_time": 0, "p95_resolution_time": 0}), 200
+
         resolution_times = []
         for item in resolved_items:
             detected = _normalize_datetime(item.detected_at)
             resolved = _normalize_datetime(item.resolved_at)
             if detected and resolved:
-                time_minutes = int((resolved - detected).total_seconds() // 60)
-                resolution_times.append(max(0, time_minutes))
-        
+                resolution_times.append(max(0, int((resolved - detected).total_seconds() // 60)))
+
         if not resolution_times:
-            return jsonify({
-                "average_resolution_time": 0,
-                "median_resolution_time": 0,
-                "p95_resolution_time": 0,
-            }), 200
-        
+            return jsonify({"average_resolution_time": 0, "median_resolution_time": 0, "p95_resolution_time": 0}), 200
+
         resolution_times.sort()
         average = sum(resolution_times) // len(resolution_times)
         median = resolution_times[len(resolution_times) // 2]
         p95_index = max(0, int(len(resolution_times) * 0.95) - 1)
         p95 = resolution_times[p95_index]
-        
+
         return jsonify({
             "average_resolution_time": average,
             "median_resolution_time": median,
@@ -605,48 +678,44 @@ def analytics_resolution_times():
 
 
 @app.route("/analytics/operator-stats", methods=["GET"])
+@require_auth("read:discrepancies")
 def analytics_operator_stats():
     """Returns performance statistics grouped by operator/assignee."""
-    session = SessionLocal()
+    tenant_id = _current_tenant_id()
+    session = SessionLocal(read_only=True)
     try:
-        discrepancies = session.query(Discrepancy).all()
+        query = session.query(Discrepancy)
+        if tenant_id is not None:
+            query = query.filter(Discrepancy.tenant_id == tenant_id)
+        discrepancies = query.all()
         operator_data: Dict[str, Dict[str, Any]] = {}
-        
+
         for item in discrepancies:
             assignee = item.assignee or "Unassigned"
-            if assignee not in operator_data:
-                operator_data[assignee] = {
-                    "assigned_count": 0,
-                    "resolved_count": 0,
-                    "total_resolution_time": 0,
-                    "resolution_samples": 0,
-                }
-            
-            operator_data[assignee]["assigned_count"] += 1
-            
+            data = operator_data.setdefault(assignee, {
+                "assigned_count": 0, "resolved_count": 0,
+                "total_resolution_time": 0, "resolution_samples": 0,
+            })
+            data["assigned_count"] += 1
             if item.resolved:
-                operator_data[assignee]["resolved_count"] += 1
+                data["resolved_count"] += 1
                 detected = _normalize_datetime(item.detected_at)
                 resolved = _normalize_datetime(item.resolved_at)
                 if detected and resolved:
-                    time_minutes = max(0, int((resolved - detected).total_seconds() // 60))
-                    operator_data[assignee]["total_resolution_time"] += time_minutes
-                    operator_data[assignee]["resolution_samples"] += 1
-        
+                    minutes = max(0, int((resolved - detected).total_seconds() // 60))
+                    data["total_resolution_time"] += minutes
+                    data["resolution_samples"] += 1
+
         stats = []
         for operator, data in operator_data.items():
-            avg_time = 0
-            if data["resolution_samples"] > 0:
-                avg_time = data["total_resolution_time"] // data["resolution_samples"]
-            
+            avg_time = data["total_resolution_time"] // data["resolution_samples"] if data["resolution_samples"] else 0
             stats.append({
                 "operator": operator,
                 "assigned_count": data["assigned_count"],
                 "resolved_count": data["resolved_count"],
                 "average_resolution_time": avg_time,
             })
-        
-        # Sort by resolved_count descending
+
         stats.sort(key=lambda x: x["resolved_count"], reverse=True)
         return jsonify(stats), 200
     finally:
@@ -654,16 +723,27 @@ def analytics_operator_stats():
 
 
 @app.route("/discrepancies/export/csv", methods=["GET"])
+@require_auth("read:discrepancies")
 def export_discrepancies_csv():
-    """Export incidents as CSV file."""
+    """Export incidents as CSV file.
+
+    CHANGED: this previously had NO auth requirement at all — a full CSV of
+    every discrepancy (tenant IDs, notes, transaction IDs) was downloadable
+    by anyone who found the URL. Now requires auth and is tenant-scoped.
+    Also fixed: `send_file(StringIO(...))` is not reliable across Flask/
+    Werkzeug versions, which expect a binary stream for file-like objects —
+    switched to BytesIO with explicit UTF-8 encoding.
+    """
     status = request.args.get("status", "").strip()
     severity = request.args.get("severity", "").strip()
     resolved = request.args.get("resolved", "").strip()
-    
-    session = SessionLocal()
+    tenant_id = _current_tenant_id()
+
+    session = SessionLocal(read_only=True)
     try:
         rows = session.query(Discrepancy)
-        
+        if tenant_id is not None:
+            rows = rows.filter(Discrepancy.tenant_id == tenant_id)
         if status:
             rows = rows.filter((Discrepancy.anomaly_type == status) | (Discrepancy.status == status))
         if severity:
@@ -672,16 +752,22 @@ def export_discrepancies_csv():
             rows = rows.filter(Discrepancy.resolved.is_(False))
         elif resolved == "resolved":
             rows = rows.filter(Discrepancy.resolved.is_(True))
-        
+
         items = rows.order_by(Discrepancy.detected_at.desc()).all()
-        
-        output = StringIO()
-        writer = csv.DictWriter(output, fieldnames=[
+
+        output = []
+        buffer = BytesIO()
+        text_wrapper = csv.writer(
+            (line for line in output),  # placeholder, replaced below
+        ) if False else None  # noop to keep structure readable
+
+        import io
+        text_buf = io.StringIO()
+        writer = csv.DictWriter(text_buf, fieldnames=[
             "id", "trans_id", "anomaly_type", "severity", "status", "resolved",
             "tenant_id", "assignee", "detected_at", "resolved_at", "notes"
         ])
         writer.writeheader()
-        
         for item in items:
             writer.writerow({
                 "id": item.id,
@@ -696,10 +782,11 @@ def export_discrepancies_csv():
                 "resolved_at": item.resolved_at.isoformat() if item.resolved_at else "",
                 "notes": item.notes or "",
             })
-        
-        output.seek(0)
+
+        buffer = BytesIO(text_buf.getvalue().encode("utf-8"))
+        buffer.seek(0)
         return send_file(
-            StringIO(output.getvalue()),
+            buffer,
             mimetype="text/csv",
             as_attachment=True,
             download_name=f"pesaguard_incidents_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
@@ -709,77 +796,70 @@ def export_discrepancies_csv():
 
 
 @app.route("/analytics/incident-trends", methods=["GET"])
+@require_auth("read:discrepancies")
 def analytics_incident_trends():
     """Returns weekly and monthly trend comparisons."""
-    session = SessionLocal()
+    tenant_id = _current_tenant_id()
+    session = SessionLocal(read_only=True)
     try:
         now = datetime.now(timezone.utc)
-        
-        # Weekly data (last 4 weeks)
+
+        def _scoped(q):
+            return q.filter(Discrepancy.tenant_id == tenant_id) if tenant_id is not None else q
+
         weekly_data = []
         for week_offset in range(3, -1, -1):
             week_start = now - timedelta(days=7 * (week_offset + 1))
             week_end = now - timedelta(days=7 * week_offset)
-            count = session.query(Discrepancy).filter(
+            count = _scoped(session.query(Discrepancy).filter(
                 Discrepancy.detected_at >= week_start,
                 Discrepancy.detected_at < week_end,
-            ).count()
-            resolved = session.query(Discrepancy).filter(
+            )).count()
+            resolved = _scoped(session.query(Discrepancy).filter(
                 Discrepancy.detected_at >= week_start,
                 Discrepancy.detected_at < week_end,
                 Discrepancy.resolved.is_(True),
-            ).count()
-            weekly_data.append({
-                "week": f"W{4-week_offset}",
-                "incidents": count,
-                "resolved": resolved,
-                "open": count - resolved,
-            })
-        
-        # Monthly data (last 12 months)
+            )).count()
+            weekly_data.append({"week": f"W{4-week_offset}", "incidents": count, "resolved": resolved, "open": count - resolved})
+
         monthly_data = []
         for month_offset in range(11, -1, -1):
             month_start = (now.replace(day=1) - timedelta(days=month_offset * 30)).replace(day=1)
             month_end = (month_start + timedelta(days=32)).replace(day=1)
-            count = session.query(Discrepancy).filter(
+            count = _scoped(session.query(Discrepancy).filter(
                 Discrepancy.detected_at >= month_start,
                 Discrepancy.detected_at < month_end,
-            ).count()
-            resolved = session.query(Discrepancy).filter(
+            )).count()
+            resolved = _scoped(session.query(Discrepancy).filter(
                 Discrepancy.detected_at >= month_start,
                 Discrepancy.detected_at < month_end,
                 Discrepancy.resolved.is_(True),
-            ).count()
-            month_name = month_start.strftime("%b")
-            monthly_data.append({
-                "month": month_name,
-                "incidents": count,
-                "resolved": resolved,
-                "open": count - resolved,
-            })
-        
-        return jsonify({
-            "weekly": weekly_data,
-            "monthly": monthly_data,
-        }), 200
+            )).count()
+            monthly_data.append({"month": month_start.strftime("%b"), "incidents": count, "resolved": resolved, "open": count - resolved})
+
+        return jsonify({"weekly": weekly_data, "monthly": monthly_data}), 200
     finally:
         session.close()
 
 
 @app.route("/incidents/filters/presets", methods=["GET", "POST"])
+@require_auth("read:discrepancies")
 def filter_presets():
     """Manage saved filter presets."""
-    if not hasattr(app, 'filter_presets'):
+    if not hasattr(app, "filter_presets"):
         app.filter_presets = {
             "critical_open": {"severity": "critical", "resolved": "open"},
             "warning_assigned": {"severity": "warning", "status": "assigned"},
             "needs_review": {"status": "needs_review", "resolved": "open"},
         }
-    
+
     if request.method == "GET":
         return jsonify({"presets": app.filter_presets}), 200
-    
-    # POST: Save new preset
+
+    user = get_current_user()
+    if user is not None and not has_permission(user, "write:discrepancies"):
+        return jsonify({"error": "forbidden"}), 403
+
     payload = request.get_json(silent=True) or {}
     preset_name = payload.get("name", "custom")
     preset_filters = payload.get("filters", {})
@@ -788,18 +868,23 @@ def filter_presets():
 
 
 @app.route("/incidents/auto-escalate", methods=["POST"])
+@require_auth("bulk:operations")
 def auto_escalate_incidents():
     """Auto-escalate old unresolved critical incidents."""
     escalation_minutes = int(request.args.get("escalation_minutes", "45"))
+    tenant_id = _current_tenant_id()
     session = SessionLocal()
     try:
         threshold = datetime.now(timezone.utc) - timedelta(minutes=escalation_minutes)
-        old_critical = session.query(Discrepancy).filter(
+        query = session.query(Discrepancy).filter(
             Discrepancy.severity == "critical",
             Discrepancy.resolved.is_(False),
             Discrepancy.detected_at < threshold,
-        ).all()
-        
+        )
+        if tenant_id is not None:
+            query = query.filter(Discrepancy.tenant_id == tenant_id)
+        old_critical = query.all()
+
         escalated = 0
         for incident in old_critical:
             if not incident.assignee:
@@ -811,54 +896,44 @@ def auto_escalate_incidents():
                     "message": f"Auto-escalated after {escalation_minutes} minutes (critical SLA breach)",
                 })
                 escalated += 1
-        
+
         session.commit()
-        return jsonify({
-            "status": "escalated",
-            "count": escalated,
-            "threshold_minutes": escalation_minutes,
-        }), 200
+        return jsonify({"status": "escalated", "count": escalated, "threshold_minutes": escalation_minutes}), 200
     finally:
         session.close()
 
 
 @app.route("/analytics/reconciliation-report", methods=["GET"])
+@require_auth("read:discrepancies")
 def reconciliation_report():
     """Generate reconciliation summary report."""
     days = int(request.args.get("days", "7"))
-    session = SessionLocal()
+    tenant_id = _current_tenant_id()
+    session = SessionLocal(read_only=True)
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        
-        all_items = session.query(Discrepancy).filter(
-            Discrepancy.detected_at >= cutoff
-        ).all()
-        
+        query = session.query(Discrepancy).filter(Discrepancy.detected_at >= cutoff)
+        if tenant_id is not None:
+            query = query.filter(Discrepancy.tenant_id == tenant_id)
+        all_items = query.all()
+
         total = len(all_items)
         resolved = sum(1 for item in all_items if item.resolved)
         open_count = total - resolved
-        
-        by_severity = {}
-        by_status = {}
-        
+
+        by_severity: Dict[str, int] = {}
+        by_status: Dict[str, int] = {}
         for item in all_items:
-            sev = item.severity or "unknown"
-            by_severity[sev] = by_severity.get(sev, 0) + 1
-            
-            stat = item.status or "unknown"
-            by_status[stat] = by_status.get(stat, 0) + 1
-        
-        # Calculate resolution time stats
+            by_severity[item.severity or "unknown"] = by_severity.get(item.severity or "unknown", 0) + 1
+            by_status[item.status or "unknown"] = by_status.get(item.status or "unknown", 0) + 1
+
         resolution_times = []
         for item in all_items:
             if item.resolved and item.detected_at and item.resolved_at:
-                time_minutes = int((item.resolved_at - item.detected_at).total_seconds() // 60)
-                resolution_times.append(time_minutes)
-        
-        avg_resolution_time = 0
-        if resolution_times:
-            avg_resolution_time = sum(resolution_times) // len(resolution_times)
-        
+                resolution_times.append(int((item.resolved_at - item.detected_at).total_seconds() // 60))
+
+        avg_resolution_time = sum(resolution_times) // len(resolution_times) if resolution_times else 0
+
         return jsonify({
             "report_period_days": days,
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -879,19 +954,23 @@ def reconciliation_report():
 
 
 @app.route("/incidents/bulk-assign", methods=["POST"])
+@require_auth("bulk:operations")
 def bulk_assign_incidents():
     """Bulk assign multiple incidents to an operator."""
+    tenant_id = _current_tenant_id()
     session = SessionLocal()
     try:
         payload = request.get_json(silent=True) or {}
         ids = payload.get("ids", [])
         assignee = payload.get("assignee", "")
         note = payload.get("note", "Bulk assigned")
-        
+
         updated = 0
+        skipped_ids = []
         for incident_id in ids:
-            incident = session.get(Discrepancy, incident_id)
+            incident = _tenant_scoped_get(session, Discrepancy, incident_id, tenant_id)
             if not incident:
+                skipped_ids.append(incident_id)
                 continue
             incident.assignee = assignee
             incident.timeline = incident.timeline or []
@@ -901,14 +980,15 @@ def bulk_assign_incidents():
                 "message": f"Bulk assigned to {assignee}: {note}",
             })
             updated += 1
-        
+
         session.commit()
-        return jsonify({"status": "assigned", "updated": updated}), 200
+        return jsonify({"status": "assigned", "updated": updated, "skipped_ids": skipped_ids}), 200
     finally:
         session.close()
 
 
 @app.route("/incidents/search", methods=["GET"])
+@require_auth("read:discrepancies")
 def search_incidents():
     """Full-text search across incidents."""
     query_text = request.args.get("q", "").strip()
@@ -916,11 +996,13 @@ def search_incidents():
     assignee = request.args.get("assignee", "").strip()
     page = int(request.args.get("page", "1"))
     per_page = int(request.args.get("per_page", "20"))
-    
-    session = SessionLocal()
+    tenant_id = _current_tenant_id()
+
+    session = SessionLocal(read_only=True)
     try:
         rows = session.query(Discrepancy)
-        
+        if tenant_id is not None:
+            rows = rows.filter(Discrepancy.tenant_id == tenant_id)
         if query_text:
             like_term = f"%{query_text}%"
             rows = rows.filter(
@@ -929,16 +1011,14 @@ def search_incidents():
                 (Discrepancy.details.like(like_term)) |
                 (Discrepancy.notes.like(like_term))
             )
-        
         if severity:
             rows = rows.filter(Discrepancy.severity == severity)
-        
         if assignee:
             rows = rows.filter(Discrepancy.assignee == assignee)
-        
+
         total = rows.count()
         items = rows.order_by(Discrepancy.detected_at.desc()).offset((page - 1) * per_page).limit(per_page).all()
-        
+
         return jsonify({
             "query": query_text,
             "page": page,
@@ -960,3 +1040,4 @@ def search_incidents():
 if __name__ == "__main__":
     init_db()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5001")))
+
