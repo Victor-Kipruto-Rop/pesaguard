@@ -15,7 +15,7 @@ from models import Base, Transaction, Discrepancy  # noqa: E402
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
 
-app = Flask(__name__)
+from app import app
 engine = create_engine(DATABASE_URL)
 Session = sessionmaker(bind=engine)
 
@@ -123,6 +123,3 @@ def summary():
         session.close()
 
 
-if __name__ == "__main__":
-    port = int(os.getenv("DASHBOARD_API_PORT", 5001))
-    app.run(host="0.0.0.0", port=port)

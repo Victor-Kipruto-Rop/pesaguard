@@ -500,8 +500,8 @@ psql -c "\d transactions" | grep uq_transaction_trans_id
 # Webhook receiver (app.py)
 python3 pesaguard_backend_pipeline/app.py
 
-# Dashboard API (app_2.py)
-python3 pesaguard_backend_pipeline/app_2.py
+# Dashboard API (app.py)
+python3 pesaguard_backend_pipeline/app.py
 
 # Reconciliation consumer (reconciliation_job.py)
 python3 pesaguard_backend_pipeline/reconciliation_job.py

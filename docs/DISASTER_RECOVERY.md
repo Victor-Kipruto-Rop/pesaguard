@@ -57,7 +57,7 @@ psql -h ${POSTGRES_HOST:-localhost} -U ${POSTGRES_USER:-pesaguard} -d ${POSTGRES
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements_3.txt
-python pesaguard_backend_pipeline/app_2.py
+python pesaguard_backend_pipeline/app.py
 ```
 
 ## Restore Drill

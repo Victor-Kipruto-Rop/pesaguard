@@ -254,7 +254,7 @@ curl "http://localhost:5001/discrepancies/export/csv?severity=critical&resolved=
 
 ## 🚀 Deployment Checklist
 
-- ✅ Backend endpoints implemented in `app_2.py`
+- ✅ Backend endpoints implemented in `app.py`
 - ✅ Frontend tools page created (`/tools`)
 - ✅ Sidebar navigation updated with tools link
 - ✅ CSV export functionality working

@@ -82,7 +82,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    command: ["python", "pesaguard_backend_pipeline/app_2.py"]
+    command: ["python", "pesaguard_backend_pipeline/app.py"]
     ports:
       - "5001:5001"
     env_file:

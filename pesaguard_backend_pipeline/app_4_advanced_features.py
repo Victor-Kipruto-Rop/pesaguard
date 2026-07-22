@@ -42,7 +42,7 @@ from tenant_settings import TenantSettingsStore
 configure_logging = lambda: None  # Import from logging_utils if available
 logger = logging.getLogger("pesaguard.advanced_features")
 
-app = Flask(__name__)
+from app import app
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
 
 
@@ -886,9 +886,3 @@ def bulk_escalate_incidents():
     finally:
         session.close()
 
-
-if __name__ == "__main__":
-    debug_mode = os.getenv("FLASK_DEBUG", "0") == "1"
-    if debug_mode:
-        logger.warning("Running with debug=True — never do this in production (exposes the interactive debugger)")
-    app.run(debug=debug_mode, host="0.0.0.0", port=int(os.getenv("PORT", 5002)))

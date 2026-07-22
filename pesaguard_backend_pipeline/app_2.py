@@ -32,7 +32,7 @@ from metrics import build_metrics_payload
 
 configure_logging()
 logger = logging.getLogger("pesaguard.dashboard")
-app = Flask(__name__)
+from app import app
 app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("PESAGUARD_API_MAX_BODY_BYTES", "1048576"))
 app.register_blueprint(export_bp)
 settings_store = TenantSettingsStore()
@@ -1036,8 +1036,4 @@ def search_incidents():
     finally:
         session.close()
 
-
-if __name__ == "__main__":
-    init_db()
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5001")))
 
