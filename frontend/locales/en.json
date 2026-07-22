@@ -102,9 +102,18 @@
     "openSupport": "Open support",
     "reviewTerms": "Review pilot terms",
     "highlights": [
-      { "title": "Operational transparency", "body": "A consistent status experience ensures pilot stakeholders always understand service health." },
-      { "title": "Governance readiness", "body": "Backup automation, retention enforcement, and response workflows are documented and active." },
-      { "title": "Customer confidence", "body": "The experience is designed for investor, compliance, and pilot-customer review." }
+      {
+        "title": "Operational transparency",
+        "body": "A consistent status experience ensures pilot stakeholders always understand service health."
+      },
+      {
+        "title": "Governance readiness",
+        "body": "Backup automation, retention enforcement, and response workflows are documented and active."
+      },
+      {
+        "title": "Customer confidence",
+        "body": "The experience is designed for investor, compliance, and pilot-customer review."
+      }
     ],
     "serviceHealth": "Current service health",
     "operationalPosture": "Operational posture",
@@ -119,15 +128,43 @@
     "downloadSummary": "Download readiness summary",
     "downloadBrief": "Download support brief",
     "components": [
-      { "name": "Webhook ingestion", "statusKey": "operational", "detail": "Incoming callbacks are being processed with low latency." },
-      { "name": "Reconciliation engine", "statusKey": "operational", "detail": "Discrepancy detection and matching remain fully active." },
-      { "name": "Alert delivery", "statusKey": "operational", "detail": "Notifications are routed with deduplication and severity-aware handling." },
-      { "name": "Backup and retention", "statusKey": "scheduled", "detail": "Daily backup jobs and retention enforcement are running as planned." }
+      {
+        "name": "Webhook ingestion",
+        "statusKey": "operational",
+        "detail": "Incoming callbacks are being processed with low latency."
+      },
+      {
+        "name": "Reconciliation engine",
+        "statusKey": "operational",
+        "detail": "Discrepancy detection and matching remain fully active."
+      },
+      {
+        "name": "Alert delivery",
+        "statusKey": "operational",
+        "detail": "Notifications are routed with deduplication and severity-aware handling."
+      },
+      {
+        "name": "Backup and retention",
+        "statusKey": "scheduled",
+        "detail": "Daily backup jobs and retention enforcement are running as planned."
+      }
     ],
     "updates": [
-      { "title": "Monitoring coverage", "message": "All critical services are being observed with automated alerts and incident escalation.", "time": "2 min ago" },
-      { "title": "Backup automation", "message": "The latest backup cycle completed successfully and is retained per policy.", "time": "45 min ago" },
-      { "title": "Support readiness", "message": "Support channels and incident workflows are active for pilot customers.", "time": "2 hrs ago" }
+      {
+        "title": "Monitoring coverage",
+        "message": "All critical services are being observed with automated alerts and incident escalation.",
+        "time": "2 min ago"
+      },
+      {
+        "title": "Backup automation",
+        "message": "The latest backup cycle completed successfully and is retained per policy.",
+        "time": "45 min ago"
+      },
+      {
+        "title": "Support readiness",
+        "message": "Support channels and incident workflows are active for pilot customers.",
+        "time": "2 hrs ago"
+      }
     ]
   },
   "supportPage": {
@@ -139,9 +176,18 @@
     "viewStatus": "View live status",
     "promise": "Support promise",
     "highlights": [
-      { "title": "Fast triage", "body": "Every report is routed through a defined support workflow with clear ownership." },
-      { "title": "Transparent escalation", "body": "Critical incidents receive immediate attention and customer-visible updates." },
-      { "title": "Operational continuity", "body": "The support model is aligned with incident response and reporting standards." }
+      {
+        "title": "Fast triage",
+        "body": "Every report is routed through a defined support workflow with clear ownership."
+      },
+      {
+        "title": "Transparent escalation",
+        "body": "Critical incidents receive immediate attention and customer-visible updates."
+      },
+      {
+        "title": "Operational continuity",
+        "body": "The support model is aligned with incident response and reporting standards."
+      }
     ],
     "channelsTitle": "Support channels",
     "reportTitle": "What to include in your report",
@@ -156,14 +202,38 @@
     "downloadBrief": "Download support brief",
     "downloadSummary": "Download readiness summary",
     "channels": [
-      { "label": "Email", "value": "pilot-support@pesaguard.example", "detail": "Best for onboarding questions, policy requests, and non-urgent issues." },
-      { "label": "Priority incident channel", "value": "#pesaguard-pilot", "detail": "Fastest route for live incidents and customer-impacting issues." },
-      { "label": "Status updates", "value": "/status", "detail": "Review the current service posture and recent operational notices." }
+      {
+        "label": "Email",
+        "value": "pilot-support@pesaguard.example",
+        "detail": "Best for onboarding questions, policy requests, and non-urgent issues."
+      },
+      {
+        "label": "Priority incident channel",
+        "value": "#pesaguard-pilot",
+        "detail": "Fastest route for live incidents and customer-impacting issues."
+      },
+      {
+        "label": "Status updates",
+        "value": "/status",
+        "detail": "Review the current service posture and recent operational notices."
+      }
     ],
     "slaLevels": [
-      { "title": "Critical", "target": "15 mins", "detail": "Production outage, failed reconciliation, or material customer-impacting incident." },
-      { "title": "High", "target": "1 hour", "detail": "Severe degradation affecting a key workflow or tenant experience." },
-      { "title": "Medium", "target": "4 hours", "detail": "Non-blocking issue requiring investigation or workflow guidance." }
+      {
+        "title": "Critical",
+        "target": "15 mins",
+        "detail": "Production outage, failed reconciliation, or material customer-impacting incident."
+      },
+      {
+        "title": "High",
+        "target": "1 hour",
+        "detail": "Severe degradation affecting a key workflow or tenant experience."
+      },
+      {
+        "title": "Medium",
+        "target": "4 hours",
+        "detail": "Non-blocking issue requiring investigation or workflow guidance."
+      }
     ]
   },
   "agreementsPage": {
@@ -174,14 +244,35 @@
     "packTitle": "Agreement pack",
     "packSummary": "These drafts reflect the current pilot scope, including localized alerting and Kenya-specific delivery requirements for customer notifications.",
     "highlights": [
-      { "title": "Commercial clarity", "body": "Pilot terms are easy to review and align with customer expectations." },
-      { "title": "Audit readiness", "body": "Documented terms strengthen compliance review and procurement discussions." },
-      { "title": "Operational confidence", "body": "The agreement pack supports trust with clear escalation and support posture." }
+      {
+        "title": "Commercial clarity",
+        "body": "Pilot terms are easy to review and align with customer expectations."
+      },
+      {
+        "title": "Audit readiness",
+        "body": "Documented terms strengthen compliance review and procurement discussions."
+      },
+      {
+        "title": "Operational confidence",
+        "body": "The agreement pack supports trust with clear escalation and support posture."
+      }
     ],
     "items": [
-      { "title": "Pilot agreement", "summary": "Defines scope, duration, support expectations, and pilot termination criteria.", "href": "/assets/pilot-agreement.txt" },
-      { "title": "Terms of service", "summary": "Outlines service boundaries, customer responsibilities, and support commitments.", "href": "/assets/terms-of-service.txt" },
-      { "title": "Data processing agreement", "summary": "Clarifies data handling, security expectations, and deletion responsibilities.", "href": "/assets/data-processing-agreement.txt" }
+      {
+        "title": "Pilot agreement",
+        "summary": "Defines scope, duration, support expectations, and pilot termination criteria.",
+        "href": "/assets/pilot-agreement.txt"
+      },
+      {
+        "title": "Terms of service",
+        "summary": "Outlines service boundaries, customer responsibilities, and support commitments.",
+        "href": "/assets/terms-of-service.txt"
+      },
+      {
+        "title": "Data processing agreement",
+        "summary": "Clarifies data handling, security expectations, and deletion responsibilities.",
+        "href": "/assets/data-processing-agreement.txt"
+      }
     ]
   },
   "policiesPage": {
@@ -191,14 +282,35 @@
     "summary": "These policy views make your governance posture clear to pilots, investors, and compliance reviewers.",
     "libraryTitle": "Policy library",
     "highlights": [
-      { "title": "Trust architecture", "body": "Policies are structured to support pilot onboarding and compliance conversations." },
-      { "title": "Data discipline", "body": "Retention and deletion expectations are clearly documented and operationalized." },
-      { "title": "Control maturity", "body": "Security and support practices appear consistent, explicit, and reviewable." }
+      {
+        "title": "Trust architecture",
+        "body": "Policies are structured to support pilot onboarding and compliance conversations."
+      },
+      {
+        "title": "Data discipline",
+        "body": "Retention and deletion expectations are clearly documented and operationalized."
+      },
+      {
+        "title": "Control maturity",
+        "body": "Security and support practices appear consistent, explicit, and reviewable."
+      }
     ],
     "items": [
-      { "title": "Privacy policy", "summary": "Explains how customer and payer data is collected, used, retained, and deleted.", "href": "/assets/privacy-policy.txt" },
-      { "title": "Data retention", "summary": "Defines retention windows, backup handling, and offboarding disposal processes.", "href": "/assets/readiness-pack-summary.txt" },
-      { "title": "Security policy", "summary": "Summarizes controls for access, monitoring, logging, and response readiness.", "href": "/assets/support-readiness-brief.txt" }
+      {
+        "title": "Privacy policy",
+        "summary": "Explains how customer and payer data is collected, used, retained, and deleted.",
+        "href": "/assets/privacy-policy.txt"
+      },
+      {
+        "title": "Data retention",
+        "summary": "Defines retention windows, backup handling, and offboarding disposal processes.",
+        "href": "/assets/readiness-pack-summary.txt"
+      },
+      {
+        "title": "Security policy",
+        "summary": "Summarizes controls for access, monitoring, logging, and response readiness.",
+        "href": "/assets/support-readiness-brief.txt"
+      }
     ]
   },
   "insightsPage": {
@@ -425,9 +537,18 @@
     "howItWorks": "How it works",
     "stepLabel": "Step {value}",
     "steps": [
-      { "title": "Connect Daraja", "body": "Securely link your M-Pesa credentials and webhook endpoints." },
-      { "title": "Watch the stream", "body": "Transactions flow into a live dashboard with match-rate and health signals." },
-      { "title": "Resolve exceptions", "body": "Unmatched pairs, duplicates, and anomalies are flagged for fast action." }
+      {
+        "title": "Connect Daraja",
+        "body": "Securely link your M-Pesa credentials and webhook endpoints."
+      },
+      {
+        "title": "Watch the stream",
+        "body": "Transactions flow into a live dashboard with match-rate and health signals."
+      },
+      {
+        "title": "Resolve exceptions",
+        "body": "Unmatched pairs, duplicates, and anomalies are flagged for fast action."
+      }
     ],
     "trustTitle": "Built for pilot trust",
     "trust": [
@@ -448,24 +569,45 @@
         "name": "Pilot",
         "price": "Custom",
         "summary": "For your first live tenant validating reconciliation workflows.",
-        "features": ["Daraja ingestion", "Dashboard & anomalies", "Email/Slack alerts", "Pilot support"]
+        "features": [
+          "Daraja ingestion",
+          "Dashboard & anomalies",
+          "Email/Slack alerts",
+          "Pilot support"
+        ]
       },
       {
         "name": "Growth",
         "price": "Custom",
         "summary": "For 2–4 tenants with reporting and team workflows.",
-        "features": ["Everything in Pilot", "Scheduled reports", "Audit log export", "Account settings"]
+        "features": [
+          "Everything in Pilot",
+          "Scheduled reports",
+          "Audit log export",
+          "Account settings"
+        ]
       },
       {
         "name": "Scale",
         "price": "Custom",
         "summary": "For multi-tenant operations with admin tooling.",
-        "features": ["Everything in Growth", "Admin monitoring", "Feature flags", "Priority support"]
+        "features": [
+          "Everything in Growth",
+          "Admin monitoring",
+          "Feature flags",
+          "Priority support"
+        ]
       }
     ],
     "faq": [
-      { "q": "Is there a free tier?", "a": "PesaGuard is invite-only during pilot. Contact us to scope a pilot for your organization." },
-      { "q": "What payment rails are supported?", "a": "M-Pesa / Daraja only during the current pilot scope." }
+      {
+        "q": "Is there a free tier?",
+        "a": "PesaGuard is invite-only during pilot. Contact us to scope a pilot for your organization."
+      },
+      {
+        "q": "What payment rails are supported?",
+        "a": "M-Pesa / Daraja only during the current pilot scope."
+      }
     ]
   },
   "about": {
@@ -509,10 +651,22 @@
     "privacy": "Privacy policy",
     "terms": "Terms of service",
     "sections": [
-      { "title": "Encryption", "body": "Data is encrypted in transit (TLS) and at rest. Credentials are stored masked and never shown in full after setup." },
-      { "title": "Access control", "body": "Role-based access limits who can view transactions, change settings, or export audit logs." },
-      { "title": "Audit logging", "body": "Every significant action — match, resolve, settings change — is recorded with timestamp and actor." },
-      { "title": "Data residency", "body": "Pilot tenants can configure deployment, backup, and log regions. Cross-border transfer is off by default." }
+      {
+        "title": "Encryption",
+        "body": "Data is encrypted in transit (TLS) and at rest. Credentials are stored masked and never shown in full after setup."
+      },
+      {
+        "title": "Access control",
+        "body": "Role-based access limits who can view transactions, change settings, or export audit logs."
+      },
+      {
+        "title": "Audit logging",
+        "body": "Every significant action — match, resolve, settings change — is recorded with timestamp and actor."
+      },
+      {
+        "title": "Data residency",
+        "body": "Pilot tenants can configure deployment, backup, and log regions. Cross-border transfer is off by default."
+      }
     ]
   },
   "maintenance": {
@@ -549,15 +703,63 @@
   },
   "transactions": {
     "eyebrow": "Transactions",
-    "title": "Transaction stream",
-    "summary": "Search and inspect every observed M-Pesa transaction in your tenant.",
-    "search": "Search by transaction ID or type",
+    "title": "Transactions",
+    "summary": "Find, understand, and act on any transaction in seconds.",
+    "search": "Search by transaction ID or amount",
     "type": "Type",
     "amount": "Amount",
     "detailTitle": "Transaction detail",
     "emptyTitle": "No transactions yet",
-    "emptyMessage": "Connect Daraja and complete your first sync to see live transactions here.",
-    "emptyAction": "Start onboarding"
+    "emptyMessage": "Transactions will appear here as they come in.",
+    "emptyAction": "Start onboarding",
+    "emptyFilteredTitle": "No transactions match these filters",
+    "clearFilters": "Clear filters",
+    "statusAll": "All",
+    "statusMatched": "Matched",
+    "statusUnmatched": "Unmatched",
+    "statusPending": "Pending",
+    "statusDisputed": "Disputed",
+    "dateToday": "Today",
+    "date7d": "7 days",
+    "date30d": "30 days",
+    "dateCustom": "Custom",
+    "dateFrom": "From",
+    "dateTo": "To",
+    "amountRangeToggle": "Amount range",
+    "amountMin": "Min",
+    "amountMax": "Max",
+    "densityDense": "Dense",
+    "densityComfortable": "Comfortable",
+    "resultsCount": "{count} transactions",
+    "export": "Export CSV",
+    "exportSelected": "Export selected",
+    "markReviewed": "Mark reviewed",
+    "selectedCount": "{count} selected",
+    "clearSelection": "Clear",
+    "columnTimestamp": "Timestamp",
+    "columnAmount": "Amount",
+    "columnId": "Transaction ID",
+    "columnStatus": "Status",
+    "columnSource": "Source",
+    "copyId": "Copy transaction ID",
+    "copied": "Copied",
+    "panelRawPayload": "Raw Daraja payload",
+    "panelMatchedRecord": "Matched internal record",
+    "panelNoMatch": "No matching internal record found",
+    "panelTimeline": "Timeline",
+    "panelActions": "Actions",
+    "panelNoActionNeeded": "This transaction matched cleanly — no action needed.",
+    "panelFlagDispute": "Flag for dispute",
+    "panelDisputeReasonLabel": "Reason",
+    "panelDisputeSubmit": "Submit dispute",
+    "panelDisputeCancel": "Cancel",
+    "panelMarkReviewed": "Mark reviewed",
+    "panelLoading": "Loading transaction…",
+    "source": "M-Pesa Daraja",
+    "timelineReceived": "Transaction received",
+    "timelineChecked": "Checked against internal records",
+    "timelineMatched": "Matched — no discrepancy found",
+    "timelineFlagged": "Flagged for review"
   },
   "reconciliation": {
     "eyebrow": "Reconciliation",
@@ -753,9 +955,21 @@
     "glossarySummary": "Plain-language definitions for finance and operations teams.",
     "sectionsTitle": "Browse documentation",
     "sections": [
-      { "title": "Getting started", "body": "First-time setup for Daraja and reconciliation.", "href": "/docs/getting-started" },
-      { "title": "FAQ", "body": "Answers to common pilot questions.", "href": "/docs/faq" },
-      { "title": "Webhooks", "body": "Integrate your own systems with PesaGuard callbacks.", "href": "/docs/webhooks" }
+      {
+        "title": "Getting started",
+        "body": "First-time setup for Daraja and reconciliation.",
+        "href": "/docs/getting-started"
+      },
+      {
+        "title": "FAQ",
+        "body": "Answers to common pilot questions.",
+        "href": "/docs/faq"
+      },
+      {
+        "title": "Webhooks",
+        "body": "Integrate your own systems with PesaGuard callbacks.",
+        "href": "/docs/webhooks"
+      }
     ],
     "method": "Method",
     "path": "Path",
@@ -765,16 +979,44 @@
     "signatureTitle": "Signature verification",
     "signatureBody": "Verify the X-PesaGuard-Signature header using your tenant webhook secret and the raw request body.",
     "apiEndpoints": [
-      { "method": "GET", "path": "/discrepancies", "description": "List anomalies with filters and pagination." },
-      { "method": "GET", "path": "/metrics", "description": "Operational metrics for dashboard and health views." },
-      { "method": "POST", "path": "/discrepancies/{id}/resolve", "description": "Mark an anomaly as resolved with an operator note." },
-      { "method": "GET", "path": "/analytics/reconciliation-report", "description": "Generate a reconciliation summary for a date range." }
+      {
+        "method": "GET",
+        "path": "/discrepancies",
+        "description": "List anomalies with filters and pagination."
+      },
+      {
+        "method": "GET",
+        "path": "/metrics",
+        "description": "Operational metrics for dashboard and health views."
+      },
+      {
+        "method": "POST",
+        "path": "/discrepancies/{id}/resolve",
+        "description": "Mark an anomaly as resolved with an operator note."
+      },
+      {
+        "method": "GET",
+        "path": "/analytics/reconciliation-report",
+        "description": "Generate a reconciliation summary for a date range."
+      }
     ],
     "glossaryTerms": [
-      { "term": "Reconciliation", "definition": "The process of confirming that every payment received matches your internal records." },
-      { "term": "Anomaly score", "definition": "A severity signal indicating how urgently an exception needs review." },
-      { "term": "Match", "definition": "Linking a payment to its corresponding internal record." },
-      { "term": "Idempotency", "definition": "Processing the same webhook twice without creating duplicate records." }
+      {
+        "term": "Reconciliation",
+        "definition": "The process of confirming that every payment received matches your internal records."
+      },
+      {
+        "term": "Anomaly score",
+        "definition": "A severity signal indicating how urgently an exception needs review."
+      },
+      {
+        "term": "Match",
+        "definition": "Linking a payment to its corresponding internal record."
+      },
+      {
+        "term": "Idempotency",
+        "definition": "Processing the same webhook twice without creating duplicate records."
+      }
     ]
   },
   "errors": {
@@ -788,3 +1030,4 @@
     "viewStatus": "View status"
   }
 }
+
