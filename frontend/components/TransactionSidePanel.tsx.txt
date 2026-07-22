@@ -1,0 +1,233 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+import { apiFetch } from '../lib/api';
+import { useLocale } from '../lib/i18n';
+import { formatKeCurrency, formatKeDate } from '../lib/formatting';
+
+export interface PanelRow {
+  trans_id: string;
+  amount: number;
+  status: 'matched' | 'pending' | 'unmatched' | 'disputed';
+  discrepancy_id?: string;
+  anomaly_type?: string;
+  detected_at?: string;
+  created_at?: string;
+  timeline?: Array<{ ts: string; event: string; message: string }>;
+}
+
+interface TransactionDetail {
+  trans_id: string;
+  trans_amount: number;
+  msisdn: string;
+  business_short_code: string;
+  trans_time: string;
+  created_at: string | null;
+  raw_payload: unknown;
+  matched_record: {
+    internal_ref: string;
+    amount: number;
+    phone_number: string;
+    status: string;
+    synced_at: string | null;
+  } | null;
+}
+
+function CopyIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="9" width="12" height="12" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
+
+export default function TransactionSidePanel({
+  row,
+  onClose,
+  onResolved,
+  onDisputed,
+}: {
+  row: PanelRow;
+  onClose: () => void;
+  onResolved: (transId: string) => Promise<void> | void;
+  onDisputed: (transId: string, reason: string) => Promise<void> | void;
+}) {
+  const { t, locale } = useLocale();
+  const [detail, setDetail] = useState<TransactionDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [rawOpen, setRawOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [disputeOpen, setDisputeOpen] = useState(false);
+  const [disputeReason, setDisputeReason] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setDetail(null);
+    setRawOpen(false);
+    setDisputeOpen(false);
+    setDisputeReason('');
+    void (async () => {
+      const res = await apiFetch<TransactionDetail>(`/v1/customers/default/transactions/${encodeURIComponent(row.trans_id)}`);
+      if (!cancelled) {
+        setDetail(res.data);
+        setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [row.trans_id]);
+
+  const copyId = async () => {
+    try {
+      await navigator.clipboard.writeText(row.trans_id);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // clipboard access can fail silently; no action needed
+    }
+  };
+
+  const timeline = row.timeline && row.timeline.length > 0
+    ? row.timeline
+    : [
+        { ts: row.created_at || '', event: t('transactions.timelineReceived') },
+        { ts: row.created_at || '', event: t('transactions.timelineChecked') },
+        row.status === 'matched'
+          ? { ts: row.created_at || '', event: t('transactions.timelineMatched') }
+          : { ts: row.detected_at || row.created_at || '', event: t('transactions.timelineFlagged') },
+      ];
+
+  const canAct = Boolean(row.discrepancy_id) && row.status !== 'matched';
+
+  return (
+    <>
+      <div className="txPanelBackdrop" onClick={onClose} />
+      <aside className="txSidePanel" role="dialog" aria-label={t('transactions.detailTitle')}>
+        <div className="txPanelHeader">
+          <div>
+            <div className="eyebrow">{t('transactions.detailTitle')}</div>
+            <button className="txIdCopyBtn mono" onClick={copyId} type="button" aria-label={t('transactions.copyId')}>
+              {row.trans_id}
+              {copied ? <CheckIcon /> : <CopyIcon />}
+            </button>
+          </div>
+          <button className="txPanelClose" onClick={onClose} aria-label="Close" type="button">✕</button>
+        </div>
+
+        <div className="txPanelSection">
+          <span className={`statusPill ${row.status}`}>{t(`transactions.status${row.status.charAt(0).toUpperCase()}${row.status.slice(1)}`)}</span>
+        </div>
+
+        <div className="txPanelSection">
+          <div className="txPanelKV">
+            <span>{t('transactions.amount')}</span>
+            <strong>{formatKeCurrency(row.amount, locale as 'en' | 'sw')}</strong>
+            <span>{t('transactions.columnSource')}</span>
+            <strong>{t('transactions.source')}</strong>
+          </div>
+        </div>
+
+        <div className="txPanelSection">
+          <div className="txPanelSectionTitle">{t('transactions.panelRawPayload')}</div>
+          <button className="txPanelRawToggle" onClick={() => setRawOpen((v) => !v)} type="button">
+            <span>{loading ? t('transactions.panelLoading') : detail ? detail.trans_id : '—'}</span>
+            <span>{rawOpen ? '▲' : '▼'}</span>
+          </button>
+          {rawOpen && detail ? (
+            <div className="txPanelRawBody">{JSON.stringify(detail.raw_payload, null, 2)}</div>
+          ) : null}
+        </div>
+
+        <div className="txPanelSection">
+          <div className="txPanelSectionTitle">{t('transactions.panelMatchedRecord')}</div>
+          {loading ? (
+            <p className="muted small">{t('transactions.panelLoading')}</p>
+          ) : detail?.matched_record ? (
+            <div className="txPanelKV">
+              <span>Ref</span>
+              <strong>{detail.matched_record.internal_ref}</strong>
+              <span>{t('transactions.amount')}</span>
+              <strong>{formatKeCurrency(detail.matched_record.amount, locale as 'en' | 'sw')}</strong>
+              <span>{t('dashboard.operations.table.status')}</span>
+              <strong>{detail.matched_record.status}</strong>
+            </div>
+          ) : (
+            <p className="muted small">{t('transactions.panelNoMatch')}</p>
+          )}
+        </div>
+
+        <div className="txPanelSection">
+          <div className="txPanelSectionTitle">{t('transactions.panelTimeline')}</div>
+          <div className="txPanelTimeline">
+            {timeline.map((item, index) => (
+              <div className="txTimelineItem" key={`${item.ts}-${index}`}>
+                <div className="txTimelineTs">{item.ts ? formatKeDate(item.ts, locale as 'en' | 'sw') : '—'}</div>
+                <div className="txTimelineMsg">{'message' in item ? (item as { message?: string }).message || item.event : item.event}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="txPanelSection">
+          <div className="txPanelSectionTitle">{t('transactions.panelActions')}</div>
+          {!canAct ? (
+            <p className="muted small">{t('transactions.panelNoActionNeeded')}</p>
+          ) : disputeOpen ? (
+            <div className="txDisputeForm">
+              <textarea
+                value={disputeReason}
+                onChange={(e) => setDisputeReason(e.target.value)}
+                placeholder={t('transactions.panelDisputeReasonLabel')}
+              />
+              <div className="txPanelActions">
+                <button
+                  disabled={busy || !disputeReason.trim()}
+                  onClick={async () => {
+                    setBusy(true);
+                    await onDisputed(row.trans_id, disputeReason.trim());
+                    setBusy(false);
+                    setDisputeOpen(false);
+                    setDisputeReason('');
+                  }}
+                >
+                  {t('transactions.panelDisputeSubmit')}
+                </button>
+                <button className="secondaryBtn" onClick={() => setDisputeOpen(false)} type="button">
+                  {t('transactions.panelDisputeCancel')}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="txPanelActions">
+              <button
+                disabled={busy}
+                onClick={async () => {
+                  setBusy(true);
+                  await onResolved(row.trans_id);
+                  setBusy(false);
+                }}
+              >
+                {t('transactions.panelMarkReviewed')}
+              </button>
+              <button className="secondaryBtn" onClick={() => setDisputeOpen(true)} type="button">
+                {t('transactions.panelFlagDispute')}
+              </button>
+            </div>
+          )}
+        </div>
+      </aside>
+    </>
+  );
+}

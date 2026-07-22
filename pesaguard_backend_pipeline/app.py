@@ -17,7 +17,7 @@ from security_helpers import (
 )
 from rate_limiter import RateLimiter
 
-from event_store import EventStore
+from event_store import EventStore, ProcessResult
 from health import build_health_payload
 from logging_utils import configure_logging, set_correlation_id, get_correlation_id
 from validators import validate_daraja_payload
@@ -85,7 +85,6 @@ def public_get_current_tenant():
     """Public, read-only endpoint returning limited tenant preferences for the current runtime tenant."""
     tenant_id = os.getenv("TENANT_ID", "default")
     settings = tenant_store.get(tenant_id)
-    # Only expose non-sensitive, UX preferences
     public = {
         "tenant_id": tenant_id,
         "preferred_locale": settings.get("preferred_locale"),
@@ -175,7 +174,6 @@ def handle_internal_error(error):
 @app.before_request
 def setup_request_context():
     """Set up per-request context including correlation ID for tracing."""
-    # Generate or extract correlation ID from request headers
     correlation_id = request.headers.get("X-Correlation-ID") or get_correlation_id()
     set_correlation_id(correlation_id)
 
@@ -197,12 +195,10 @@ def enforce_webhook_security():
         return jsonify({"ResultCode": 1, "ResultDesc": "Request body too large"}), 413
 
     if request.path.startswith("/webhook"):
-        # IP-based source validation (Daraja IP allowlist + X-Forwarded-For support)
         if not is_allowed_source(get_client_ip(request), request):
             logger.warning("Webhook request rejected: forbidden source IP", extra={"source_ip": get_client_ip(request)})
             return jsonify({"ResultCode": 1, "ResultDesc": "Forbidden source"}), 403
 
-        # Rate limiting (per IP, per endpoint)
         allowed, status = webhook_rate_limiter.is_allowed(
             get_client_ip(request),
             request.path,
@@ -214,7 +210,6 @@ def enforce_webhook_security():
             response.headers["Retry-After"] = str(status.get("retry_after", 60))
             return response
 
-        # Optional: Daraja signature verification (if X-Daraja-Signature header present)
         daraja_signature = request.headers.get("X-Daraja-Signature")
         if daraja_signature:
             try:
@@ -238,14 +233,13 @@ def _verify_daraja_signature(request_body: bytes, signature: str) -> None:
     consumer_secret = os.getenv("DARAJA_CONSUMER_SECRET", "")
     if not consumer_secret:
         raise ValueError("DARAJA_CONSUMER_SECRET not configured")
-    
-    # Daraja uses HMAC-SHA256(consumer_secret, request_body)
+
     expected_signature = hmac.new(
         consumer_secret.encode(),
         request_body,
         hashlib.sha256
     ).hexdigest().upper()
-    
+
     if signature.upper() != expected_signature:
         raise ValueError("Signature mismatch")
 
@@ -262,13 +256,17 @@ def mpesa_confirmation():
     """
     Handles C2B confirmation callbacks from Daraja.
     Docs: https://developer.safaricom.co.ke/
+
+    IMPORTANT: the HTTP status/ResultCode returned here directly controls whether
+    Daraja retries. STORED and DUPLICATE both mean "safely recorded, no retry
+    needed" -> 200. ERROR means "not actually stored" -> non-200, so Daraja retries
+    instead of the transaction silently vanishing.
     """
     payload = request.get_json(silent=True)
 
     if not payload:
         logger.warning("Empty or invalid JSON payload received")
         try:
-            # persist malformed payload for later inspection
             event_store.write_dead_letter(None, reason="invalid_json", error_detail="empty_or_invalid_json", tenant_id=os.getenv("TENANT_ID", "default"))
         except Exception:
             logger.debug("Failed to persist dead-letter for invalid JSON payload", exc_info=True)
@@ -287,52 +285,56 @@ def mpesa_confirmation():
         return jsonify({"ResultCode": 1, "ResultDesc": sanitize_error_message(error)}), 400
 
     trans_id = payload.get("TransID")
+    tenant_id = os.getenv("TENANT_ID", "default")
+
+    # Fast-path optimization only — NOT the authoritative gate. Two near-simultaneous
+    # callbacks can both pass this check before either has written anything; the real
+    # guarantee is the unique constraint enforced inside mark_processed() below.
     if event_store.already_processed(str(trans_id)):
-        logger.info("Duplicate transaction already stored", extra={"tenant_id": os.getenv("TENANT_ID", "default"), "trans_id": trans_id})
+        logger.info("Duplicate transaction (pre-check)", extra={"tenant_id": tenant_id, "trans_id": trans_id})
         return jsonify({"ResultCode": 0, "ResultDesc": "Accepted (duplicate ignored)"}), 200
 
-    # [Task Requirement] Redis caching for duplicate lookups to avoid DB bottleneck
+    # Authoritative idempotency write. Branch on the ACTUAL result — never assume
+    # success and never treat an error the same as a duplicate.
+    result = event_store.mark_processed(payload, tenant_id=tenant_id)
+
+    if result == ProcessResult.DUPLICATE:
+        # A concurrent callback won the race between the pre-check above and this
+        # write. Already safely stored by the other request — do not enqueue again,
+        # do not process twice downstream.
+        logger.info("Duplicate transaction (caught at write time)", extra={"tenant_id": tenant_id, "trans_id": trans_id})
+        return jsonify({"ResultCode": 0, "ResultDesc": "Accepted (duplicate ignored)"}), 200
+
+    if result == ProcessResult.ERROR:
+        # Genuine failure — the transaction was NOT stored. Returning 200 here would
+        # cause Daraja to treat this as delivered and never retry, silently losing a
+        # real transaction. Return a non-zero ResultCode with a 500 so Daraja retries.
+        logger.error("Failed to record transaction, requesting Daraja retry", extra={"tenant_id": tenant_id, "trans_id": trans_id})
+        return jsonify({"ResultCode": 1, "ResultDesc": "Temporary processing error, please retry"}), 500
+
+    # result == ProcessResult.STORED: genuinely new, safely persisted. Proceed to
+    # enqueue for downstream reconciliation exactly once.
     try:
         import redis
         redis_conn = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), socket_connect_timeout=2)
         cache_key = f"processed_trans_id:{trans_id}"
-        if redis_conn.get(cache_key):
-            logger.info("Duplicate transaction already stored (detected via Redis cache)", extra={"tenant_id": os.getenv("TENANT_ID", "default"), "trans_id": trans_id})
-            return jsonify({"ResultCode": 0, "ResultDesc": "Accepted (duplicate ignored)"}), 200
-    except Exception as e:
-        logger.warning(f"Failed to check duplicate-check cache: {e}. Falling back to DB check.")
-        redis_conn = None
-
-    # [Fast 200 Response] Immediately acknowledge to Daraja, then process async to avoid timeouts
-    try:
-        event_store.mark_processed(payload)
-        # Also set Redis cache for faster duplicate detection on retries
-        if 'redis_conn' in locals() and redis_conn:
-            try:
-                redis_conn.set(cache_key, "1", ex=86400)
-            except Exception:
-                pass  # Best-effort caching, not critical
+        redis_conn.set(cache_key, "1", ex=86400)
     except Exception:
-        # Idempotency: if mark_processed fails (duplicate or DB error), we still return 200
-        # to prevent Daraja retries
-        pass
+        pass  # best-effort cache warm; DB ledger above is the source of truth
 
-    # Async publication: enqueue to background task (Celery/RQ) or fallback to sync
     try:
-        # Try non-blocking background job first (RQ with Redis)
         queued = enqueue_transaction_event(KAFKA_TOPIC, payload)
         if queued.get("status") == "queued":
             logger.info("Transaction event queued to background job", extra={"trans_id": trans_id})
         else:
-            # Fallback to direct Kafka publish if no queue available
             publish_transaction_event(KAFKA_TOPIC, payload)
             logger.info("Transaction event published to Kafka (sync fallback)", extra={"trans_id": trans_id})
     except Exception:  # noqa: BLE001
-        # Log for manual replay; do not raise (already acknowledged to Daraja)
+        # The transaction IS safely stored (STORED above) — only the downstream
+        # publish failed. Log for manual replay; still ack 200 since the source
+        # record exists and reconciliation can be re-run against it.
         logger.warning("Failed to publish event (queued for manual replay)", extra={"trans_id": trans_id}, exc_info=True)
 
-    # Return 200 immediately; all processing is now async
-    # Daraja expects this exact ack shape
     return jsonify({"ResultCode": 0, "ResultDesc": "Accepted"}), 200
 
 
@@ -344,8 +346,6 @@ def mpesa_validation():
     """
     payload = request.get_json(silent=True) or {}
     logger.info("Validation request for: %s", payload.get("TransID", "unknown"))
-    # Default: accept all. Add business rules here if needed
-    # (e.g. reject if account number format is wrong).
     return jsonify({"ResultCode": 0, "ResultDesc": "Accepted"}), 200
 
 

@@ -2,12 +2,26 @@
 Advanced Features API for PesaGuard - Webhooks, Auth, Email, Escalations, On-Call, Search, Rate Limiting.
 Integrates webhook notifications, email distribution, custom escalation rules, on-call rotation tracking,
 historical trends, advanced boolean search, rate limiting, and API authentication/RBAC.
+
+NOTE ON CONSOLIDATION: this file replaces the old separate `features.py`
+(create_features_app). That file only duplicated routes already implemented
+correctly (with auth + tenant scoping) in dashboard.py:
+/discrepancies/export/csv, /analytics/incident-trends, /incidents/filters/presets,
+/incidents/auto-escalate, /analytics/reconciliation-report, /incidents/bulk-assign,
+/incidents/search. Delete features.py and its registration call — nothing in
+it is unique. Everything below is functionality that exists ONLY here
+(auth/tokens, webhooks, escalation rules, on-call, email, advanced search,
+public customer endpoints, rate-limited bulk ops).
 """
 
+import hashlib
+import hmac
+import json
 import logging
 import os
+import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from flask import Flask, jsonify, request, g
 from sqlalchemy import create_engine
@@ -46,7 +60,6 @@ def create_db_engine(url: str):
 engine = create_db_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
-# Initialize services
 email_service = EmailService(
     smtp_server=os.getenv("SMTP_SERVER", "localhost"),
     smtp_port=int(os.getenv("SMTP_PORT", 587)),
@@ -68,6 +81,11 @@ def resolve_email_locale(tenant_id: str | None, user_id: str | None = None, sett
 
 def _record_action_audit(session, tenant_id: str, actor: str, action: str, details: dict | None = None) -> None:
     try:
+        # FIXED: `uuid` was used here but never imported anywhere in the file.
+        # Every call to this function raised NameError, which was silently
+        # swallowed by the except below — meaning NO action audit entries
+        # were ever actually being recorded, for any action, in the entire
+        # advanced-features API. Audit logging was completely non-functional.
         entry = ActionAuditEntry(
             id=f"audit_{uuid.uuid4().hex[:12]}",
             tenant_id=tenant_id,
@@ -78,7 +96,24 @@ def _record_action_audit(session, tenant_id: str, actor: str, action: str, detai
         session.add(entry)
         session.commit()
     except Exception:
-        logger.exception("Failed to persist audit entry", exc_info=True)
+        logger.exception("Failed to persist audit entry")
+
+
+def _incident_belongs_to_tenant(session, incident_id: str, tenant_id: str) -> Optional[Discrepancy]:
+    """Fetch a Discrepancy by ID, but only if it belongs to tenant_id.
+
+    Replaces the previous pattern of `session.query(Discrepancy).filter(Discrepancy.id == incident_id).first()`
+    with no tenant filter — @require_tenant_access() only confirms the caller
+    is allowed to act on the tenant_id THEY PASSED IN; it never confirms the
+    fetched record actually belongs to that tenant. Without this check, a
+    valid token for tenant A could bulk-assign or bulk-escalate tenant B's
+    incidents just by supplying tenant B's incident IDs.
+    """
+    return (
+        session.query(Discrepancy)
+        .filter(Discrepancy.id == incident_id, Discrepancy.tenant_id == tenant_id)
+        .first()
+    )
 
 
 @app.before_request
@@ -98,32 +133,118 @@ def _after_request(response):
 # AUTHENTICATION & TOKENS
 # ============================================================================
 
+# ----------------------------------------------------------------------------
+# INTERIM credential store. There is no User table in models.py yet, so this
+# is a real but temporary fix: credentials live in an environment variable as
+# JSON, passwords are checked with a proper salted hash (stdlib hashlib,
+# pbkdf2_hmac — no new dependency needed), and comparison is constant-time.
+# This replaces the previous code, which accepted ANY non-empty password for
+# ANY username and handed out a real signed token for whatever tenant_id the
+# caller supplied in the request body — i.e. no authentication at all.
+#
+# This is NOT a long-term solution. Before onboarding more than a couple of
+# pilot customers, replace this with a real `User` table (hashed passwords,
+# one row per user, proper account management, password reset flow, etc.)
+# and swap out `_verify_credentials` for a DB lookup. Keeping this as an env
+# var is fine for a single pilot customer; it does not scale to self-serve
+# signup.
+#
+# Expected env var PESAGUARD_AUTH_USERS_JSON, a JSON array like:
+# [
+#   {
+#     "username": "admin",
+#     "tenant_id": "pilot_customer_1",
+#     "roles": ["admin"],
+#     "salt_hex": "<hex salt, generate with os.urandom(16).hex()>",
+#     "password_hash_hex": "<pbkdf2_hmac('sha256', password.encode(), salt, 200000).hex()>"
+#   }
+# ]
+# ----------------------------------------------------------------------------
+
+_PBKDF2_ITERATIONS = 200_000
+
+
+def _hash_password(password: str, salt_hex: str) -> str:
+    salt = bytes.fromhex(salt_hex)
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS).hex()
+
+
+def _load_auth_users() -> Dict[str, Dict[str, Any]]:
+    raw = os.getenv("PESAGUARD_AUTH_USERS_JSON", "")
+    if not raw:
+        logger.error(
+            "PESAGUARD_AUTH_USERS_JSON is not set — no users can log in. "
+            "This is intentional: without it, login must fail closed, not "
+            "fall back to accepting anything."
+        )
+        return {}
+    try:
+        users = json.loads(raw)
+        return {u["username"]: u for u in users if "username" in u}
+    except (json.JSONDecodeError, TypeError, KeyError):
+        logger.exception("PESAGUARD_AUTH_USERS_JSON is malformed — no users can log in")
+        return {}
+
+
+def _verify_credentials(username: str, password: str) -> Optional[Dict[str, Any]]:
+    """Returns the matching user record if username/password are correct, else None.
+
+    Fails closed: any missing config, malformed record, or mismatch returns
+    None. Uses hmac.compare_digest for constant-time comparison so response
+    timing doesn't leak whether a partial hash matched.
+    """
+    users = _load_auth_users()
+    user = users.get(username)
+    if not user:
+        return None
+    try:
+        computed = _hash_password(password, user["salt_hex"])
+    except (KeyError, ValueError):
+        logger.exception("Malformed auth record for username=%s", username)
+        return None
+    if not hmac.compare_digest(computed, user.get("password_hash_hex", "")):
+        return None
+    return user
+
+
 @app.route("/auth/login", methods=["POST"])
 def login():
-    """Generate authentication token."""
+    """Generate authentication token.
+
+    FIXED: previously accepted ANY non-empty password for ANY username, and
+    trusted a tenant_id supplied directly in the request body with no check
+    that the credentials actually belonged to that tenant. That meant anyone
+    could obtain a valid, signed token for any tenant/role by guessing a
+    username. Now requires a real password match against the interim
+    credential store above.
+    """
     data = request.json or {}
     username = data.get("username")
     password = data.get("password")
-    tenant_id = data.get("tenant_id", "default")
 
-    # Simple validation (replace with real auth in production)
     if not username or not password:
         return jsonify({"error": "missing_credentials"}), 400
 
-    # Demo: accept any credentials for the demo tenant
+    user = _verify_credentials(username, password)
+    if not user:
+        # Deliberately generic error — do not reveal whether the username
+        # exists, only that the login attempt failed.
+        logger.warning("Failed login attempt for username=%s", username)
+        return jsonify({"error": "invalid_credentials"}), 401
+
     token = AuthRBAC.generate_token(
         user_id=f"user_{username}",
         username=username,
-        tenant_id=tenant_id,
-        roles=["admin"] if username == "admin" else ["operator"],
+        tenant_id=user["tenant_id"],  # from the verified record, never from the request body
+        roles=user.get("roles", ["operator"]),
     )
 
     return jsonify({
         "token": token,
         "user_id": f"user_{username}",
         "username": username,
-        "tenant_id": tenant_id,
-        "roles": ["admin"] if username == "admin" else ["operator"],
+        "tenant_id": user["tenant_id"],
+        "roles": user.get("roles", ["operator"]),
         "expires_in": 86400,
     }), 200
 
@@ -350,7 +471,7 @@ def create_on_call_rotation():
         service = OnCallService(session)
         shift_start = datetime.fromisoformat(data.get("shift_start"))
         shift_end = datetime.fromisoformat(data.get("shift_end"))
-        
+
         result = service.create_rotation(
             tenant_id=tenant_id,
             operator_id=data.get("operator_id"),
@@ -385,7 +506,7 @@ def get_active_on_call():
         service = OnCallService(session)
         rotations = service.get_active_rotations(tenant_id)
         coverage = service.get_coverage_status(tenant_id)
-        
+
         return jsonify({
             "tenant_id": tenant_id,
             "coverage": coverage,
@@ -692,19 +813,30 @@ def bulk_assign_incidents():
 
     try:
         updated = 0
+        skipped_ids = []
         for incident_id in incident_ids[:100]:  # Cap at 100 per request
-            incident = (
-                session.query(Discrepancy)
-                .filter(Discrepancy.id == incident_id)
-                .first()
-            )
+            # FIXED: previously fetched by ID with NO tenant filter — a valid
+            # token for tenant A could assign tenant B's incidents just by
+            # knowing/guessing their IDs. require_tenant_access() only checks
+            # the tenant_id param the caller supplied, not the fetched row.
+            incident = _incident_belongs_to_tenant(session, incident_id, tenant_id)
             if incident:
                 incident.assignee = assignee
                 updated += 1
+            else:
+                skipped_ids.append(incident_id)
 
         session.commit()
+        _record_action_audit(
+            session,
+            tenant_id=tenant_id,
+            actor=get_current_user().user_id if get_current_user() else "system",
+            action="bulk_assign_incidents",
+            details={"updated": updated, "skipped_ids": skipped_ids, "assignee": assignee},
+        )
         return jsonify({
             "updated": updated,
+            "skipped_ids": skipped_ids,
             "rate_limit": get_rate_limit_status(),
         }), 200
     finally:
@@ -724,21 +856,31 @@ def bulk_escalate_incidents():
 
     try:
         escalated = []
+        skipped_ids = []
         engine = EscalationEngine(session)
-        
+
         for incident_id in incident_ids[:50]:  # Cap at 50 per request
-            incident = (
-                session.query(Discrepancy)
-                .filter(Discrepancy.id == incident_id)
-                .first()
-            )
+            # FIXED: same tenant-filter gap as bulk_assign_incidents above —
+            # a valid token for tenant A could previously escalate tenant B's
+            # incidents by ID.
+            incident = _incident_belongs_to_tenant(session, incident_id, tenant_id)
             if incident:
                 result = engine.evaluate_and_escalate(tenant_id, incident)
                 escalated.append(result)
+            else:
+                skipped_ids.append(incident_id)
 
+        _record_action_audit(
+            session,
+            tenant_id=tenant_id,
+            actor=get_current_user().user_id if get_current_user() else "system",
+            action="bulk_escalate_incidents",
+            details={"escalated_count": len(escalated), "skipped_ids": skipped_ids},
+        )
         return jsonify({
             "escalated": len(escalated),
             "details": escalated,
+            "skipped_ids": skipped_ids,
             "rate_limit": get_rate_limit_status(),
         }), 200
     finally:
@@ -746,4 +888,7 @@ def bulk_escalate_incidents():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5002)
+    debug_mode = os.getenv("FLASK_DEBUG", "0") == "1"
+    if debug_mode:
+        logger.warning("Running with debug=True — never do this in production (exposes the interactive debugger)")
+    app.run(debug=debug_mode, host="0.0.0.0", port=int(os.getenv("PORT", 5002)))
