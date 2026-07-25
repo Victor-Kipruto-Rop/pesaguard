@@ -5,13 +5,14 @@ Role Hierarchy (from most to least privileged):
   2. operator: Read/write discrepancies, view analytics, perform bulk operations
   3. customer-user: Read-only access to discrepancies and analytics (customer portal)
   4. read-only: Read-only viewer access (minimal permissions)
-  
+
 Token Expiry: 24 hours (configurable via TOKEN_EXPIRY_HOURS)
 Auth Required: Optional (default off); enable via PESAGUARD_API_AUTH_REQUIRED=1 environment variable
 
 Permission Format: "resource:action" (e.g., "read:discrepancies", "write:escalation_rules")
 """
 
+import logging
 import jwt
 import os
 import uuid
@@ -20,10 +21,83 @@ from functools import wraps
 from typing import Dict, Any, Optional, List
 from flask import request, jsonify, g
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "pesaguard-secret-key-change-in-prod")
+from sqlalchemy import create_engine, Column, String, DateTime, Text
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+logger = logging.getLogger("pesaguard.auth_rbac")
+
+# ----------------------------------------------------------------------------
+# FIXED: SECRET_KEY previously defaulted to a hardcoded string
+# ("pesaguard-secret-key-change-in-prod") if JWT_SECRET_KEY wasn't set. That
+# string is public (it's in the source code, and now in chat history too) —
+# anyone who knows it can forge a valid, signed token for ANY user_id,
+# tenant_id, and role list, completely bypassing login. This is worse than
+# no auth at all, because it looks like auth is working.
+#
+# Now: fails loudly at import time unless a real secret is configured, OR the
+# caller has explicitly opted into an insecure dev secret (for local testing
+# only — never set this in a deployment that touches real customer data).
+# ----------------------------------------------------------------------------
+_INSECURE_DEV_SECRET = "pesaguard-secret-key-change-in-prod"
+
+SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+if not SECRET_KEY:
+    if os.getenv("PESAGUARD_ALLOW_INSECURE_DEV_SECRET") == "1":
+        SECRET_KEY = _INSECURE_DEV_SECRET
+        logger.warning(
+            "JWT_SECRET_KEY is not set — using an insecure, publicly-known dev "
+            "secret because PESAGUARD_ALLOW_INSECURE_DEV_SECRET=1. This must "
+            "NEVER be set in any environment handling real customer data — "
+            "anyone who knows this secret can forge valid tokens for any user "
+            "or tenant."
+        )
+    else:
+        raise RuntimeError(
+            "JWT_SECRET_KEY environment variable is required and was not set. "
+            "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\" "
+            "and set it as JWT_SECRET_KEY. For local development only, you may "
+            "instead set PESAGUARD_ALLOW_INSECURE_DEV_SECRET=1 to use a known, "
+            "insecure placeholder — never do this anywhere real data is handled."
+        )
+
 ALGORITHM = "HS256"
 TOKEN_EXPIRY_HOURS = 24
-REVOCATION_FILE = os.getenv("JWT_REVOCATION_FILE", "revoked_tokens.txt")
+
+# ----------------------------------------------------------------------------
+# FIXED: revocation previously lived in a local flat file
+# (revoked_tokens.txt) plus an in-memory class-level set. That breaks the
+# moment PesaGuard runs more than one process/container without a shared
+# filesystem — a token revoked on instance A would keep working on instance
+# B, since B never sees A's file or in-memory set. This is a real gap for
+# the horizontal-scaling phase already on the roadmap.
+#
+# Now: revocation state lives in the database (shared across all instances),
+# keyed by the token's `jti` claim rather than the raw token string — jti is
+# short, unique, and already present in every token issued.
+# ----------------------------------------------------------------------------
+_RevocationBase = declarative_base()
+
+
+class RevokedToken(_RevocationBase):
+    __tablename__ = "revoked_tokens"
+
+    jti = Column(String, primary_key=True)
+    revoked_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    reason = Column(Text, nullable=True)
+
+
+_revocation_engine = None
+_RevocationSession = None
+
+
+def _ensure_revocation_store_ready() -> None:
+    global _revocation_engine, _RevocationSession
+    if _RevocationSession is not None:
+        return
+    database_url = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
+    _revocation_engine = create_engine(database_url, pool_pre_ping=True)
+    _RevocationBase.metadata.create_all(_revocation_engine)
+    _RevocationSession = sessionmaker(bind=_revocation_engine)
 
 
 class User:
@@ -102,11 +176,24 @@ class AuthRBAC:
 
     @classmethod
     def verify_token(cls, token: str) -> Optional[User]:
-        """Verify JWT token and return User object."""
+        """Verify JWT token and return User object.
+
+        Signature and expiry are checked by jwt.decode() itself (raises on
+        failure, caught below). Revocation is checked by jti against the
+        shared database store, not the raw token string.
+        """
         try:
-            if cls.is_token_revoked(token):
-                return None
             payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        except jwt.ExpiredSignatureError:
+            return None
+        except jwt.InvalidTokenError:
+            return None
+
+        jti = payload.get("jti")
+        if jti and cls.is_token_revoked(jti):
+            return None
+
+        try:
             user = User(
                 user_id=payload["user_id"],
                 username=payload["username"],
@@ -114,46 +201,76 @@ class AuthRBAC:
                 roles=payload["roles"],
                 permissions=payload["permissions"],
             )
-            return user
-        except jwt.ExpiredSignatureError:
+        except KeyError:
+            logger.warning("Token payload missing expected claim(s), rejecting")
             return None
-        except jwt.InvalidTokenError:
-            return None
+        return user
 
     @classmethod
     def _get_permissions_for_roles(cls, roles: List[str]) -> List[str]:
-        """Get combined permissions for a list of roles."""
+        """Get combined permissions for a list of roles.
+
+        Unknown role names are logged (not silently dropped without a trace)
+        so a typo'd role produces a visible warning instead of a
+        confusing, silently permission-less token.
+        """
         permissions = set()
+        unknown_roles = []
         for role in roles:
             if role in cls.ROLE_PERMISSIONS:
                 permissions.update(cls.ROLE_PERMISSIONS[role])
+            else:
+                unknown_roles.append(role)
+        if unknown_roles:
+            logger.warning("Unrecognized role(s) requested, granting no permissions for them: %s", unknown_roles)
         return list(permissions)
 
     @classmethod
-    def _load_revoked_tokens(cls) -> set[str]:
-        if not hasattr(cls, "_revoked_tokens"):
-            cls._revoked_tokens = set()
-        if os.path.exists(REVOCATION_FILE):
-            with open(REVOCATION_FILE, "r", encoding="utf-8") as handle:
-                cls._revoked_tokens.update({line.strip() for line in handle if line.strip()})
-        return cls._revoked_tokens
+    def is_token_revoked(cls, jti: str) -> bool:
+        """Check revocation status by jti against the shared DB store."""
+        if not jti:
+            return False
+        _ensure_revocation_store_ready()
+        session = _RevocationSession()
+        try:
+            return session.get(RevokedToken, jti) is not None
+        finally:
+            session.close()
 
     @classmethod
-    def _persist_revoked_token(cls, token: str) -> None:
-        with open(REVOCATION_FILE, "a", encoding="utf-8") as handle:
-            handle.write(f"{token}\n")
+    def revoke_token(cls, token: str, reason: Optional[str] = None) -> None:
+        """Revoke a token by extracting and storing its jti.
 
-    @classmethod
-    def is_token_revoked(cls, token: str) -> bool:
-        revoked_tokens = cls._load_revoked_tokens()
-        return token in revoked_tokens
+        Decodes without verifying expiry (an expired token doesn't need
+        revoking, but a not-yet-expired token presented for revocation should
+        still be revocable even if, say, clock skew makes verification
+        awkward) but DOES verify the signature — an attacker should not be
+        able to cause arbitrary jti values to be inserted by presenting a
+        forged, unsigned token.
+        """
+        try:
+            payload = jwt.decode(
+                token, SECRET_KEY, algorithms=[ALGORITHM],
+                options={"verify_exp": False},
+            )
+        except jwt.InvalidTokenError:
+            logger.warning("revoke_token() called with an invalid/unverifiable token; ignoring")
+            return
 
-    @classmethod
-    def revoke_token(cls, token: str) -> None:
-        revoked_tokens = cls._load_revoked_tokens()
-        if token not in revoked_tokens:
-            revoked_tokens.add(token)
-            cls._persist_revoked_token(token)
+        jti = payload.get("jti")
+        if not jti:
+            logger.warning("revoke_token() called with a token missing jti; ignoring")
+            return
+
+        _ensure_revocation_store_ready()
+        session = _RevocationSession()
+        try:
+            existing = session.get(RevokedToken, jti)
+            if not existing:
+                session.add(RevokedToken(jti=jti, reason=reason))
+                session.commit()
+        finally:
+            session.close()
 
     @classmethod
     def check_permission(cls, user: User, required_permission: str) -> bool:
