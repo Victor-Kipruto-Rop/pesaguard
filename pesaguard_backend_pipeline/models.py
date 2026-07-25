@@ -28,7 +28,7 @@ class Transaction(Base):
 
 class ProcessedTransaction(Base):
     """Explicit idempotency ledger: tracks which webhook callbacks have been processed.
-    
+
     Separate from Transaction table for audit clarity. Used by event_store.already_processed()
     and by webhook endpoint to prevent duplicate processing. Unique constraint ensures
     Daraja retries are silently ignored without double-processing.
@@ -97,6 +97,14 @@ class WebhookConfig(Base):
     active = Column(Boolean, default=True)
     retry_attempts = Column(Integer, default=3)
     timeout_seconds = Column(Integer, default=10)
+    # Added: real per-webhook HMAC signing secret, generated at registration
+    # (see webhook_manager.py). Previously signatures used webhook_id itself
+    # as the key, but webhook_id is returned to the customer in plaintext —
+    # not a secret — so anyone who knew a webhook's ID could forge a validly
+    # signed payload. Nullable to allow existing rows (registered before this
+    # column existed) to be backfilled; webhook_manager.py logs loudly rather
+    # than silently signing insecurely when this is None.
+    signing_secret = Column(String, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
