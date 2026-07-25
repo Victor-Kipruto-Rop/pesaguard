@@ -344,17 +344,35 @@ def list_webhooks():
 @app.route("/webhooks/<webhook_id>", methods=["PUT"])
 @require_auth("manage:webhooks")
 def update_webhook(webhook_id):
-    """Update webhook configuration."""
+    """Update webhook configuration.
+
+    FIXED: previously passed the entire client-supplied request body
+    (including any client-claimed "tenant_id") straight into
+    webhook_mgr.update_webhook() with no tenant check at all. A valid
+    manage:webhooks token for tenant A could update tenant B's webhook by
+    ID — or bypass scoping entirely just by omitting tenant_id from the
+    body, since the old webhook_mgr.update_webhook() had no tenant
+    parameter to filter by in the first place. Tenant is now taken ONLY
+    from the authenticated token, never from client input — any
+    tenant_id the client tries to pass in the body is stripped and ignored.
+    """
     data = request.json or {}
+    data.pop("tenant_id", None)  # never trust a client-supplied tenant_id
+    current_user = get_current_user()
+    tenant_id = current_user.tenant_id if current_user else None
     session = SessionLocal()
 
     try:
         webhook_mgr = WebhookManager(session)
-        result = webhook_mgr.update_webhook(webhook_id, **data)
+        result = webhook_mgr.update_webhook(webhook_id, tenant_id=tenant_id, **data)
+        if result.get("error") == "webhook_not_found":
+            # Either it doesn't exist, or it belongs to a different tenant —
+            # same response either way, so we don't leak which case it is.
+            return jsonify(result), 404
         _record_action_audit(
             session,
-            tenant_id=data.get("tenant_id", get_current_user().tenant_id if get_current_user() else "default"),
-            actor=get_current_user().user_id if get_current_user() else "system",
+            tenant_id=tenant_id or "default",
+            actor=current_user.user_id if current_user else "system",
             action="update_webhook",
             details={"webhook_id": webhook_id, **data},
         )
@@ -366,13 +384,24 @@ def update_webhook(webhook_id):
 @app.route("/webhooks/<webhook_id>/deliveries", methods=["GET"])
 @require_auth("manage:webhooks")
 def get_webhook_deliveries(webhook_id):
-    """Get delivery history for a webhook."""
+    """Get delivery history for a webhook.
+
+    FIXED: previously fetched by webhook_id alone with no tenant check at
+    all — delivery history includes full request/response bodies, so this
+    was a real cross-tenant DATA EXPOSURE (not just a config-tampering
+    risk). Tenant is now taken from the authenticated token and enforced by
+    webhook_mgr.get_delivery_history()'s own ownership check (returns an
+    empty list rather than another tenant's data if the webhook doesn't
+    belong to this caller).
+    """
     limit = request.args.get("limit", 50, type=int)
+    current_user = get_current_user()
+    tenant_id = current_user.tenant_id if current_user else None
     session = SessionLocal()
 
     try:
         webhook_mgr = WebhookManager(session)
-        deliveries = webhook_mgr.get_delivery_history(webhook_id, limit=limit)
+        deliveries = webhook_mgr.get_delivery_history(webhook_id, tenant_id=tenant_id, limit=limit)
         return jsonify({
             "webhook_id": webhook_id,
             "deliveries": deliveries,
