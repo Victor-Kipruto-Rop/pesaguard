@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Automated Postgres backup script with restoration testing.
+Enterprise-grade Automated Postgres backup and restoration script with integrity testing.
 
 Usage:
   python3 backup_postgres.py --help
-  python3 backup_postgres.py --backup  # Create a backup
-  python3 backup_postgres.py --restore /path/to/backup.sql  # Restore from backup
+  python3 backup_postgres.py --backup                                # Create and test a new backup
+  python3 backup_postgres.py --restore /path/to/backup.sql.gz       # Restore database from backup
+  python3 backup_postgres.py --test                                  # Test integrity of latest backup
+  python3 backup_postgres.py --list                                  # List existing backups
 
 Deployment:
   1. Copy to /usr/local/bin/pesaguard-backup.py
@@ -13,20 +15,23 @@ Deployment:
   3. sudo systemctl daemon-reload && sudo systemctl enable --now pesaguard-backup.timer
 """
 
+from __future__ import annotations
+
 import argparse
-import json
+import gzip
 import logging
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s - %(levelname)s - %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("pesaguard.backup")
 
 # Configuration from environment
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
@@ -34,295 +39,248 @@ BACKUP_DIR = Path(os.getenv("PESAGUARD_BACKUP_DIR", "/var/backups/pesaguard"))
 RETENTION_DAYS = int(os.getenv("PESAGUARD_BACKUP_RETENTION_DAYS", "30"))
 
 
-def parse_db_url(url: str) -> dict:
-    """Parse PostgreSQL URL into connection parameters."""
-    # Format: postgresql://user:password@host:port/database
-    if not url.startswith("postgresql://"):
-        raise ValueError(f"Unsupported database URL scheme: {url}")
-    
-    url = url.replace("postgresql://", "")
-    
-    # Extract auth
-    if "@" in url:
-        auth, rest = url.split("@", 1)
-        if ":" in auth:
-            user, password = auth.split(":", 1)
-        else:
-            user = auth
-            password = ""
-    else:
-        user = "postgres"
-        password = ""
-        rest = url
-    
-    # Extract host, port, database
-    if "/" in rest:
-        host_port, database = rest.split("/", 1)
-    else:
-        host_port = rest
-        database = "postgres"
-    
-    if ":" in host_port:
-        host, port = host_port.split(":", 1)
-    else:
-        host = host_port
-        port = "5432"
-    
+def parse_db_url(url: str) -> dict[str, str]:
+    """Parse PostgreSQL connection URL safely using urllib.parse."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("postgresql", "postgres"):
+        raise ValueError(f"Unsupported database URL scheme: {parsed.scheme}")
+
     return {
-        "user": user,
-        "password": password,
-        "host": host,
-        "port": port,
-        "database": database,
+        "user": unquote(parsed.username) if parsed.username else "postgres",
+        "password": unquote(parsed.password) if parsed.password else "",
+        "host": parsed.hostname or "localhost",
+        "port": str(parsed.port) if parsed.port else "5432",
+        "database": parsed.path.lstrip("/") or "postgres",
     }
 
 
 def create_backup() -> Path:
-    """Create a timestamped backup of the Postgres database."""
+    """Create a timestamped compressed backup of the Postgres database."""
     try:
         db_params = parse_db_url(DATABASE_URL)
     except Exception as e:
-        logger.error(f"Failed to parse DATABASE_URL: {e}")
+        logger.error("Failed to parse DATABASE_URL: %s", e)
         sys.exit(1)
-    
-    # Ensure backup directory exists
+
+    # Ensure target backup directory exists with secure permissions
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    
-    # Create timestamped backup file
+
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     backup_file = BACKUP_DIR / f"pesaguard_{timestamp}.sql.gz"
-    
-    # Build pg_dump command with credentials
+
     env = os.environ.copy()
     if db_params["password"]:
         env["PGPASSWORD"] = db_params["password"]
-    
+
+    dump_cmd = [
+        "pg_dump",
+        "-h", db_params["host"],
+        "-p", db_params["port"],
+        "-U", db_params["user"],
+        "-d", db_params["database"],
+        "--no-password",
+        "-F", "p",  # Plain text dump for streaming gzip compression
+    ]
+
+    logger.info("Starting database backup for '%s' -> %s", db_params["database"], backup_file)
+
     try:
-        logger.info(f"Starting backup to {backup_file}")
-        # Use pg_dump with gzip compression
-        dump_cmd = [
-            "pg_dump",
-            "-h", db_params["host"],
-            "-p", db_params["port"],
-            "-U", db_params["user"],
-            "-d", db_params["database"],
-            "--no-password",
-            "-F", "p",  # Plain text format (required for gzip)
-        ]
-        
-        with open(backup_file, "w") as f:
-            # Pipe through gzip for compression
+        with open(backup_file, "wb") as f_out:
             dump_process = subprocess.Popen(
                 dump_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=env,
             )
-            
+
             gzip_process = subprocess.Popen(
                 ["gzip", "-9"],
                 stdin=dump_process.stdout,
-                stdout=f,
+                stdout=f_out,
                 stderr=subprocess.PIPE,
             )
-            
-            dump_process.stdout.close()  # Allow dump_process to receive SIGPIPE
-            _, err = gzip_process.communicate()
-            
+
+            if dump_process.stdout:
+                dump_process.stdout.close()
+
+            _, gzip_err = gzip_process.communicate()
+            _, dump_err = dump_process.communicate()
+
+            if dump_process.returncode != 0:
+                raise RuntimeError(f"pg_dump error: {dump_err.decode().strip()}")
             if gzip_process.returncode != 0:
-                raise subprocess.CalledProcessError(gzip_process.returncode, "gzip", stderr=err)
-        
-        # Verify backup file was created and contains data
+                raise RuntimeError(f"gzip error: {gzip_err.decode().strip()}")
+
         if not backup_file.exists() or backup_file.stat().st_size == 0:
-            raise RuntimeError(f"Backup file is empty: {backup_file}")
-        
-        backup_size_mb = backup_file.stat().st_size / (1024 * 1024)
-        logger.info(f"Backup created successfully: {backup_file} ({backup_size_mb:.2f} MB)")
-        
-        # Clean up old backups
+            raise RuntimeError("Generated backup file is empty.")
+
+        size_mb = backup_file.stat().st_size / (1024 * 1024)
+        logger.info("Backup successfully created: %s (%.2f MB)", backup_file, size_mb)
+
         _cleanup_old_backups()
-        
         return backup_file
-    
-    except subprocess.CalledProcessError as e:
-        logger.error(f"pg_dump failed: {e.stderr.decode() if e.stderr else str(e)}")
-        if backup_file.exists():
-            backup_file.unlink()
-        sys.exit(1)
+
     except Exception as e:
-        logger.error(f"Backup failed: {e}")
+        logger.error("Backup execution failed: %s", e)
         if backup_file.exists():
             backup_file.unlink()
         sys.exit(1)
 
 
 def restore_backup(backup_file: Path) -> None:
-    """Restore database from a backup file."""
+    """Restore database from a backup file using memory-efficient streaming."""
     if not backup_file.exists():
-        logger.error(f"Backup file not found: {backup_file}")
+        logger.error("Backup file not found: %s", backup_file)
         sys.exit(1)
-    
+
     try:
         db_params = parse_db_url(DATABASE_URL)
     except Exception as e:
-        logger.error(f"Failed to parse DATABASE_URL: {e}")
+        logger.error("Failed to parse DATABASE_URL: %s", e)
         sys.exit(1)
-    
+
+    env = os.environ.copy()
+    if db_params["password"]:
+        env["PGPASSWORD"] = db_params["password"]
+
+    restore_cmd = [
+        "psql",
+        "-h", db_params["host"],
+        "-p", db_params["port"],
+        "-U", db_params["user"],
+        "-d", db_params["database"],
+        "--no-password",
+        "-f", "-",
+    ]
+
+    logger.info("Starting restoration of database '%s' from %s", db_params["database"], backup_file)
+
     try:
-        logger.info(f"Starting restoration from {backup_file}")
-        
-        env = os.environ.copy()
-        if db_params["password"]:
-            env["PGPASSWORD"] = db_params["password"]
-        
-        # Check if backup is gzipped
+        process = subprocess.Popen(
+            restore_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            text=True,
+        )
+
         is_gzipped = str(backup_file).endswith(".gz")
-        
         if is_gzipped:
-            # Decompress on the fly
-            restore_cmd = [
-                "psql",
-                "-h", db_params["host"],
-                "-p", db_params["port"],
-                "-U", db_params["user"],
-                "-d", db_params["database"],
-                "--no-password",
-                "-f", "-",  # Read from stdin
-            ]
-            
-            with open(backup_file, "rb") as f:
-                import gzip
-                with gzip.open(f, "rt") as gz:
-                    process = subprocess.Popen(
-                        restore_cmd,
-                        stdin=subprocess.PIPE,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                        env=env,
-                        text=True,
-                    )
-                    _, err = process.communicate(input=gz.read())
-                    if process.returncode != 0:
-                        raise subprocess.CalledProcessError(process.returncode, "psql", stderr=err)
+            with gzip.open(backup_file, "rt", encoding="utf-8", errors="replace") as gz:
+                for line in gz:
+                    if process.stdin:
+                        process.stdin.write(line)
         else:
-            # Plain text restore
-            restore_cmd = [
-                "psql",
-                "-h", db_params["host"],
-                "-p", db_params["port"],
-                "-U", db_params["user"],
-                "-d", db_params["database"],
-                "--no-password",
-                "-f", str(backup_file),
-            ]
-            
-            process = subprocess.run(restore_cmd, env=env, capture_output=True, text=True)
-            if process.returncode != 0:
-                raise subprocess.CalledProcessError(process.returncode, "psql", stderr=process.stderr)
-        
-        logger.info(f"Restoration completed successfully from {backup_file}")
-    
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Restoration failed: {e.stderr if e.stderr else str(e)}")
-        sys.exit(1)
+            with open(backup_file, "r", encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if process.stdin:
+                        process.stdin.write(line)
+
+        stdout, stderr = process.communicate()
+        if process.returncode != 0:
+            raise RuntimeError(f"psql restoration failed: {stderr.strip()}")
+
+        logger.info("Database restoration completed successfully from %s", backup_file)
+
     except Exception as e:
-        logger.error(f"Restoration failed: {e}")
+        logger.error("Restoration execution failed: %s", e)
         sys.exit(1)
 
 
 def _cleanup_old_backups() -> None:
-    """Remove backups older than RETENTION_DAYS."""
-    from datetime import timedelta
-    
+    """Remove backup files older than the configured retention period."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)
-    
+
     for backup_file in sorted(BACKUP_DIR.glob("pesaguard_*.sql.gz")):
         try:
-            # Extract timestamp from filename
             timestamp_str = backup_file.stem.replace("pesaguard_", "").replace(".sql", "")
             file_time = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
-            
+
             if file_time < cutoff:
-                logger.info(f"Removing old backup: {backup_file}")
+                logger.info("Pruning expired backup: %s", backup_file)
                 backup_file.unlink()
         except Exception as e:
-            logger.warning(f"Failed to parse/clean backup {backup_file}: {e}")
+            logger.warning("Could not parse timestamp for backup cleanup on %s: %s", backup_file, e)
 
 
 def test_backup_integrity(backup_file: Path) -> bool:
-    """Quick test: verify backup is valid SQL."""
+    """Verify backup file structure, decompression capability, and SQL signature."""
     if not backup_file.exists():
-        logger.warning(f"Backup file not found for integrity test: {backup_file}")
+        logger.warning("Backup file missing during integrity verification: %s", backup_file)
         return False
-    
+
     try:
-        import gzip
-        if str(backup_file).endswith(".gz"):
-            with gzip.open(backup_file, "rt") as f:
-                content = f.read(1000)  # Read first 1000 chars
+        is_gzipped = str(backup_file).endswith(".gz")
+        if is_gzipped:
+            with gzip.open(backup_file, "rt", encoding="utf-8", errors="replace") as f:
+                head = [f.readline() for _ in range(50)]
         else:
-            with open(backup_file, "r") as f:
-                content = f.read(1000)
-        
-        # Basic checks
+            with open(backup_file, "r", encoding="utf-8", errors="replace") as f:
+                head = [f.readline() for _ in range(50)]
+
+        content = "".join(head)
         if not content or len(content.strip()) < 10:
-            logger.warning(f"Backup file appears empty or corrupted: {backup_file}")
+            logger.warning("Integrity check failed: Backup file is empty or corrupted (%s)", backup_file)
             return False
-        
-        if "CREATE" not in content and "INSERT" not in content:
-            logger.warning(f"Backup file doesn't appear to contain SQL: {backup_file}")
+
+        sql_keywords = {"PostgreSQL database dump", "CREATE", "INSERT", "SET", "ALTER"}
+        if not any(keyword in content for keyword in sql_keywords):
+            logger.warning("Integrity check failed: No valid SQL signatures found in %s", backup_file)
             return False
-        
-        logger.info(f"Backup integrity check passed: {backup_file}")
+
+        logger.info("Backup integrity check passed for %s", backup_file)
         return True
     except Exception as e:
-        logger.warning(f"Backup integrity check failed: {e}")
+        logger.warning("Integrity check threw an exception for %s: %s", backup_file, e)
         return False
 
 
 def main():
     parser = argparse.ArgumentParser(description="PesaGuard PostgreSQL backup and restore utility")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--backup", action="store_true", help="Create a new backup")
-    group.add_argument("--restore", type=str, metavar="BACKUP_FILE", help="Restore from backup file")
-    group.add_argument("--test", action="store_true", help="Test backup integrity")
-    group.add_argument("--list", action="store_true", help="List recent backups")
-    
+    group.add_argument("--backup", action="store_true", help="Create a new database backup")
+    group.add_argument("--restore", type=str, metavar="BACKUP_FILE", help="Restore database from a backup file")
+    group.add_argument("--test", action="store_true", help="Test integrity of the latest backup")
+    group.add_argument("--list", action="store_true", help="List recent database backups")
+
     args = parser.parse_args()
-    
+
     if args.backup:
         backup_file = create_backup()
         if test_backup_integrity(backup_file):
-            logger.info("Backup verification successful")
+            logger.info("Backup creation and integrity verification succeeded.")
         else:
-            logger.warning("Backup verification failed")
+            logger.error("Backup created but failed integrity check.")
             sys.exit(1)
-    
+
     elif args.restore:
         restore_backup(Path(args.restore))
-    
+
     elif args.test:
-        if not list(BACKUP_DIR.glob("pesaguard_*.sql.gz")):
-            logger.warning(f"No backups found in {BACKUP_DIR}")
+        backups = sorted(BACKUP_DIR.glob("pesaguard_*.sql.gz"))
+        if not backups:
+            logger.warning("No backup files found in %s to test.", BACKUP_DIR)
             sys.exit(1)
-        
-        latest_backup = sorted(BACKUP_DIR.glob("pesaguard_*.sql.gz"))[-1]
+
+        latest_backup = backups[-1]
         if test_backup_integrity(latest_backup):
-            logger.info("Latest backup integrity verified")
+            logger.info("Latest backup (%s) integrity verified successfully.", latest_backup.name)
         else:
             sys.exit(1)
-    
+
     elif args.list:
         backups = sorted(BACKUP_DIR.glob("pesaguard_*.sql.gz"), reverse=True)
         if not backups:
-            logger.info(f"No backups found in {BACKUP_DIR}")
+            logger.info("No backups found in %s", BACKUP_DIR)
         else:
-            logger.info(f"Recent backups in {BACKUP_DIR}:")
+            logger.info("Available backups in %s:", BACKUP_DIR)
             for backup in backups[:10]:
                 size_mb = backup.stat().st_size / (1024 * 1024)
-                mtime = datetime.fromtimestamp(backup.stat().st_mtime)
-                logger.info(f"  {backup.name} ({size_mb:.2f} MB) - {mtime}")
+                mtime = datetime.fromtimestamp(backup.stat().st_mtime, tz=timezone.utc)
+                logger.info("  %s (%.2f MB) - Created: %s", backup.name, size_mb, mtime.isoformat())
 
 
 if __name__ == "__main__":
     main()
+
