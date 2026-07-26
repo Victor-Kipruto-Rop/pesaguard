@@ -14,9 +14,10 @@ For real-time tuning during pilot:
   2. Adjust thresholds in tenant_settings.json without restart
   3. Log all anomaly scores to review patterns
 """
+
 import os
-from typing import Any, Dict, List, Set
 from datetime import datetime
+from typing import Any, Dict, List, Set
 
 # ============================================================================
 # PILOT THRESHOLDS (per-tenant overrides in tenant_settings.json)
@@ -40,7 +41,6 @@ OFF_HOURS_START_UTC = int(os.getenv("ANOMALY_OFF_HOURS_START", "0"))  # 00:00 UT
 OFF_HOURS_END_UTC = int(os.getenv("ANOMALY_OFF_HOURS_END", "4"))      # 04:00 UTC
 OFF_HOURS_PENALTY = float(os.getenv("ANOMALY_OFF_HOURS_PENALTY", "0.2"))
 
-import math
 
 def check_for_anomalies(event: Dict[str, Any], seen_trans_ids: Set[str]) -> List[str]:
     """
@@ -86,18 +86,16 @@ def score_transaction_anomaly(event: Dict[str, Any]) -> float:
     try:
         amount = float(event.get("TransAmount", 0))
     except (TypeError, ValueError):
-        # Invalid amount is critical issue
+        # Invalid amount is a critical issue
         return 1.0
 
     # Signal 1: Extreme amount check
-    # Pilot tuning: Adjust thresholds to match customer's business model
     if amount > LARGE_AMOUNT_THRESHOLD_KES * 1.5:  # 225,000 KES
         score += 0.5
     elif amount > LARGE_AMOUNT_THRESHOLD_KES:  # 150,000 KES
         score += 0.3
 
     # Signal 2: Timing/Off-hours check (UTC timezone)
-    # Disable for 24/7 businesses (OFF_HOURS_PENALTY=0)
     trans_time = str(event.get("TransTime", ""))
     try:
         event_dt = None
@@ -109,7 +107,6 @@ def score_transaction_anomaly(event: Dict[str, Any]) -> float:
         # Try ISO 8601: 2026-07-22T02:30:00Z
         elif "T" in trans_time:
             dt = datetime.fromisoformat(trans_time.replace("Z", "+00:00"))
-            hour = dt.hour
             event_dt = dt
         
         if event_dt and OFF_HOURS_PENALTY > 0:
@@ -126,18 +123,14 @@ def score_transaction_anomaly(event: Dict[str, Any]) -> float:
         pass  # Timestamp parsing failure, don't penalize further
 
     # Signal 3: Amount frequency/pattern check
-    # Transactions ending in multiple zeros (e.g., 100,000, 200,000) are normal
-    # Odd values (e.g., 123,456) are less frequent but not necessarily anomalous
-    # For now, we skip this unless there's pilot evidence of specific patterns
     if amount > LARGE_AMOUNT_THRESHOLD_KES and amount % 10000 != 0:
         score += 0.15
 
-    # Signal 4: Velocity/Rate of change (if historical context available)
-    # Not yet implemented; requires transaction history context
-    # TODO: Add velocity scoring once transaction history is available
+    # Signal 4: Velocity/Rate of change (Placeholder for future implementation)
+    # TODO: Add velocity scoring once transaction history context is available
 
-    # Clamp to [0.0, 1.0]
-    return min(1.0, score)
+    # Clamp to [0.0, 1.0] using built-in min/max
+    return max(0.0, min(1.0, score))
 
 
 def _is_duplicate(event: Dict[str, Any], seen_trans_ids: Set[str]) -> bool:
@@ -162,21 +155,3 @@ def _has_invalid_amount(event: Dict[str, Any]) -> bool:
         return amount <= 0
     except (TypeError, ValueError):
         return True  # Can't parse = invalid
-
-
-def _is_duplicate(event: Dict[str, Any], seen_trans_ids: Set[str]) -> bool:
-    return event.get("TransID") in seen_trans_ids
-
-
-def _is_unusually_large(event: Dict[str, Any]) -> bool:
-    try:
-        return float(event.get("TransAmount", 0)) > LARGE_AMOUNT_THRESHOLD_KES
-    except (TypeError, ValueError):
-        return False
-
-
-def _has_invalid_amount(event: Dict[str, Any]) -> bool:
-    try:
-        return float(event.get("TransAmount", 0)) <= 0
-    except (TypeError, ValueError):
-        return True
