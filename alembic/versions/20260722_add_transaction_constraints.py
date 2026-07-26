@@ -5,6 +5,8 @@ Revises: 20260719_add_deadletters_reports_audit
 Create Date: 2026-07-22 07:00:00.000000
 
 """
+from __future__ import annotations
+
 from alembic import op
 import sqlalchemy as sa
 
