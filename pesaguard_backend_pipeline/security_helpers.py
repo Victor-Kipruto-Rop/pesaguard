@@ -1,41 +1,46 @@
+"""
+Security helper functions for IP resolution, payload limit checks, and HMAC source validation.
+
+Provides constant-time HMAC header evaluation, reverse-proxy aware IP parsing,
+and strict fail-closed webhook validation for Daraja callback endpoints.
+"""
+
+from __future__ import annotations
+
 import hmac
 import ipaddress
 import logging
 import os
+from typing import List
+
 from flask import Request
 
 logger = logging.getLogger("pesaguard.security_helpers")
 
 
 def get_client_ip(request: Request) -> str:
-    """Get the client IP from the incoming request.
+    """Safely resolve the client IP address from the incoming Flask HTTP request.
 
-    FIXED: previously trusted X-Forwarded-For unconditionally — any client
-    can set that header themselves, so an attacker could spoof a value like
-    "X-Forwarded-For: <an allowlisted Safaricom IP>" and have this function
-    report that spoofed IP as "the client," completely defeating the IP
-    allowlist in is_allowed_source() below.
+    Evaluates `X-Forwarded-For` headers ONLY if `PESAGUARD_TRUSTED_PROXY_COUNT`
+    is explicitly set to a positive integer (e.g., 1 when running behind a single
+    AWS ALB or NGINX reverse proxy). Otherwise, defaults to `request.remote_addr`
+    to prevent header spoofing attacks.
 
-    Now: X-Forwarded-For is only trusted if PESAGUARD_TRUSTED_PROXY_COUNT is
-    explicitly set to a positive integer, matching the number of trusted
-    reverse proxies actually in front of this app (e.g. 1 if there's exactly
-    one load balancer that appends to the header before forwarding). In that
-    case, the trustworthy client IP is the Nth-from-the-right entry (the
-    proxy closest to the app appends last, so entries further left could
-    still be attacker-supplied if the attacker also sets the header). If
-    PESAGUARD_TRUSTED_PROXY_COUNT is unset or 0 (the safe default), X-Forwarded-For
-    is ignored entirely and only the direct TCP peer (request.remote_addr) is used.
+    Args:
+        request: Flask request instance
+
+    Returns:
+        Resolved client IP string or empty string
     """
-    trusted_proxy_count = int(os.getenv("PESAGUARD_TRUSTED_PROXY_COUNT", "0"))
+    try:
+        trusted_proxy_count = int(os.getenv("PESAGUARD_TRUSTED_PROXY_COUNT", "0"))
+    except ValueError:
+        trusted_proxy_count = 0
 
     if trusted_proxy_count > 0:
         forwarded_for = request.headers.get("X-Forwarded-For")
         if forwarded_for:
             hops = [h.strip() for h in forwarded_for.split(",") if h.strip()]
-            # The rightmost `trusted_proxy_count` entries were appended by
-            # proxies we trust; the one just before them is the real client.
-            # If there aren't enough hops, fall back to remote_addr rather
-            # than guessing.
             if len(hops) >= trusted_proxy_count:
                 index = len(hops) - trusted_proxy_count
                 if index > 0:
@@ -44,7 +49,8 @@ def get_client_ip(request: Request) -> str:
     return request.remote_addr or ""
 
 
-def _parse_allowed_ips() -> list[str]:
+def _parse_allowed_ips() -> List[str]:
+    """Parse raw comma-separated IP and CIDR definitions from environment variables."""
     raw = os.getenv("DARAJA_ALLOWED_IPS", "")
     if not raw:
         return []
@@ -52,9 +58,19 @@ def _parse_allowed_ips() -> list[str]:
 
 
 def is_payload_within_limit(request: Request) -> bool:
-    """Guard against large requests before application logic runs."""
+    """Guard against oversized HTTP request payloads prior to parsing.
+
+    Args:
+        request: Incoming Flask request object
+
+    Returns:
+        True if request body is within limit, False otherwise
+    """
     max_body_bytes = int(
-        os.getenv("PESAGUARD_API_MAX_BODY_BYTES", os.getenv("PESAGUARD_WEBHOOK_MAX_BODY_BYTES", "1048576"))
+        os.getenv(
+            "PESAGUARD_API_MAX_BODY_BYTES",
+            os.getenv("PESAGUARD_WEBHOOK_MAX_BODY_BYTES", "1048576"),  # 1MB default
+        )
     )
     content_length = request.content_length
     if content_length is not None:
@@ -65,72 +81,77 @@ def is_payload_within_limit(request: Request) -> bool:
 
 
 def is_allowed_source(client_ip: str, request: Request) -> bool:
-    """Validate the incoming webhook source using shared secret and IP allowlist.
+    """Validate incoming Daraja webhook origin via constant-time HMAC secret or IP allowlist.
 
-    FIXED: previously returned True (allow) whenever neither
-    DARAJA_SHARED_SECRET nor DARAJA_ALLOWED_IPS was configured — an
-    unconfigured security control silently allowed every source through, with
-    no validation at all. For a webhook that triggers real financial
-    reconciliation, an unconfigured check should fail closed, not open.
+    Fails CLOSED (rejects requests) if neither `DARAJA_SHARED_SECRET` nor
+    `DARAJA_ALLOWED_IPS` is configured, unless explicitly overridden for local
+    development via `PESAGUARD_ALLOW_UNRESTRICTED_WEBHOOK_SOURCE=1`.
 
-    Now: if neither mechanism is configured, the request is REJECTED, and a
-    loud warning is logged so misconfiguration is visible immediately rather
-    than discovered later. Set PESAGUARD_ALLOW_UNRESTRICTED_WEBHOOK_SOURCE=1
-    to explicitly opt into the old permissive behavior for local dev only —
-    never set this where real Daraja traffic is received.
+    Args:
+        client_ip: Resolved client IP address string
+        request: Incoming Flask request object
+
+    Returns:
+        True if origin source is authenticated and authorized, False otherwise
     """
-    shared_secret = os.getenv("DARAJA_SHARED_SECRET")
+    shared_secret = os.getenv("DARAJA_SHARED_SECRET", "").strip()
     configured_ips = _parse_allowed_ips()
 
+    # Fail closed if security parameters are completely unconfigured
     if not shared_secret and not configured_ips:
         if os.getenv("PESAGUARD_ALLOW_UNRESTRICTED_WEBHOOK_SOURCE") == "1":
             logger.warning(
-                "Webhook source validation is fully unconfigured (no "
-                "DARAJA_SHARED_SECRET, no DARAJA_ALLOWED_IPS) and "
-                "PESAGUARD_ALLOW_UNRESTRICTED_WEBHOOK_SOURCE=1 is set — "
-                "accepting requests from ANY source. This must never be set "
-                "in an environment receiving real Daraja traffic."
+                "Webhook source validation is fully unconfigured and "
+                "PESAGUARD_ALLOW_UNRESTRICTED_WEBHOOK_SOURCE=1 is set. "
+                "Accepting requests from ALL sources. NEVER enable in production!"
             )
             return True
+
         logger.error(
-            "Webhook source validation is fully unconfigured (no "
-            "DARAJA_SHARED_SECRET, no DARAJA_ALLOWED_IPS) — rejecting all "
-            "webhook requests. Configure at least one before real traffic "
-            "can be accepted."
+            "Webhook source validation is fully unconfigured (missing DARAJA_SHARED_SECRET "
+            "and DARAJA_ALLOWED_IPS). Rejecting all incoming webhook requests."
         )
         return False
 
+    # Check shared secret HMAC header using constant-time digest comparison
     if shared_secret:
         header_secret = request.headers.get("X-Daraja-Shared-Secret", "")
-        # FIXED: was a plain `!=` string comparison, which leaks timing
-        # information about how many leading characters matched. Using
-        # hmac.compare_digest for a constant-time comparison.
         if not hmac.compare_digest(header_secret, shared_secret):
+            logger.warning(
+                "Webhook request failed HMAC secret comparison. client_ip=%s",
+                client_ip,
+            )
             return False
 
+    # Validate client IP / CIDR range if configured
     if configured_ips:
         try:
             parsed_ip = ipaddress.ip_address(client_ip)
         except ValueError:
+            logger.warning("Invalid client IP address provided for validation: '%s'", client_ip)
             return False
 
+        ip_allowed = False
         for allowed in configured_ips:
             try:
-                if parsed_ip == ipaddress.ip_address(allowed):
-                    return True
                 if "/" in allowed:
                     network = ipaddress.ip_network(allowed, strict=False)
                     if parsed_ip in network:
-                        return True
+                        ip_allowed = True
+                        break
+                elif parsed_ip == ipaddress.ip_address(allowed):
+                    ip_allowed = True
+                    break
             except ValueError:
                 continue
-        return False
 
-    # Shared secret was configured and matched, and no IP allowlist was
-    # configured — shared secret alone is sufficient in that case.
+        if not ip_allowed:
+            logger.warning("Webhook request from unauthorized IP: %s", client_ip)
+            return False
+
     return True
 
 
 def sanitize_error_message(error: object) -> str:
-    """Return a generic client-safe error message for external responses."""
+    """Return a generic, safe client error message for external API responses."""
     return "Invalid request"
