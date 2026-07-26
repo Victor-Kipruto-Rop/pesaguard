@@ -7,6 +7,7 @@ custom REST API, etc). Implement one subclass per customer/integration type.
 import json
 import logging
 import os
+import re
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Optional
@@ -15,6 +16,25 @@ import requests
 from sqlalchemy import create_engine, text
 
 logger = logging.getLogger("pesaguard.connectors")
+
+# Identifiers (table/column names) must match this pattern. This is a
+# defense-in-depth measure: these values come from environment config today,
+# not directly from a web request, but they're built into SQL via string
+# interpolation (table/column names can't be bound as normal query
+# parameters), and this codebase already has a pattern (TenantSettingsStore)
+# for making similar config tenant-configurable later — if that ever
+# extends to these values, an allowlist here is what stands between that and
+# SQL injection.
+_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_identifier(name: str, kind: str) -> str:
+    if not _SAFE_IDENTIFIER.match(name):
+        raise ValueError(
+            f"Unsafe {kind} name rejected: {name!r}. Only letters, digits, "
+            f"and underscores are allowed, and it must not start with a digit."
+        )
+    return name
 
 
 class BaseConnector(ABC):
@@ -39,31 +59,75 @@ class BaseConnector(ABC):
         raise NotImplementedError
 
 
+# Default field mapping shared by connectors that map from column names.
+_DEFAULT_MAPPING = {
+    "internal_ref": "internal_ref",
+    "amount": "amount",
+    "phone_number": "phone_number",
+    "timestamp": "created_at",
+    "status": "status",
+}
+
+
+def _merge_mapping(defaults: Dict[str, str], override: Optional[Dict[str, str]]) -> Dict[str, str]:
+    """Merge a partial custom mapping over defaults, key by key.
+
+    FIXED: previously `mapping or defaults` replaced the ENTIRE default dict
+    the moment any custom mapping was supplied — so a customer config that
+    only overrode one field (e.g. just "amount") silently ended up missing
+    the other four expected keys, raising KeyError at query time instead of
+    at startup with a clear error.
+    """
+    merged = dict(defaults)
+    if override:
+        merged.update(override)
+    return merged
+
+
 class PostgresConnector(BaseConnector):
     """Connector for pilot customers whose orders live in Postgres."""
 
     def __init__(self, connection_string: str, table_name: str = "orders", mapping: Optional[Dict[str, str]] = None):
         self.connection_string = connection_string
         self.table_name = table_name
-        self.mapping = mapping or {
-            "internal_ref": "internal_ref",
-            "amount": "amount",
-            "phone_number": "phone_number",
-            "timestamp": "created_at",
-            "status": "status",
-        }
+        self.mapping = _merge_mapping(_DEFAULT_MAPPING, mapping)
+        self._engine = None  # created lazily, reused — see _get_engine
+
+    def _get_engine(self):
+        """Reuse one engine/connection pool for the lifetime of this connector
+        instance, instead of creating a new one on every call.
+
+        FIXED: previously create_engine(self.connection_string) was called
+        fresh inside fetch_recent_records() — and reconciliation_job.py calls
+        fetch_recent_records() inside the per-message consumer loop, i.e. once
+        per incoming M-Pesa transaction. At any real transaction volume this
+        leaked a new connection pool per transaction, which would exhaust
+        Postgres's connection limit far faster than the equivalent leak found
+        in health.py's database check (that one was tied to a monitoring
+        polling interval; this one is tied to transaction throughput).
+        """
+        if self._engine is None:
+            self._engine = create_engine(self.connection_string, pool_pre_ping=True, pool_size=3, max_overflow=2)
+        return self._engine
 
     def fetch_recent_records(self, since_minutes: int = 15):
         if not self.connection_string:
             logger.warning("Postgres connector missing connection string")
             return []
 
-        engine = create_engine(self.connection_string)
+        try:
+            safe_table = _validate_identifier(self.table_name, "table")
+            safe_columns = {k: _validate_identifier(v, "column") for k, v in self.mapping.items()}
+        except ValueError:
+            logger.exception("Rejecting fetch_recent_records due to unsafe configured identifier")
+            return []
+
+        engine = self._get_engine()
         since = datetime.now(timezone.utc).timestamp() - (since_minutes * 60)
         query = text(
-            f"SELECT {self.mapping['internal_ref']}, {self.mapping['amount']}, {self.mapping['phone_number']}, "
-            f"{self.mapping['timestamp']}, {self.mapping['status']} "
-            f"FROM {self.table_name} WHERE {self.mapping['timestamp']} >= :since"
+            f"SELECT {safe_columns['internal_ref']}, {safe_columns['amount']}, {safe_columns['phone_number']}, "
+            f"{safe_columns['timestamp']}, {safe_columns['status']} "
+            f"FROM {safe_table} WHERE {safe_columns['timestamp']} >= :since"
         )
         with engine.connect() as connection:
             rows = connection.execute(query, {"since": datetime.fromtimestamp(since, tz=timezone.utc)}).fetchall()
@@ -81,7 +145,11 @@ class PostgresConnector(BaseConnector):
 
 
 class GoogleSheetsConnector(BaseConnector):
-    """Connector for customers tracking orders in Google Sheets."""
+    """Connector for customers tracking orders in Google Sheets.
+
+    NOT YET IMPLEMENTED. See fetch_recent_records below — this now fails
+    loudly rather than silently returning an empty list.
+    """
 
     def __init__(self, sheet_id: str, worksheet_name: str = "Orders", credentials_json: Optional[str] = None):
         self.sheet_id = sheet_id
@@ -89,15 +157,32 @@ class GoogleSheetsConnector(BaseConnector):
         self.credentials_json = credentials_json
 
     def fetch_recent_records(self, since_minutes: int = 15):
-        if not self.sheet_id:
-            logger.warning("Google Sheets connector missing sheet id")
-            return []
-
-        # The production implementation should use a service account with the
-        # Google Sheets API scope. This stub keeps the interface compatible and
-        # makes the integration path explicit for later wiring.
-        logger.info("Google Sheets connector polling %s (%s) with backoff strategy", self.sheet_id, self.worksheet_name)
-        return []
+        # FIXED: this previously logged an INFO message that sounded like
+        # real work was happening ("polling ... with backoff strategy") and
+        # returned an empty list — indistinguishable from "there genuinely
+        # are no matching internal records right now." If any pilot customer
+        # were ever configured with CONNECTOR_TYPE=google_sheets, EVERY
+        # transaction would be evaluated against zero internal records
+        # forever, meaning every single transaction gets permanently flagged
+        # as missing_payment/critical — a silent, total reconciliation
+        # failure for that customer, with logs that look completely normal.
+        #
+        # Now: raises NotImplementedError, matching the abstract base's
+        # contract, so this failure is loud and immediate (at connector
+        # selection / first use) instead of silently corrupting every
+        # subsequent reconciliation decision.
+        logger.error(
+            "GoogleSheetsConnector.fetch_recent_records() called for sheet_id=%s "
+            "but this connector is not yet implemented. Refusing to silently "
+            "return an empty result, which would make every transaction look "
+            "like a missing_payment discrepancy.",
+            self.sheet_id,
+        )
+        raise NotImplementedError(
+            "GoogleSheetsConnector is not yet implemented. Do not select "
+            "CONNECTOR_TYPE=google_sheets until this is built — doing so "
+            "would silently flag every transaction as missing_payment."
+        )
 
 
 class RestConnector(BaseConnector):
@@ -107,13 +192,10 @@ class RestConnector(BaseConnector):
         self.endpoint = endpoint
         self.auth_type = auth_type
         self.auth_value = auth_value
-        self.mapping = mapping or {
-            "internal_ref": "id",
-            "amount": "amount",
-            "phone_number": "phone",
-            "timestamp": "created_at",
-            "status": "status",
-        }
+        self.mapping = _merge_mapping(
+            {"internal_ref": "id", "amount": "amount", "phone_number": "phone", "timestamp": "created_at", "status": "status"},
+            mapping,
+        )
 
     def fetch_recent_records(self, since_minutes: int = 15):
         if not self.endpoint:
@@ -145,7 +227,18 @@ class RestConnector(BaseConnector):
 
 
 class ConnectorRegistry:
-    """Loads the preferred connector for each tenant from environment config."""
+    """Loads the preferred connector for each tenant from environment config.
+
+    NOTE: from_env() currently builds exactly ONE connector, keyed to the
+    single process-wide TENANT_ID env var — so despite get_connector(tenant_id)
+    taking a parameter, this is not yet genuinely multi-tenant. That's
+    consistent with the current single-pilot-customer deployment stage
+    (multi-tenant infrastructure was explicitly deferred), so this is left
+    as-is rather than built out ahead of a second paying customer — but it
+    will need real per-tenant connector configuration (e.g. reading from
+    TenantSettingsStore per tenant_id rather than a single global env var)
+    once that becomes real.
+    """
 
     def __init__(self, connectors: Optional[Dict[str, BaseConnector]] = None):
         self.connectors = connectors or {}
