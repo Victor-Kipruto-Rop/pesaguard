@@ -12,7 +12,7 @@ redis==5.2.1
 rq==2.1.0
 
 # Environment & Configuration
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 
 # Core Web & Security Dependencies (Recommended for PesaGuard Services)
 Flask==3.1.0
