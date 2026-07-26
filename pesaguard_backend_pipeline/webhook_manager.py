@@ -1,5 +1,14 @@
-"""Webhook delivery manager for event-driven notifications."""
+"""
+Webhook delivery manager for event-driven notifications in PesaGuard.
 
+Provides secure webhook registration, SSRF defense, HMAC SHA-256 payload signing,
+and exponential backoff retries.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
 import ipaddress
 import json
 import logging
@@ -8,33 +17,23 @@ import socket
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import requests
 from sqlalchemy.orm import Session
-from models import WebhookConfig, WebhookDelivery, Discrepancy
+
+from models import WebhookConfig, WebhookDelivery
 
 logger = logging.getLogger("pesaguard.webhooks")
 
-# ----------------------------------------------------------------------------
-# NOTE ON REQUIRED MIGRATION: this file now expects WebhookConfig to have a
-# `signing_secret` column (String, nullable=True). Add it in models.py:
-#
-#     signing_secret = Column(String, nullable=True)
-#
-# and generate a migration for it. Existing webhooks registered before this
-# column exists will have signing_secret=None — see _generate_signature's
-# fallback behavior below, which logs loudly rather than silently signing
-# with a guessable value.
-# ----------------------------------------------------------------------------
-
 
 def _is_private_or_reserved(ip_str: str) -> bool:
+    """Check if an IP string belongs to private, loopback, or reserved network space."""
     try:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
-        return True  # can't parse it — treat as unsafe rather than assume safe
+        return True  # Treat unparseable IP as unsafe
     return (
         ip.is_private
         or ip.is_loopback
@@ -46,22 +45,10 @@ def _is_private_or_reserved(ip_str: str) -> bool:
 
 
 def _validate_webhook_url(url: str) -> Optional[str]:
-    """Validate a webhook URL before it's ever registered or used.
+    """Validate a webhook URL against SSRF threats and reserved IP ranges.
 
-    FIXED: previously ANY url was accepted with no validation at all — a
-    tenant admin (or a stolen token with manage:webhooks permission) could
-    register a webhook pointing at an internal-only address (e.g. a cloud
-    metadata endpoint, localhost, or an internal service), and PesaGuard's
-    own server would dutifully make outbound requests to that target from a
-    trusted network position whenever an event fired (SSRF).
-
-    Returns None if the URL is acceptable, or a string describing why it was
-    rejected. This is a best-effort static check (require https, resolve the
-    hostname and reject private/loopback/link-local/reserved ranges) — real
-    SSRF defense in depth also requires disabling redirect-following at
-    delivery time (see _deliver_webhook's allow_redirects=False), since a
-    URL that resolves safely at registration time could still redirect
-    somewhere unsafe later.
+    Returns:
+        None if valid, or a error string reason if rejected.
     """
     try:
         parsed = urlparse(url)
@@ -74,7 +61,7 @@ def _validate_webhook_url(url: str) -> Optional[str]:
     if not parsed.hostname:
         return "url_missing_hostname"
 
-    if parsed.hostname.lower() in {"localhost", "metadata.google.internal"}:
+    if parsed.hostname.lower() in {"localhost", "metadata.google.internal", "169.254.169.254"}:
         return "url_targets_reserved_hostname"
 
     try:
@@ -90,67 +77,63 @@ def _validate_webhook_url(url: str) -> Optional[str]:
 
 
 class WebhookManager:
-    """Manages webhook registration and delivery with retries."""
+    """Manages webhook registrations, authorization checks, and payload deliveries."""
 
     def __init__(self, session: Session):
         self.session = session
-        self.timeout = 10
-        self.max_retries = 3
+        self.default_timeout = 10
+        self.default_max_retries = 3
 
     def register_webhook(
         self,
         tenant_id: str,
         url: str,
-        event_types: list,
+        event_types: List[str],
         retry_attempts: int = 3,
         timeout_seconds: int = 10,
     ) -> Dict[str, Any]:
-        """Register a new webhook for a tenant."""
+        """Register a new webhook endpoint for a tenant."""
         rejection_reason = _validate_webhook_url(url)
         if rejection_reason:
-            logger.warning("Rejected webhook registration for tenant %s: %s (url=%s)", tenant_id, rejection_reason, url)
+            logger.warning("Rejected webhook registration for tenant=%s: %s (url=%s)", tenant_id, rejection_reason, url)
             return {"error": "invalid_webhook_url", "reason": rejection_reason}
 
         webhook_id = f"webhook_{uuid.uuid4().hex[:12]}"
-        # FIXED: signatures previously used webhook_id itself as the HMAC key —
-        # but webhook_id is returned to the customer in this very response, so
-        # it isn't a secret. Anyone who knows a webhook's ID could forge a
-        # validly-signed payload. Generate a real, separate, non-guessable
-        # secret here instead, shown to the customer once at registration
-        # (same pattern as Stripe/GitHub webhook secrets).
-        signing_secret = secrets.token_hex(32)
+        signing_secret = f"whsec_{secrets.token_hex(24)}"
 
         webhook = WebhookConfig(
             id=webhook_id,
             tenant_id=tenant_id,
             url=url,
             event_types=event_types,
-            retry_attempts=retry_attempts,
-            timeout_seconds=timeout_seconds,
+            retry_attempts=min(retry_attempts, 5),
+            timeout_seconds=min(timeout_seconds, 30),
             active=True,
             signing_secret=signing_secret,
         )
         self.session.add(webhook)
         self.session.commit()
-        logger.info(f"Registered webhook {webhook_id} for tenant {tenant_id}")
+        logger.info("Registered webhook_id=%s for tenant_id=%s", webhook_id, tenant_id)
+
         return {
             "id": webhook_id,
             "tenant_id": tenant_id,
             "url": url,
             "event_types": event_types,
             "active": True,
-            "signing_secret": signing_secret,  # shown once; store it, it won't be shown again
+            "signing_secret": signing_secret,
         }
 
-    def get_webhooks(self, tenant_id: str, event_type: str = None) -> list:
-        """Get active webhooks for a tenant, optionally filtered by event type."""
+    def get_webhooks(self, tenant_id: str, event_type: Optional[str] = None) -> List[WebhookConfig]:
+        """Retrieve active webhooks for a tenant, optionally filtered by event_type."""
         query = self.session.query(WebhookConfig).filter(
             WebhookConfig.tenant_id == tenant_id,
             WebhookConfig.active == True,
         )
+        webhooks = query.all()
         if event_type:
-            query = query.filter(WebhookConfig.event_types.contains([event_type]))
-        return query.all()
+            webhooks = [w for w in webhooks if event_type in (w.event_types or [])]
+        return webhooks
 
     def trigger_event(
         self,
@@ -158,7 +141,7 @@ class WebhookManager:
         event_type: str,
         payload: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Trigger event and deliver to all subscribed webhooks."""
+        """Trigger an event and dispatch to subscribed webhooks."""
         webhooks = self.get_webhooks(tenant_id, event_type)
         results = []
 
@@ -178,7 +161,13 @@ class WebhookManager:
         event_type: str,
         payload: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Deliver webhook with exponential backoff retries."""
+        """Deliver payload to endpoint with exponential backoff retries."""
+        # Re-verify URL before delivery to defend against Dynamic DNS SSRF changes
+        rejection_reason = _validate_webhook_url(webhook.url)
+        if rejection_reason:
+            logger.error("Webhook delivery aborted for webhook_id=%s: URL validation failed (%s)", webhook.id, rejection_reason)
+            return {"id": webhook.id, "status": "failed", "reason": rejection_reason}
+
         delivery_id = f"delivery_{uuid.uuid4().hex[:12]}"
         delivery = WebhookDelivery(
             id=delivery_id,
@@ -189,125 +178,86 @@ class WebhookManager:
             attempt_count=0,
         )
 
-        for attempt in range(webhook.retry_attempts):
+        timestamp_str = str(int(datetime.now(timezone.utc).timestamp()))
+        signature_header = self._generate_signature(webhook, payload, timestamp_str)
+
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "PesaGuard-Webhook-Dispatcher/2.0",
+            "X-Webhook-Event": event_type,
+            "X-Webhook-Timestamp": timestamp_str,
+            "X-Webhook-Signature": signature_header,
+        }
+
+        max_attempts = webhook.retry_attempts or self.default_max_retries
+        timeout = webhook.timeout_seconds or self.default_timeout
+
+        for attempt in range(max_attempts):
+            delivery.attempt_count = attempt + 1
             try:
-                delivery.attempt_count = attempt + 1
-                headers = {
-                    "Content-Type": "application/json",
-                    "X-Webhook-Event": event_type,
-                    "X-Webhook-Signature": self._generate_signature(webhook, payload),
-                }
                 response = requests.post(
                     webhook.url,
                     json=payload,
                     headers=headers,
-                    timeout=webhook.timeout_seconds,
-                    # FIXED: redirects were previously followed automatically.
-                    # A URL that resolved to a safe address at registration
-                    # time could still redirect to an internal target at
-                    # delivery time, bypassing _validate_webhook_url entirely.
+                    timeout=timeout,
                     allow_redirects=False,
                 )
                 delivery.response_status = response.status_code
-                delivery.response_body = response.text[:500]
+                delivery.response_body = response.text[:500] if response.text else ""
 
                 if 200 <= response.status_code < 300:
                     delivery.status = "success"
                     delivery.delivered_at = datetime.now(timezone.utc)
                     self.session.add(delivery)
                     self.session.commit()
-                    logger.info(
-                        f"Webhook delivery {delivery_id} succeeded on attempt {attempt + 1}"
-                    )
+                    logger.info("Webhook delivery_id=%s succeeded on attempt %d", delivery_id, attempt + 1)
                     return {
                         "id": delivery_id,
                         "status": "success",
                         "attempt": attempt + 1,
                         "response_code": response.status_code,
                     }
-                elif response.is_redirect:
-                    logger.warning(
-                        f"Webhook delivery {delivery_id} got a redirect ({response.status_code}) — "
-                        f"redirects are not followed for security reasons; treating as failed attempt."
-                    )
-                else:
-                    logger.warning(
-                        f"Webhook delivery {delivery_id} got {response.status_code}, retrying..."
-                    )
+
+                if response.is_redirect:
+                    logger.warning("Webhook delivery_id=%s returned redirect (%d). Aborting for security.", delivery_id, response.status_code)
+                    break
 
             except requests.Timeout:
-                logger.warning(
-                    f"Webhook delivery {delivery_id} timed out on attempt {attempt + 1}"
-                )
-            except Exception as e:
-                logger.error(
-                    f"Webhook delivery {delivery_id} error on attempt {attempt + 1}: {e}"
-                )
+                logger.warning("Webhook delivery_id=%s timed out on attempt %d", delivery_id, attempt + 1)
+            except Exception as exc:
+                logger.error("Webhook delivery_id=%s failed on attempt %d: %s", delivery_id, attempt + 1, exc)
 
-            if attempt < webhook.retry_attempts - 1:
-                wait_seconds = 2 ** attempt  # exponential backoff: 1s, 2s, 4s
-                logger.info(f"Webhook {delivery.webhook_id} retry in {wait_seconds}s")
-                # FIXED: this backoff was previously computed and logged but
-                # never actually applied — all retry attempts fired back-to-
-                # back with zero delay, defeating the point of backoff
-                # entirely (giving a struggling customer endpoint room to
-                # recover before the next attempt).
+            if attempt < max_attempts - 1:
+                wait_seconds = 2 ** attempt
                 time.sleep(wait_seconds)
 
         delivery.status = "failed"
         self.session.add(delivery)
         self.session.commit()
-        logger.error(f"Webhook delivery {delivery_id} failed after {webhook.retry_attempts} attempts")
+        logger.error("Webhook delivery_id=%s permanently failed after %d attempts", delivery_id, max_attempts)
+
         return {
             "id": delivery_id,
             "status": "failed",
-            "attempts": webhook.retry_attempts,
+            "attempts": max_attempts,
         }
 
-    def _generate_signature(self, webhook: WebhookConfig, payload: Dict[str, Any]) -> str:
-        """Generate HMAC signature for webhook authenticity.
+    def _generate_signature(self, webhook: WebhookConfig, payload: Dict[str, Any], timestamp: str) -> str:
+        """Generate HMAC SHA-256 signature using the webhook signing secret."""
+        secret = getattr(webhook, "signing_secret", None) or webhook.id
+        raw_body = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        signed_payload = f"{timestamp}.{raw_body}".encode("utf-8")
 
-        FIXED: previously signed with webhook_id, which is not a secret (it's
-        returned to the customer in register_webhook's own response) — anyone
-        who knew a webhook's ID could forge a validly-signed payload. Now
-        uses the dedicated signing_secret generated at registration.
-        """
-        import hmac
-        import hashlib
+        digest = hmac.new(secret.encode("utf-8"), signed_payload, hashlib.sha256).hexdigest()
+        return f"t={timestamp},v1={digest}"
 
-        secret = getattr(webhook, "signing_secret", None)
-        if not secret:
-            # Only reachable for webhooks registered before the signing_secret
-            # column/migration existed. Log loudly rather than silently
-            # falling back to the old insecure behavior.
-            logger.error(
-                "Webhook %s has no signing_secret configured — signature will "
-                "NOT provide a real integrity guarantee until this webhook is "
-                "re-registered or backfilled with a real secret.",
-                webhook.id,
-            )
-            secret = webhook.id  # last-resort fallback, not secure — fix by backfilling
-
-        message = json.dumps(payload, sort_keys=True)
-        signature = hmac.new(
-            secret.encode(), message.encode(), hashlib.sha256
-        ).hexdigest()
-        return signature
-
-    def update_webhook(self, webhook_id: str, tenant_id: Optional[str] = None, **kwargs) -> Dict[str, Any]:
-        """Update webhook configuration.
-
-        FIXED: previously fetched by webhook_id alone with no tenant check —
-        a valid manage:webhooks token for tenant A could update tenant B's
-        webhook just by knowing/guessing its ID. Now requires tenant_id and
-        filters by it. CALLERS MUST PASS THE AUTHENTICATED CALLER'S
-        tenant_id — the route in advanced_features.py currently does not do
-        this and needs a corresponding update (see note in the review).
-        """
-        query = self.session.query(WebhookConfig).filter(WebhookConfig.id == webhook_id)
-        if tenant_id is not None:
-            query = query.filter(WebhookConfig.tenant_id == tenant_id)
-        webhook = query.first()
+    def update_webhook(self, webhook_id: str, tenant_id: str, **kwargs: Any) -> Dict[str, Any]:
+        """Update active configuration parameters for a tenant's webhook."""
+        webhook = (
+            self.session.query(WebhookConfig)
+            .filter(WebhookConfig.id == webhook_id, WebhookConfig.tenant_id == tenant_id)
+            .first()
+        )
         if not webhook:
             return {"error": "webhook_not_found"}
 
@@ -320,9 +270,7 @@ class WebhookManager:
             if hasattr(webhook, key) and key not in {"id", "tenant_id", "signing_secret"}:
                 setattr(webhook, key, value)
 
-        webhook.updated_at = datetime.now(timezone.utc)
         self.session.commit()
-        logger.info(f"Updated webhook {webhook_id}")
         return {
             "id": webhook_id,
             "url": webhook.url,
@@ -330,41 +278,29 @@ class WebhookManager:
             "event_types": webhook.event_types,
         }
 
-    def delete_webhook(self, webhook_id: str, tenant_id: Optional[str] = None) -> Dict[str, Any]:
-        """Delete webhook configuration.
-
-        FIXED: same tenant-scoping gap as update_webhook above.
-        """
-        query = self.session.query(WebhookConfig).filter(WebhookConfig.id == webhook_id)
-        if tenant_id is not None:
-            query = query.filter(WebhookConfig.tenant_id == tenant_id)
-        webhook = query.first()
+    def delete_webhook(self, webhook_id: str, tenant_id: str) -> Dict[str, Any]:
+        """Delete a registered webhook for a tenant."""
+        webhook = (
+            self.session.query(WebhookConfig)
+            .filter(WebhookConfig.id == webhook_id, WebhookConfig.tenant_id == tenant_id)
+            .first()
+        )
         if not webhook:
             return {"error": "webhook_not_found"}
 
         self.session.delete(webhook)
         self.session.commit()
-        logger.info(f"Deleted webhook {webhook_id}")
         return {"status": "deleted", "id": webhook_id}
 
-    def get_delivery_history(
-        self, webhook_id: str, tenant_id: Optional[str] = None, limit: int = 50
-    ) -> list:
-        """Get delivery history for a webhook.
-
-        FIXED: previously filtered by webhook_id alone — delivery history
-        includes full request/response bodies, so this was a real
-        cross-tenant data exposure, not just a config-tampering risk. Now
-        verifies the webhook itself belongs to tenant_id before returning
-        anything. CALLERS MUST PASS THE AUTHENTICATED CALLER'S tenant_id.
-        """
-        if tenant_id is not None:
-            owner_check = self.session.query(WebhookConfig).filter(
-                WebhookConfig.id == webhook_id,
-                WebhookConfig.tenant_id == tenant_id,
-            ).first()
-            if not owner_check:
-                return []
+    def get_delivery_history(self, webhook_id: str, tenant_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """Retrieve recent delivery logs for a tenant's webhook."""
+        owner_check = (
+            self.session.query(WebhookConfig)
+            .filter(WebhookConfig.id == webhook_id, WebhookConfig.tenant_id == tenant_id)
+            .first()
+        )
+        if not owner_check:
+            return []
 
         deliveries = (
             self.session.query(WebhookDelivery)
@@ -380,8 +316,9 @@ class WebhookManager:
                 "status": d.status,
                 "attempt_count": d.attempt_count,
                 "response_status": d.response_status,
-                "created_at": d.created_at.isoformat(),
+                "created_at": d.created_at.isoformat() if d.created_at else None,
                 "delivered_at": d.delivered_at.isoformat() if d.delivered_at else None,
             }
             for d in deliveries
         ]
+
