@@ -1,22 +1,31 @@
-# Web Framework & WSGI
+# Web Framework & WSGI Server
 Flask==3.1.0
 gunicorn==23.0.0
+
+# Streaming & Event Ingestion
+# NOTE: kafka-python-ng is the actively maintained, drop-in replacement 
+# for legacy kafka-python (which is unmaintained and broken on Python 3.12+).
+kafka-python-ng==2.2.3
 
 # Database & ORM
 SQLAlchemy==2.0.38
 psycopg2-binary==2.9.10
 
-# Streaming & Messaging
-kafka-python-ng==2.2.3
+# Caching, Rate Limiting & Async Worker Queue
+redis==5.2.1
+rq==2.1.0
 
-# Authentication & Security
-PyJWT==2.10.1
-
-# HTTP Clients & Utilities
-requests==2.32.3
+# Environment, Configuration & Serialization
 python-dotenv==1.0.1
+PyYAML==6.0.2
+
+# HTTP Networking & Security
+requests==2.32.3
+PyJWT==2.10.1
 python-dateutil==2.9.0.post0
 
-# Telemetry & Monitoring (Recommended additions for PesaGuard)
+# Telemetry & Observability
 prometheus-client==0.21.1
-redis==5.2.1
+
+# Testing & CI Suite
+pytest==8.3.4
