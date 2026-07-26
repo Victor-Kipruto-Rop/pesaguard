@@ -1,20 +1,24 @@
-"""Data access layer for Discrepancy records.
+"""Data access layer for Discrepancy records in PesaGuard.
 
 Used by reconciliation_engine.py and reconciliation_job.py as part of an
 atomic transaction alongside the idempotency ledger write — see both files'
 _persist_atomically / reconcile_with_idempotency functions.
 
-CRITICAL: functions here NEVER call session.commit() or session.rollback()
-themselves. The caller owns the transaction boundary — both existing
-callers already commit once, after this DAO's write succeeds alongside the
-idempotency ledger write, so that both succeed or fail together. If this
-DAO committed on its own, it would silently break that atomicity guarantee.
+CRITICAL: Functions here NEVER call session.commit() or session.rollback()
+themselves. The caller owns the transaction boundary — existing callers commit
+once after this DAO's write succeeds alongside the idempotency ledger write,
+ensuring both succeed or fail together. If this DAO committed on its own, it
+would silently break that atomicity guarantee.
 """
+
+from __future__ import annotations
 
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
+
+from sqlalchemy.orm import Session, attributes
 
 from models import Discrepancy
 
@@ -22,15 +26,9 @@ logger = logging.getLogger("pesaguard.discrepancy_dao")
 
 
 def _serialize_details(details: Any) -> str:
-    """Discrepancy.details is a Text column, not JSON, so callers passing a
-    dict (the full reconciliation evaluation) need it serialized here.
+    """Discrepancy.details is a Text column, so non-string payloads are serialized to JSON.
 
-    default=str is a deliberate safety net: the evaluation dict can contain
-    the raw Daraja event payload, which should already be plain
-    JSON-serializable primitives, but falling back to str() for anything
-    unexpected (e.g. a stray datetime object) means this never raises and
-    blocks the whole atomic write over a serialization edge case — it just
-    degrades that one field to a string representation instead.
+    Uses default=str as a safety net for non-primitive types (e.g., datetime objects).
     """
     if details is None:
         return ""
@@ -38,18 +36,18 @@ def _serialize_details(details: Any) -> str:
         return details
     try:
         return json.dumps(details, default=str)
-    except (TypeError, ValueError):
-        logger.warning("Failed to JSON-serialize discrepancy details, falling back to str()")
+    except (TypeError, ValueError) as exc:
+        logger.warning("Failed to JSON-serialize discrepancy details: %s. Falling back to str().", exc)
         return str(details)
 
 
 class DiscrepancyDAO:
-    """Session-participating DAO — every method takes the caller's session
-    and writes to it, but never commits or rolls back."""
+    """Session-participating DAO — every method operates on the caller's session
+    and never issues commit() or rollback()."""
 
     def save_discrepancy(
         self,
-        session,
+        session: Session,
         id: str,
         trans_id: str,
         tenant_id: Optional[str],
@@ -63,13 +61,13 @@ class DiscrepancyDAO:
 
         id is expected to be deterministic per (trans_id, status) — e.g.
         f"{trans_id}-{status}" — so re-flagging the same transaction/status
-        combination (a retry, a re-evaluation after new data arrives) UPDATES
-        the existing row instead of failing on a duplicate primary key.
+        combination UPDATES the existing row instead of failing on duplicate PK.
 
-        Does not commit. Does not flush unless the caller's later flush/
-        commit triggers it — this keeps the write fully inside whatever
-        transaction the caller is managing.
+        Does not commit or roll back. The caller owns transaction boundaries.
         """
+        if not id or not trans_id:
+            raise ValueError("Both 'id' and 'trans_id' must be provided to save_discrepancy.")
+
         existing = session.get(Discrepancy, id)
         serialized_details = _serialize_details(details)
 
@@ -83,22 +81,24 @@ class DiscrepancyDAO:
                 existing.tenant_id = tenant_id
             if assignee is not None:
                 existing.assignee = assignee
-            self._append_timeline(existing, event="updated", message=f"Re-flagged as {anomaly_type}")
+
+            self._append_timeline(session, existing, event="updated", message=f"Re-flagged as {anomaly_type}")
             return existing
 
+        now = datetime.now(timezone.utc)
         record = Discrepancy(
             id=id,
             trans_id=trans_id,
-            tenant_id=tenant_id,
+            tenant_id=tenant_id or "default",
             anomaly_type=anomaly_type,
             status=status or anomaly_type or "needs_review",
             severity=severity,
             details=serialized_details,
             resolved=False,
-            detected_at=datetime.now(timezone.utc),
+            detected_at=now,
             assignee=assignee,
             timeline=[{
-                "ts": datetime.now(timezone.utc).isoformat(),
+                "ts": now.isoformat(),
                 "event": "created",
                 "message": f"Flagged as {anomaly_type}",
             }],
@@ -107,30 +107,31 @@ class DiscrepancyDAO:
         return record
 
     @staticmethod
-    def _append_timeline(record: Discrepancy, event: str, message: str) -> None:
-        timeline = record.timeline or []
+    def _append_timeline(session: Session, record: Discrepancy, event: str, message: str) -> None:
+        """Safely append timeline events while ensuring SQLAlchemy tracks JSON field mutations."""
+        timeline: List[Dict[str, Any]] = list(record.timeline or [])
         timeline.append({
             "ts": datetime.now(timezone.utc).isoformat(),
             "event": event,
             "message": message,
         })
         record.timeline = timeline
+        # Explicitly flag modification on JSON columns to guarantee ORM change tracking
+        attributes.flag_modified(record, "timeline")
 
-    def get_by_id(self, session, id: str, tenant_id: Optional[str] = None) -> Optional[Discrepancy]:
-        """Tenant-scoped fetch — mirrors the tenant-isolation pattern already
-        applied elsewhere (dashboard.py's _tenant_scoped_get, etc.). Pass
-        tenant_id whenever the caller has an authenticated tenant context;
-        omit it only for internal/system use (e.g. within reconciliation_job.py,
-        which already knows the correct tenant_id for the event it's processing).
-        """
+    def get_by_id(self, session: Session, id: str, tenant_id: Optional[str] = None) -> Optional[Discrepancy]:
+        """Tenant-scoped fetch — enforces isolation when tenant_id is supplied."""
+        if not id:
+            return None
+
         record = session.get(Discrepancy, id)
         if record is None:
             return None
-        if tenant_id is not None and record.tenant_id != tenant_id:
+        if tenant_id is not None and getattr(record, "tenant_id", None) != tenant_id:
+            logger.warning("Tenant isolation violation: record %s belongs to tenant %s, not %s", id, getattr(record, "tenant_id", None), tenant_id)
             return None
         return record
 
 
-# Default singleton instance, matching the import/usage style already used
-# elsewhere in the codebase (e.g. `event_store = EventStore()` in event_store.py).
+# Default singleton instance
 discrepancy_dao = DiscrepancyDAO()
