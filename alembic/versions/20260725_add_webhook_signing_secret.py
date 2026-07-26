@@ -15,6 +15,8 @@ Revision ID: 20260725_add_webhook_signing_secret
 Revises: 20260722_add_transaction_constraints
 Create Date: 2026-07-25 00:00:00.000000
 """
+from __future__ import annotations
+
 from alembic import op
 import sqlalchemy as sa
 
