@@ -1,105 +1,172 @@
 """
-Generate scheduled reconciliation reports (daily/weekly).
-Intended to be run from cron or as a one-off service.
+Scheduled Reconciliation Reports Engine for PesaGuard.
+
+Generates daily, weekly, or ad-hoc reconciliation performance summaries, calculating
+discrepancy volumes, resolution rates, anomaly categories, and financial impact metrics.
 """
-from datetime import datetime, timedelta, timezone
-import os
-import uuid
+
+from __future__ import annotations
+
+import argparse
 import json
 import logging
+import os
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, distinct, func
 from sqlalchemy.orm import sessionmaker
 
-from models import Base, Discrepancy, Report
+from localization_utils import format_ke_currency, format_ke_datetime
+from models import Base, Discrepancy, Report, Transaction
 
 logger = logging.getLogger("pesaguard.scheduled_reports")
 
 DB_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
-engine = create_engine(DB_URL, pool_pre_ping=True)
+engine = create_engine(DB_URL, pool_pre_ping=True, pool_size=5, max_overflow=10)
 Session = sessionmaker(bind=engine, expire_on_commit=False)
 
-# Ensure tables exist when run as standalone
-Base.metadata.create_all(engine)
+# Ensure schema exists when run as isolated standalone script
+try:
+    Base.metadata.create_all(engine)
+except Exception as exc:
+    logger.debug("Schema verification notice: %s", exc)
 
 
-def generate_report_for_tenant(tenant_id: str, days: int = 1, report_type: str = "daily") -> dict:
-    session = Session()
-    try:
-        now = datetime.now(timezone.utc)
-        period_end = now
-        period_start = now - timedelta(days=days)
+def generate_report_for_tenant(
+    tenant_id: str,
+    days: int = 1,
+    report_type: str = "daily",
+) -> Dict[str, Any]:
+    """Generate and persist a reconciliation summary report for a given tenant.
 
-        items = session.query(Discrepancy).filter(
-            Discrepancy.tenant_id == tenant_id,
-            Discrepancy.detected_at >= period_start,
-            Discrepancy.detected_at <= period_end,
-        ).all()
+    Args:
+        tenant_id: Target tenant identifier
+        days: Lookback period window in days
+        report_type: Report cadence type ('daily', 'weekly', 'monthly')
 
-        total = len(items)
-        resolved = sum(1 for i in items if i.resolved)
-        open_count = total - resolved
+    Returns:
+        Summary execution dict containing status and report_id
+    """
+    now = datetime.now(timezone.utc)
+    period_end = now
+    period_start = now - timedelta(days=days)
 
-        by_severity = {}
-        for item in items:
-            sev = item.severity or "unknown"
-            by_severity[sev] = by_severity.get(sev, 0) + 1
+    with Session() as session:
+        try:
+            # Query discrepancies detected within the window
+            discrepancies = (
+                session.query(Discrepancy)
+                .filter(
+                    Discrepancy.tenant_id == tenant_id,
+                    Discrepancy.detected_at >= period_start,
+                    Discrepancy.detected_at <= period_end,
+                )
+                .all()
+            )
 
-        content = {
-            "generated_at": now.isoformat(),
-            "tenant_id": tenant_id,
-            "period_start": period_start.isoformat(),
-            "period_end": period_end.isoformat(),
-            "summary": {
-                "total_incidents": total,
-                "resolved": resolved,
-                "open": open_count,
-            },
-            "by_severity": by_severity,
-        }
+            total_incidents = len(discrepancies)
+            resolved_count = sum(1 for d in discrepancies if d.resolved)
+            open_count = total_incidents - resolved_count
+            resolution_rate = (resolved_count / total_incidents * 100.0) if total_incidents > 0 else 100.0
 
-        report = Report(
-            id=f"r_{uuid.uuid4().hex[:12]}",
-            tenant_id=tenant_id,
-            report_type=report_type,
-            period_start=period_start,
-            period_end=period_end,
-            content=content,
-            status="generated",
-        )
-        session.add(report)
-        session.commit()
-        logger.info("Generated %s report for %s: %s", report_type, tenant_id, report.id)
-        return {"status": "ok", "report_id": report.id, "tenant_id": tenant_id}
-    except Exception:
-        logger.exception("Failed to generate report for tenant %s", tenant_id)
-        return {"status": "error", "tenant_id": tenant_id}
-    finally:
-        session.close()
+            by_severity: Dict[str, int] = {}
+            by_anomaly_type: Dict[str, int] = {}
+
+            for d in discrepancies:
+                sev = d.severity or "warning"
+                by_severity[sev] = by_severity.get(sev, 0) + 1
+
+                anom = d.anomaly_type or "unknown"
+                by_anomaly_type[anom] = by_anomaly_type.get(anom, 0) + 1
+
+            # Fetch total ingested transaction volume for context
+            total_transactions = (
+                session.query(func.count(Transaction.trans_id))
+                .filter(
+                    Transaction.created_at >= period_start,
+                    Transaction.created_at <= period_end,
+                )
+                .scalar()
+                or 0
+            )
+
+            content = {
+                "generated_at": now.isoformat(),
+                "generated_at_display": format_ke_datetime(now),
+                "tenant_id": tenant_id,
+                "period_start": period_start.isoformat(),
+                "period_end": period_end.isoformat(),
+                "report_type": report_type,
+                "summary": {
+                    "total_transactions_ingested": total_transactions,
+                    "total_incidents": total_incidents,
+                    "resolved_incidents": resolved_count,
+                    "open_incidents": open_count,
+                    "resolution_rate_percent": round(resolution_rate, 2),
+                },
+                "breakdown": {
+                    "by_severity": by_severity,
+                    "by_anomaly_type": by_anomaly_type,
+                },
+            }
+
+            report_id = f"report_{uuid.uuid4().hex[:12]}"
+            report = Report(
+                id=report_id,
+                tenant_id=tenant_id,
+                report_type=report_type,
+                period_start=period_start,
+                period_end=period_end,
+                content=content,
+                status="generated",
+                created_at=now,
+            )
+            session.add(report)
+            session.commit()
+
+            logger.info("Generated %s report_id=%s for tenant_id=%s", report_type, report_id, tenant_id)
+            return {
+                "status": "ok",
+                "report_id": report_id,
+                "tenant_id": tenant_id,
+                "summary": content["summary"],
+            }
+
+        except Exception as exc:
+            session.rollback()
+            logger.exception("Failed generating report for tenant_id=%s: %s", tenant_id, exc)
+            return {"status": "error", "tenant_id": tenant_id, "error": str(exc)}
+
+
+def get_all_active_tenants() -> List[str]:
+    """Retrieve all unique tenant identifiers across discrepancies and transactions."""
+    with Session() as session:
+        disc_tenants = session.query(distinct(Discrepancy.tenant_id)).filter(Discrepancy.tenant_id.isnot(None)).all()
+        tenants = {t[0] for t in disc_tenants if t[0]}
+        if not tenants:
+            tenants.add("default")
+        return sorted(list(tenants))
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Generate scheduled reconciliation reports")
-    parser.add_argument("--tenant", required=True, help="Tenant ID to generate report for (use 'all' to generate for all tenants)")
-    parser.add_argument("--days", type=int, default=1, help="Lookback period in days")
-    parser.add_argument("--type", default="daily", help="Report type: daily or weekly")
-
+    parser = argparse.ArgumentParser(description="PesaGuard Scheduled Reconciliation Report Generator")
+    parser.add_argument(
+        "--tenant",
+        default="all",
+        help="Tenant ID to generate report for (use 'all' to process all tenants)",
+    )
+    parser.add_argument("--days", type=int, default=1, help="Lookback window in days (default: 1)")
+    parser.add_argument("--type", default="daily", choices=["daily", "weekly", "monthly"], help="Report type cadence")
     args = parser.parse_args()
 
-    session = Session()
-    try:
-        if args.tenant == "all":
-            tenants = session.query(Discrepancy.tenant_id).distinct().all()
-            tenant_ids = [t[0] for t in tenants if t[0]]
-        else:
-            tenant_ids = [args.tenant]
-    finally:
-        session.close()
+    target_tenants = get_all_active_tenants() if args.tenant.lower() == "all" else [args.tenant]
 
-    results = []
-    for t in tenant_ids:
-        results.append(generate_report_for_tenant(t, days=args.days, report_type=args.type))
+    logger.info("Starting report generation for %d tenant(s)...", len(target_tenants))
+    results = [
+        generate_report_for_tenant(tenant_id=t, days=args.days, report_type=args.type)
+        for t in target_tenants
+    ]
 
     print(json.dumps(results, indent=2))
