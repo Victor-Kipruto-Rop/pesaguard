@@ -1,18 +1,27 @@
-"""Advanced search with boolean operators for incident queries."""
+"""
+Advanced Incident & Discrepancy Search Engine for PesaGuard.
+
+Provides full-text, field-specific, and Boolean expression query capabilities across
+discrepancy incident logs.
+"""
+
+from __future__ import annotations
 
 import logging
 import re
-from typing import Dict, List, Any, Optional
-from datetime import datetime, timezone, timedelta
-from sqlalchemy import or_, and_
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+from sqlalchemy import and_, not_, or_
 from sqlalchemy.orm import Session
+
 from models import Discrepancy
 
 logger = logging.getLogger("pesaguard.search")
 
 
 class AdvancedSearchEngine:
-    """Provides full-text and boolean search capabilities."""
+    """Full-text and Boolean query engine for operational discrepancy tracking."""
 
     def __init__(self, session: Session):
         self.session = session
@@ -24,18 +33,23 @@ class AdvancedSearchEngine:
         limit: int = 50,
         offset: int = 0,
     ) -> Dict[str, Any]:
-        """Execute advanced search query with boolean operators."""
+        """Execute boolean and field-specific search query across tenant discrepancies."""
         parsed = self._parse_query(query)
         db_query = self.session.query(Discrepancy).filter(
-            Discrepancy.tenant_id == tenant_id
+            Discrepancy.tenant_id == (tenant_id or "default")
         )
 
-        # Apply parsed conditions
-        for condition in parsed["conditions"]:
-            db_query = self._apply_condition(db_query, condition)
+        filter_clause = self._build_expression_clause(parsed.get("conditions", []))
+        if filter_clause is not None:
+            db_query = db_query.filter(filter_clause)
 
         total = db_query.count()
-        results = db_query.offset(offset).limit(limit).all()
+        results = (
+            db_query.order_by(Discrepancy.detected_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
 
         return {
             "query": query,
@@ -46,119 +60,149 @@ class AdvancedSearchEngine:
             "parsed": parsed,
         }
 
-    def _parse_query(self, query: str) -> Dict[str, Any]:
-        """Parse boolean query into conditions."""
+    def _parse_query(self, query_str: str) -> Dict[str, Any]:
+        """Parse query string into structured condition tokens."""
+        clean_query = " ".join(query_str.strip().split())
+        if not clean_query:
+            return {"query": "", "conditions": []}
+
+        # Tokenize by logical operators AND, OR, NOT
+        tokens = re.split(r"\s+(AND|OR|NOT)\s+", clean_query, flags=re.IGNORECASE)
+
         conditions = []
-        
-        # Remove extra whitespace
-        query = " ".join(query.split())
+        current_op = "AND"
 
-        # Split by AND, OR (case insensitive)
-        parts = re.split(r"\s+(AND|OR|NOT)\s+", query, flags=re.IGNORECASE)
-
-        operator = "AND"  # default
         i = 0
-        while i < len(parts):
-            part = parts[i].strip()
-            
-            if part.upper() in ["AND", "OR", "NOT"]:
-                operator = part.upper()
-            elif part:
-                condition = self._parse_condition(part)
-                if condition:
-                    condition["operator"] = operator
-                    conditions.append(condition)
+        while i < len(tokens):
+            token = tokens[i].strip()
+            if not token:
+                i += 1
+                continue
+
+            if token.upper() in {"AND", "OR", "NOT"}:
+                current_op = token.upper()
+            else:
+                parsed_cond = self._parse_individual_term(token)
+                if parsed_cond:
+                    parsed_cond["logical_op"] = current_op
+                    conditions.append(parsed_cond)
 
             i += 1
 
-        return {"query": query, "conditions": conditions}
+        return {"query": clean_query, "conditions": conditions}
 
-    def _parse_condition(self, condition_str: str) -> Optional[Dict[str, Any]]:
-        """Parse individual condition (e.g., 'severity:critical', 'status:open')."""
-        # Format: field:value, field>value, field<value, field~value
-        match = re.match(r"(\w+)([:><=~])(.+)", condition_str.strip())
+    def _parse_individual_term(self, term: str) -> Optional[Dict[str, Any]]:
+        """Parse individual key:value, key>value, or free-text term."""
+        # Field pattern match: e.g., 'severity:critical', 'age>30', 'details~error'
+        match = re.match(r"(\w+)([:><=~])(.+)", term.strip())
         if not match:
-            # Free-text search
             return {
                 "type": "text",
-                "value": condition_str.strip(),
+                "value": term.strip().strip("\"'"),
             }
 
         field, operator, value = match.groups()
-        value = value.strip('"\'')  # Remove quotes
-
         return {
             "type": "field",
             "field": field.lower(),
             "operator": operator,
-            "value": value,
+            "value": value.strip().strip("\"'"),
         }
 
-    def _apply_condition(self, query, condition: Dict[str, Any]):
-        """Apply a condition to the database query."""
-        condition_type = condition.get("type")
-        operator = condition.get("operator", "AND")
+    def _build_expression_clause(self, conditions: List[Dict[str, Any]]) -> Any:
+        """Construct SQLAlchemy BinaryExpression trees from parsed conditions."""
+        if not conditions:
+            return None
 
-        if condition_type == "text":
-            # Free-text search in multiple fields
-            text_value = f"%{condition['value']}%"
-            text_query = or_(
-                Discrepancy.anomaly_type.ilike(text_value),
-                Discrepancy.details.ilike(text_value),
-                Discrepancy.notes.ilike(text_value),
+        and_clauses = []
+        or_clauses = []
+
+        for cond in conditions:
+            clause = self._condition_to_sql_clause(cond)
+            if clause is None:
+                continue
+
+            logical_op = cond.get("logical_op", "AND")
+
+            if logical_op == "NOT":
+                and_clauses.append(not_(clause))
+            elif logical_op == "OR":
+                or_clauses.append(clause)
+            else:  # AND
+                and_clauses.append(clause)
+
+        final_and = and_(*and_clauses) if and_clauses else None
+        final_or = or_(*or_clauses) if or_clauses else None
+
+        if final_and is not None and final_or is not None:
+            return or_(final_and, final_or)
+        return final_and if final_and is not None else final_or
+
+    def _condition_to_sql_clause(self, condition: Dict[str, Any]) -> Any:
+        """Convert individual parsed condition to a SQLAlchemy filter clause."""
+        cond_type = condition.get("type")
+
+        if cond_type == "text":
+            text_val = f"%{condition['value']}%"
+            return or_(
+                Discrepancy.trans_id.ilike(text_val),
+                Discrepancy.anomaly_type.ilike(text_val),
+                Discrepancy.details.ilike(text_val),
+                Discrepancy.notes.ilike(text_val),
+                Discrepancy.resolution_note.ilike(text_val),
             )
-            return query.filter(text_query) if operator == "AND" else query.filter(~text_query)
 
         field = condition.get("field")
-        field_value = condition.get("value")
+        value = condition.get("value", "")
         op = condition.get("operator", ":")
 
-        # Field-specific filtering
         if field == "severity":
-            filter_clause = Discrepancy.severity == field_value
-        elif field == "status":
-            filter_clause = Discrepancy.status == field_value
-        elif field == "anomaly_type":
-            filter_clause = Discrepancy.anomaly_type == field_value
-        elif field == "resolved":
-            filter_clause = Discrepancy.resolved == (field_value.lower() == "true")
-        elif field == "age":
-            # age>30 means older than 30 minutes
-            minutes = int(field_value) if field_value.isdigit() else 0
-            cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
-            if op == ">":
-                filter_clause = Discrepancy.detected_at < cutoff
-            elif op == "<":
-                filter_clause = Discrepancy.detected_at > cutoff
-            else:
-                filter_clause = True
-        elif field == "assignee":
-            filter_clause = Discrepancy.assignee == field_value
-        elif field == "trans_id":
-            filter_clause = Discrepancy.trans_id == field_value
-        else:
-            return query
+            return Discrepancy.severity.ilike(value) if op in {":", "~"} else Discrepancy.severity == value
+        
+        if field == "status":
+            return Discrepancy.status.ilike(value) if op in {":", "~"} else Discrepancy.status == value
+        
+        if field == "anomaly_type":
+            return Discrepancy.anomaly_type.ilike(f"%{value}%") if op == "~" else Discrepancy.anomaly_type == value
+        
+        if field == "resolved":
+            bool_val = value.lower() in {"true", "1", "yes"}
+            return Discrepancy.resolved == bool_val
+        
+        if field == "trans_id":
+            return Discrepancy.trans_id.ilike(f"%{value}%") if op == "~" else Discrepancy.trans_id == value
+        
+        if field == "assignee":
+            return Discrepancy.assignee.ilike(value) if op in {":", "~"} else Discrepancy.assignee == value
 
-        if operator == "NOT":
-            return query.filter(~filter_clause)
-        else:
-            return query.filter(filter_clause)
+        if field in {"age", "age_minutes"}:
+            try:
+                minutes = int(value)
+                cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+                if op in {">", ">="}:
+                    return Discrepancy.detected_at < cutoff
+                if op in {"<", "<="}:
+                    return Discrepancy.detected_at > cutoff
+            except ValueError:
+                return None
+
+        return None
 
     def search_by_filters(
         self,
         tenant_id: str,
-        severity: str = None,
-        status: str = None,
-        anomaly_type: str = None,
-        resolved: bool = None,
-        assignee: str = None,
+        severity: Optional[str] = None,
+        status: Optional[str] = None,
+        anomaly_type: Optional[str] = None,
+        resolved: Optional[bool] = None,
+        assignee: Optional[str] = None,
         days_back: int = 30,
         limit: int = 50,
         offset: int = 0,
     ) -> Dict[str, Any]:
-        """Search using structured filters."""
+        """Structured filter query convenience method for dashboard tables."""
         query = self.session.query(Discrepancy).filter(
-            Discrepancy.tenant_id == tenant_id
+            Discrepancy.tenant_id == (tenant_id or "default")
         )
 
         cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_back)
@@ -176,13 +220,19 @@ class AdvancedSearchEngine:
             query = query.filter(Discrepancy.assignee == assignee)
 
         total = query.count()
-        results = query.offset(offset).limit(limit).all()
+        results = (
+            query.order_by(Discrepancy.detected_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
 
         return {
             "total": total,
             "limit": limit,
             "offset": offset,
             "filters": {
+                "tenant_id": tenant_id,
                 "severity": severity,
                 "status": status,
                 "anomaly_type": anomaly_type,
@@ -194,27 +244,15 @@ class AdvancedSearchEngine:
         }
 
     def suggest_filters(self, tenant_id: str) -> Dict[str, List[str]]:
-        """Get available filter values for a tenant."""
-        incidents = (
-            self.session.query(Discrepancy)
-            .filter(Discrepancy.tenant_id == tenant_id)
-            .all()
+        """Retrieve dynamic filter facets for tenant dashboard dropdowns."""
+        base_query = self.session.query(Discrepancy).filter(
+            Discrepancy.tenant_id == (tenant_id or "default")
         )
 
-        severities = set()
-        statuses = set()
-        anomaly_types = set()
-        assignees = set()
-
-        for incident in incidents:
-            if incident.severity:
-                severities.add(incident.severity)
-            if incident.status:
-                statuses.add(incident.status)
-            if incident.anomaly_type:
-                anomaly_types.add(incident.anomaly_type)
-            if incident.assignee:
-                assignees.add(incident.assignee)
+        severities = {r[0] for r in base_query.select_from(Discrepancy).distinct(Discrepancy.severity).values(Discrepancy.severity) if r[0]}
+        statuses = {r[0] for r in base_query.select_from(Discrepancy).distinct(Discrepancy.status).values(Discrepancy.status) if r[0]}
+        anomaly_types = {r[0] for r in base_query.select_from(Discrepancy).distinct(Discrepancy.anomaly_type).values(Discrepancy.anomaly_type) if r[0]}
+        assignees = {r[0] for r in base_query.select_from(Discrepancy).distinct(Discrepancy.assignee).values(Discrepancy.assignee) if r[0]}
 
         return {
             "severities": sorted(list(severities)),
@@ -223,26 +261,12 @@ class AdvancedSearchEngine:
             "assignees": sorted(list(assignees)),
         }
 
-    def save_search_preset(
-        self,
-        tenant_id: str,
-        preset_name: str,
-        query: str,
-    ) -> Dict[str, Any]:
-        """Save a search query as a reusable preset."""
-        # This would typically be saved to a SearchPreset table
-        return {
-            "preset_id": f"preset_{tenant_id}_{preset_name}",
-            "name": preset_name,
-            "query": query,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-
     def _incident_to_dict(self, incident: Discrepancy) -> Dict[str, Any]:
-        """Convert incident to dictionary."""
+        """Serialize Discrepancy ORM instance into clean JSON dict."""
         return {
             "id": incident.id,
             "trans_id": incident.trans_id,
+            "tenant_id": incident.tenant_id,
             "anomaly_type": incident.anomaly_type,
             "severity": incident.severity,
             "status": incident.status,
@@ -250,5 +274,7 @@ class AdvancedSearchEngine:
             "assignee": incident.assignee,
             "detected_at": incident.detected_at.isoformat() if incident.detected_at else None,
             "resolved_at": incident.resolved_at.isoformat() if incident.resolved_at else None,
+            "resolution_note": incident.resolution_note,
             "details": incident.details,
+            "notes": incident.notes,
         }
