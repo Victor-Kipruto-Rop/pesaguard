@@ -1,37 +1,200 @@
 {
-  "title": "PesaGuard Operational Dashboard",
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "name": "PesaGuard Operational Dashboard",
   "schemaVersion": 38,
-  "version": 2,
+  "style": "dark",
+  "tags": ["pesaguard", "production", "m-pesa", "reconciliation"],
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": ["10s", "30s", "1m", "5m"]
+  },
+  "timezone": "utc",
+  "title": "PesaGuard Operational Dashboard",
+  "uid": "pesaguard-ops-main",
+  "version": 3,
   "panels": [
     {
+      "id": 1,
       "type": "stat",
       "title": "Open discrepancies",
       "gridPos": {"h": 8, "w": 8, "x": 0, "y": 0},
-      "targets": [{"expr": "pesaguard_discrepancies_open"}]
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "editorMode": "code",
+          "expr": "pesaguard_discrepancies_open",
+          "legendFormat": "Open",
+          "range": true
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "#1F60C4", "value": 5},
+              {"color": "red", "value": 20}
+            ]
+          },
+          "unit": "short"
+        }
+      }
     },
     {
+      "id": 2,
       "type": "timeseries",
       "title": "Transactions per minute",
       "gridPos": {"h": 8, "w": 8, "x": 8, "y": 0},
-      "targets": [{"expr": "rate(pesaguard_transactions_total[5m])"}]
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "editorMode": "code",
+          "expr": "rate(pesaguard_transactions_total[5m]) * 60",
+          "legendFormat": "{{tenant_id}} - Tx / min",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "gradientMode": "opacity",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "none"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "unit": "reqps"
+        }
+      }
     },
     {
+      "id": 3,
       "type": "timeseries",
       "title": "Reconciliation latency (p95)",
       "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
-      "targets": [{"expr": "pesaguard_reconciliation_latency_seconds_sum / pesaguard_reconciliation_latency_seconds_count"}]
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "editorMode": "code",
+          "expr": "histogram_quantile(0.95, rate(pesaguard_reconciliation_latency_seconds_bucket[5m]))",
+          "legendFormat": "p95 latency",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "opacity",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2
+          },
+          "unit": "s"
+        }
+      }
     },
     {
+      "id": 4,
       "type": "timeseries",
       "title": "Alert delivery failures",
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
-      "targets": [{"expr": "rate(pesaguard_alert_delivery_failures_total[5m])"}]
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "editorMode": "code",
+          "expr": "rate(pesaguard_alert_delivery_failures_total[5m])",
+          "legendFormat": "{{channel}} - Failures/sec",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "fixed", "value": "red"},
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1
+          },
+          "unit": "ops"
+        }
+      }
     },
     {
+      "id": 5,
       "type": "stat",
-      "title": "Alert volume",
+      "title": "Total alert volume (24h)",
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
-      "targets": [{"expr": "pesaguard_alerts_total"}]
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "editorMode": "code",
+          "expr": "sum(increase(pesaguard_alerts_total[24h]))",
+          "legendFormat": "Alerts",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 50},
+              {"color": "red", "value": 200}
+            ]
+          },
+          "unit": "short"
+        }
+      }
     }
   ]
 }
