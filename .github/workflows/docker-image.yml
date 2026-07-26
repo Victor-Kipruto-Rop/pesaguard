@@ -54,7 +54,7 @@ jobs:
         continue-on-error: true
 
       - name: Run Trivy vulnerability scanner on backend image
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: 'pesaguard-backend:latest'
           format: 'sarif'
