@@ -4,18 +4,21 @@ Uses ProcessedTransaction table as the idempotency source of truth.
 Each webhook callback from Daraja is recorded exactly once via unique constraint.
 """
 
-import os
-import uuid
+from __future__ import annotations
+
 import logging
+import os
+import threading
+import uuid
 from datetime import datetime, timezone
-from typing import Optional
 from enum import Enum
+from typing import Any, Dict, Optional
 
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.orm import Session, sessionmaker
 
-from models import Base, Transaction, ProcessedTransaction
+from models import Base, ProcessedTransaction, Transaction
 
 logger = logging.getLogger("pesaguard.event_store")
 
@@ -29,6 +32,7 @@ class ProcessResult(str, Enum):
     be indistinguishable from a benign duplicate, or real transactions can be
     silently dropped.
     """
+
     STORED = "stored"        # new transaction, successfully recorded
     DUPLICATE = "duplicate"  # already processed before — safe no-op
     ERROR = "error"          # genuine failure — caller should signal retry
@@ -46,31 +50,43 @@ class EventStore:
 
     def __init__(self, database_url: Optional[str] = None, isolation_level: str = "serializable"):
         self.database_url = database_url or os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
-        self.isolation_level = isolation_level  # serializable ensures no phantom reads during idempotency checks
+        self.isolation_level = isolation_level
         self.engine = None
         self.Session = None
         self._initialized = False
+        self._init_lock = threading.Lock()
 
     def _ensure_ready(self) -> None:
+        """Thread-safe lazy initialization of the database engine and session factory."""
         if self._initialized:
             return
 
-        self.engine = create_engine(
-            self.database_url,
-            isolation_level=self.isolation_level if self.database_url.startswith("postgresql") else None,
-        )
-        Base.metadata.create_all(self.engine)
-        self.Session = sessionmaker(bind=self.engine)
-        self._initialized = True
+        with self._init_lock:
+            if self._initialized:
+                return
 
-    def already_processed(self, trans_id: str, source_ip: str = None) -> bool:
+            connect_args = {}
+            if "postgresql" in self.database_url:
+                connect_args["connect_timeout"] = int(os.getenv("DB_CONNECT_TIMEOUT", "5"))
+
+            self.engine = create_engine(
+                self.database_url,
+                pool_pre_ping=True,
+                pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
+                max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
+                isolation_level=self.isolation_level if "postgresql" in self.database_url else None,
+                connect_args=connect_args,
+            )
+            Base.metadata.create_all(self.engine)
+            self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
+            self._initialized = True
+
+    def already_processed(self, trans_id: str, source_ip: Optional[str] = None) -> bool:
         """Check if a webhook callback has already been processed (idempotency gate).
 
         This is an optimization only — the real guarantee is the unique constraint
         enforced in mark_processed(). Conservative: returns True on DB errors, so a
-        transient read failure doesn't cause reprocessing (mark_processed's own
-        unique constraint would catch a true duplicate anyway; returning True here
-        just avoids the extra work and logs the situation for visibility).
+        transient read failure doesn't cause reprocessing.
 
         Args:
             trans_id: Daraja M-Pesa TransID
@@ -100,9 +116,9 @@ class EventStore:
 
     def mark_processed(
         self,
-        payload: dict,
-        tenant_id: str = None,
-        source_ip: str = None,
+        payload: Dict[str, Any],
+        tenant_id: Optional[str] = None,
+        source_ip: Optional[str] = None,
         signature_verified: bool = False,
     ) -> ProcessResult:
         """Atomically record that a webhook callback has been processed.
@@ -110,9 +126,7 @@ class EventStore:
         Creates a ProcessedTransaction record with a unique constraint on
         daraja_trans_id. Distinguishes an expected duplicate (unique constraint
         violation) from a genuine error (connection failure, etc.) — callers must
-        NOT treat these the same way. A genuine error should cause the webhook
-        handler to return a non-200 so Daraja retries; a duplicate should return
-        200 since it's already safely stored.
+        NOT treat these the same way.
 
         Args:
             payload: Daraja webhook payload dict
@@ -125,7 +139,7 @@ class EventStore:
             ProcessResult.DUPLICATE — already recorded, safe no-op
             ProcessResult.ERROR     — genuine failure, caller should signal retry
         """
-        trans_id = str(payload.get("TransID", ""))
+        trans_id = str(payload.get("TransID", "")).strip()
         if not trans_id:
             logger.error("mark_processed() called with missing TransID in payload")
             return ProcessResult.ERROR
@@ -141,11 +155,12 @@ class EventStore:
                 pt_record = ProcessedTransaction(
                     id=f"pt_{uuid.uuid4().hex[:12]}",
                     daraja_trans_id=trans_id,
-                    tenant_id=tenant_id,
+                    tenant_id=tenant_id or "default",
                     status="received",
                     source_ip=source_ip,
                     signature_verified=signature_verified,
                     webhook_attempt_number=int(payload.get("retry_count", 1)),
+                    created_at=datetime.now(timezone.utc),
                 )
                 session.add(pt_record)
 
@@ -164,19 +179,10 @@ class EventStore:
                 return ProcessResult.STORED
 
         except IntegrityError:
-            # Expected path: unique constraint on daraja_trans_id (or Transaction.trans_id
-            # primary key) rejected a row we've already stored. This is the hard guarantee
-            # against race conditions — two near-simultaneous callbacks for the same
-            # transaction will have exactly one winner here.
-            logger.info(
-                "Duplicate webhook callback ignored for trans_id=%s (unique constraint)",
-                trans_id,
-            )
+            logger.info("Duplicate webhook callback ignored for trans_id=%s (unique constraint)", trans_id)
             return ProcessResult.DUPLICATE
 
         except SQLAlchemyError:
-            # Genuine failure — connection drop, deadlock, disk full, etc. Must NOT be
-            # treated like a duplicate. Log loudly and let the caller decide to retry.
             logger.exception(
                 "mark_processed() failed for trans_id=%s due to a DB error, not a "
                 "duplicate — this transaction was NOT stored and needs retry/investigation.",
@@ -186,37 +192,26 @@ class EventStore:
 
     def mark_processed_in_session(
         self,
-        session,
-        payload: dict,
-        tenant_id: str = None,
-        source_ip: str = None,
+        session: Session,
+        payload: Dict[str, Any],
+        tenant_id: Optional[str] = None,
+        source_ip: Optional[str] = None,
         signature_verified: bool = False,
     ) -> ProcessResult:
-        """Same as mark_processed(), but writes using a session YOU provide and pass control
-        of committing back to you.
-
-        Use this instead of mark_processed() whenever the idempotency write must be atomic
-        with another write (e.g. a Discrepancy record) — pass the same session to both, and
-        commit once, after both succeed. This function does NOT commit or roll back; the
-        caller owns the transaction boundary.
+        """Same as mark_processed(), but writes using a caller-provided session and
+        uses savepoints (begin_nested) to isolate flush errors without invalidating
+        the caller's transaction.
 
         Returns:
             ProcessResult.STORED    — rows added to the session (not yet committed)
-            ProcessResult.DUPLICATE — a unique-constraint conflict was detected; caller
-                                       should skip committing any related writes for this
-                                       trans_id
-            ProcessResult.ERROR     — payload was invalid (e.g. missing TransID); caller
-                                       should not proceed
+            ProcessResult.DUPLICATE — a unique-constraint conflict was detected
+            ProcessResult.ERROR     — payload was invalid or unrecoverable error occurred
         """
-        trans_id = str(payload.get("TransID", ""))
+        trans_id = str(payload.get("TransID", "")).strip()
         if not trans_id:
             logger.error("mark_processed_in_session() called with missing TransID in payload")
             return ProcessResult.ERROR
 
-        # Pre-flight check using the SAME session/transaction, so it sees any prior
-        # writes made earlier in this same transaction. This does not fully close the
-        # race window by itself (that's what the unique constraint + flush below is
-        # for) — it just avoids doing unnecessary work when we already know it's a dup.
         existing = session.query(ProcessedTransaction).filter(
             ProcessedTransaction.daraja_trans_id == trans_id
         ).first()
@@ -224,51 +219,59 @@ class EventStore:
             logger.info("Duplicate trans_id=%s detected in pre-flight session check", trans_id)
             return ProcessResult.DUPLICATE
 
-        pt_record = ProcessedTransaction(
-            id=f"pt_{uuid.uuid4().hex[:12]}",
-            daraja_trans_id=trans_id,
-            tenant_id=tenant_id,
-            status="received",
-            source_ip=source_ip,
-            signature_verified=signature_verified,
-            webhook_attempt_number=int(payload.get("retry_count", 1)),
-        )
-        session.add(pt_record)
-
-        t_record = Transaction(
-            trans_id=trans_id,
-            trans_amount=float(payload.get("TransAmount", 0)),
-            msisdn=str(payload.get("MSISDN", "")),
-            business_short_code=str(payload.get("BusinessShortCode", "")),
-            trans_time=str(payload.get("TransTime", "")),
-            raw_payload=payload,
-            created_at=datetime.now(timezone.utc),
-        )
-        session.add(t_record)
-
         try:
-            # Flush (not commit) to surface a unique-constraint violation now, while
-            # we can still recover cleanly, rather than at the final commit — this is
-            # the hard guarantee against the race the pre-flight check above can't close.
+            # Create a savepoint to catch duplicate constraints without breaking the parent transaction
+            savepoint = session.begin_nested()
+
+            pt_record = ProcessedTransaction(
+                id=f"pt_{uuid.uuid4().hex[:12]}",
+                daraja_trans_id=trans_id,
+                tenant_id=tenant_id or "default",
+                status="received",
+                source_ip=source_ip,
+                signature_verified=signature_verified,
+                webhook_attempt_number=int(payload.get("retry_count", 1)),
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(pt_record)
+
+            t_record = Transaction(
+                trans_id=trans_id,
+                trans_amount=float(payload.get("TransAmount", 0)),
+                msisdn=str(payload.get("MSISDN", "")),
+                business_short_code=str(payload.get("BusinessShortCode", "")),
+                trans_time=str(payload.get("TransTime", "")),
+                raw_payload=payload,
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(t_record)
+
             session.flush()
+            return ProcessResult.STORED
+
         except IntegrityError:
+            savepoint.rollback()
             logger.info(
-                "Duplicate trans_id=%s caught at flush time (race window closed by "
-                "unique constraint)",
+                "Duplicate trans_id=%s caught at flush time (race window closed by unique constraint)",
                 trans_id,
             )
             return ProcessResult.DUPLICATE
-
-        return ProcessResult.STORED
+        except SQLAlchemyError:
+            savepoint.rollback()
+            logger.exception("mark_processed_in_session() encountered database error for trans_id=%s", trans_id)
+            return ProcessResult.ERROR
 
     def update_processing_status(
-        self, trans_id: str, status: str, error_reason: str = None, processing_time_ms: int = None
+        self,
+        trans_id: str,
+        status: str,
+        error_reason: Optional[str] = None,
+        processing_time_ms: Optional[int] = None,
     ) -> None:
-        """Update the processing status of a webhook callback.
+        """Update the processing status of a webhook callback."""
+        if not trans_id:
+            return
 
-        Best-effort: failures here are logged but never raised, since this is a
-        secondary status update, not the idempotency guarantee itself.
-        """
         try:
             self._ensure_ready()
             with self.Session() as session:
@@ -283,21 +286,18 @@ class EventStore:
                         pt_record.processing_time_ms = processing_time_ms
                     session.commit()
                 else:
-                    logger.warning(
-                        "update_processing_status() found no ProcessedTransaction for trans_id=%s",
-                        trans_id,
-                    )
+                    logger.warning("update_processing_status() found no ProcessedTransaction for trans_id=%s", trans_id)
         except SQLAlchemyError:
             logger.exception("update_processing_status() failed for trans_id=%s", trans_id)
 
     def write_dead_letter(
-        self, payload: dict | None, reason: str, error_detail: str | None = None, tenant_id: str | None = None
+        self,
+        payload: Optional[Dict[str, Any]],
+        reason: str,
+        error_detail: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> None:
-        """Persist a malformed or rejected webhook payload for later inspection/replay.
-
-        Intentionally best-effort and must not raise in the webhook hot path —
-        but genuine failures here are logged, not silently swallowed.
-        """
+        """Persist a malformed or rejected webhook payload for later inspection and replay."""
         try:
             from models import DeadLetter
 
@@ -305,20 +305,24 @@ class EventStore:
             with self.Session() as session:
                 dl = DeadLetter(
                     id=f"dl_{uuid.uuid4().hex[:12]}",
-                    tenant_id=tenant_id,
+                    tenant_id=tenant_id or "default",
                     reason=reason,
-                    payload=payload,
+                    payload=payload or {},
                     error_detail=str(error_detail) if error_detail else None,
                     attempts=0,
                     processed=False,
                     processed_at=None,
+                    created_at=datetime.now(timezone.utc),
                 )
                 session.add(dl)
                 session.commit()
+                logger.info("Recorded dead-letter entry id=%s reason=%s", dl.id, reason)
         except SQLAlchemyError:
             logger.exception(
-                "write_dead_letter() itself failed for reason=%s — payload may be lost, "
-                "check DB health.",
+                "write_dead_letter() failed for reason=%s — payload could not be persisted.",
                 reason,
             )
 
+
+# Default singleton instance
+event_store = EventStore()
