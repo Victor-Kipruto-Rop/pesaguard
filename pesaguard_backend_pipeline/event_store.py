@@ -71,8 +71,10 @@ class EventStore:
         with self._init_lock:
             if self._initialized:
                 return
+            connect_args = {"check_same_thread": False} if self.database_url.startswith("sqlite:") else {}
             self.engine = create_engine(
                 self.database_url,
+                connect_args=connect_args,
                 isolation_level=self.isolation_level if self.database_url.startswith("postgresql") else None,
             )
             Base.metadata.create_all(self.engine)
