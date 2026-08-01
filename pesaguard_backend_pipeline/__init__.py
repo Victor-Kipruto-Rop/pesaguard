@@ -27,6 +27,6 @@ for module_name in [
 ]:
     try:
         module = importlib.import_module(f"pesaguard_backend_pipeline.{module_name}")
-    except ImportError:
+    except Exception:
         continue
     sys.modules.setdefault(module_name, module)
