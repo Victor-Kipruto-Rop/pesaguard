@@ -22,7 +22,10 @@ _BUCKET_IDLE_TTL_SECONDS = 60
 
 # Redis connection environment defaults
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-ENABLE_REDIS_RATE_LIMITING = os.getenv("PESAGUARD_ENABLE_REDIS_RATE_LIMIT", "0") == "1"
+ENABLE_REDIS_RATE_LIMITING = (
+    os.getenv("ENABLE_REDIS_RATE_LIMITING", "").strip().lower() in {"1", "true", "yes", "on"}
+    or os.getenv("PESAGUARD_ENABLE_REDIS_RATE_LIMIT", "0") == "1"
+)
 
 # Atomic Lua script for distributed token bucket evaluation in Redis
 _REDIS_TOKEN_BUCKET_LUA = """
@@ -106,6 +109,7 @@ class TokenBucketRateLimiter:
                     "remaining": int(tokens),
                     "limit": self.max_tokens_per_minute,
                     "reset_in": 0,
+                    "retry_after": 0,
                 }
 
             self.buckets[bucket_key] = (tokens, current_time)
@@ -115,6 +119,7 @@ class TokenBucketRateLimiter:
                 "remaining": 0,
                 "limit": self.max_tokens_per_minute,
                 "reset_in": reset_in,
+                "retry_after": reset_in,
             }
 
 
@@ -127,7 +132,7 @@ class RedisRateLimiter:
         self._script: Any = None
         self._lock = threading.Lock()
 
-    def _get_client((self) -> Any:
+    def _get_client(self) -> Any:
         if self._client is not None:
             return self._client
         with self._lock:
@@ -158,7 +163,34 @@ class RedisRateLimiter:
             "remaining": remaining,
             "limit": limit,
             "reset_in": reset_in,
+            "retry_after": reset_in,
         }
+
+
+class RateLimiter:
+    """Backward-compatible wrapper exposing set_limits/is_allowed for app webhook usage."""
+
+    def __init__(self, default_max_per_minute: int = 30):
+        self.max_requests_per_minute = default_max_per_minute
+        self._memory = TokenBucketRateLimiter(default_max_per_minute=default_max_per_minute)
+        self._redis = RedisRateLimiter() if ENABLE_REDIS_RATE_LIMITING else None
+
+    def set_limits(self, max_requests_per_minute: int) -> None:
+        self.max_requests_per_minute = max_requests_per_minute
+        self._memory.set_limits(max_requests_per_minute)
+
+    def is_allowed(self, client_id: str, endpoint: str, tokens_required: int = 1) -> Tuple[bool, Dict[str, Any]]:
+        if ENABLE_REDIS_RATE_LIMITING and self._redis:
+            try:
+                return self._redis.is_allowed(
+                    client_id,
+                    endpoint,
+                    max_per_minute=self.max_requests_per_minute,
+                    tokens_required=tokens_required,
+                )
+            except Exception as exc:
+                logger.warning("Redis limiter failed, falling back to memory: %s", exc)
+        return self._memory.is_allowed(client_id, endpoint, tokens_required=tokens_required)
 
 
 # Global limiter instances

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 import logging
 import os
 from typing import Any, Dict, Optional
@@ -15,6 +13,7 @@ from werkzeug.exceptions import HTTPException
 from background_tasks import enqueue_transaction_event
 from event_store import EventStore, ProcessResult
 from health import build_health_payload
+from idempotency import derive_idempotency_key
 from logging_utils import configure_logging, get_correlation_id, set_correlation_id
 from metrics import build_metrics_payload
 from producer import publish_transaction_event
@@ -25,6 +24,7 @@ from security_helpers import (
     is_payload_within_limit,
     sanitize_error_message,
 )
+from shared.daraja.validator import validate_daraja_callback
 from tenant_settings import TenantSettingsStore
 from validators import validate_daraja_payload
 
@@ -231,14 +231,7 @@ def _verify_daraja_signature(request_body: bytes, signature: str) -> None:
     consumer_secret = os.getenv("DARAJA_CONSUMER_SECRET", "")
     if not consumer_secret:
         raise ValueError("DARAJA_CONSUMER_SECRET not configured")
-
-    expected_signature = hmac.new(
-        consumer_secret.encode(),
-        request_body,
-        hashlib.sha256
-    ).hexdigest().upper()
-
-    if not hmac.compare_digest(signature.upper(), expected_signature):
+    if not validate_daraja_callback(request_body, signature, consumer_secret):
         raise ValueError("Signature mismatch")
 
 
@@ -276,25 +269,35 @@ def mpesa_confirmation():
         return jsonify({"ResultCode": 1, "ResultDesc": sanitize_error_message(error)}), 400
 
     trans_id = payload.get("TransID")
+    idempotency_key = derive_idempotency_key(payload)
 
     if event_store.already_processed(str(trans_id)):
-        logger.info("Duplicate transaction (pre-check)", extra={"tenant_id": tenant_id, "trans_id": trans_id})
+        logger.info(
+            "Duplicate transaction (pre-check)",
+            extra={"tenant_id": tenant_id, "trans_id": trans_id, "idempotency_key": idempotency_key},
+        )
         return jsonify({"ResultCode": 0, "ResultDesc": "Accepted (duplicate ignored)"}), 200
 
     result = event_store.mark_processed(payload, tenant_id=tenant_id)
 
     if result == ProcessResult.DUPLICATE:
-        logger.info("Duplicate transaction (caught at write time)", extra={"tenant_id": tenant_id, "trans_id": trans_id})
+        logger.info(
+            "Duplicate transaction (caught at write time)",
+            extra={"tenant_id": tenant_id, "trans_id": trans_id, "idempotency_key": idempotency_key},
+        )
         return jsonify({"ResultCode": 0, "ResultDesc": "Accepted (duplicate ignored)"}), 200
 
     if result == ProcessResult.ERROR:
-        logger.error("Failed to record transaction, requesting Daraja retry", extra={"tenant_id": tenant_id, "trans_id": trans_id})
+        logger.error(
+            "Failed to record transaction, requesting Daraja retry",
+            extra={"tenant_id": tenant_id, "trans_id": trans_id, "idempotency_key": idempotency_key},
+        )
         return jsonify({"ResultCode": 1, "ResultDesc": "Temporary processing error, please retry"}), 500
 
     # Best-effort Redis cache warm
     try:
         redis_conn = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), socket_connect_timeout=2)
-        cache_key = f"processed_trans_id:{trans_id}"
+        cache_key = f"processed:{idempotency_key}"
         redis_conn.set(cache_key, "1", ex=86400)
     except Exception:
         pass
