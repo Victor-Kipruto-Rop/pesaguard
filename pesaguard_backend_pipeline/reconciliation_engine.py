@@ -14,6 +14,9 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 from event_store import ProcessResult
 from reconciliation_scoring import score_match
 
+# Import normalization helpers (added in feat/phase1-reconciliation-systematic)
+from .reconciliation_utils import normalize_daraja_event, time_window_match
+
 logger = logging.getLogger("pesaguard.reconciliation_engine")
 
 
@@ -36,6 +39,17 @@ def evaluate_transaction(
     Returns:
         Structured evaluation outcome dict
     """
+    # Normalize incoming event into canonical keys without discarding original keys.
+    # This preserves backwards compatibility while centralizing parsing/format logic.
+    try:
+        norm = normalize_daraja_event(event, tenant_id=str(tenant_settings.get("tenant_id")) if tenant_settings else "default")
+    except Exception:
+        norm = {}
+    # Merge normalized canonical keys into the event for the rest of the engine to use.
+    merged_event = dict(event or {})
+    merged_event.update(norm or {})
+    event = merged_event
+
     trans_id = str(event.get("TransID") or event.get("trans_id") or "unknown").strip()
     duplicate = trans_id in seen_trans_ids
 
