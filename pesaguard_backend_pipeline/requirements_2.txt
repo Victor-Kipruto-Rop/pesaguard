@@ -8,7 +8,7 @@ SQLAlchemy==2.0.38
 psycopg2-binary==2.9.10
 
 # Caching, Rate Limiting & Async Queue
-redis==5.2.1
+redis==5.3.1
 rq==2.1.0
 
 # Environment & Configuration

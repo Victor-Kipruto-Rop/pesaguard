@@ -7,7 +7,7 @@ SQLAlchemy==2.0.38
 psycopg2-binary==2.9.10
 
 # Distributed Caching, Task Queue & Rate Limiting
-redis==5.2.1
+redis==5.3.1
 rq==2.1.0
 
 # Security, Networking & Utilities
