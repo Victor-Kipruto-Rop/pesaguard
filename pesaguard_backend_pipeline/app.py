@@ -403,9 +403,12 @@ def mpesa_validation():
 # consolidated Flask application instance.
 # These modules no longer start their own Flask servers; they are now
 # part of the single unified application defined above.
-from pesaguard_backend_pipeline import app_1  # noqa: F401
-from pesaguard_backend_pipeline import app_2  # noqa: F401
-from pesaguard_backend_pipeline import app_4_advanced_features  # noqa: F401
+if os.getenv("PESAGUARD_LOAD_AUX_APPS", "1") == "1":
+    for _module in ("app_1", "app_2", "app_4_advanced_features"):
+        try:
+            __import__(f"pesaguard_backend_pipeline.{_module}")
+        except ImportError:
+            logger.warning("Skipping optional module registration for %s", _module)
 
 
 if __name__ == "__main__":

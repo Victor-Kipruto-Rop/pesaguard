@@ -127,7 +127,7 @@ class RedisRateLimiter:
         self._script: Any = None
         self._lock = threading.Lock()
 
-    def _get_client((self) -> Any:
+    def _get_client(self) -> Any:
         if self._client is not None:
             return self._client
         with self._lock:
@@ -159,6 +159,32 @@ class RedisRateLimiter:
             "limit": limit,
             "reset_in": reset_in,
         }
+
+
+class RateLimiter:
+    """Backwards-compatible rate limiter interface used by Flask app modules."""
+
+    def __init__(self, default_max_per_minute: int = 30):
+        self.max_per_minute = default_max_per_minute
+        self._memory_limiter = TokenBucketRateLimiter(default_max_per_minute)
+        self._redis_limiter: Optional[RedisRateLimiter] = (
+            RedisRateLimiter() if ENABLE_REDIS_RATE_LIMITING else None
+        )
+
+    def set_limits(self, max_requests_per_minute: int) -> None:
+        self.max_per_minute = max_requests_per_minute
+        self._memory_limiter.set_limits(max_requests_per_minute)
+
+    def is_allowed(self, client_id: str, endpoint: str, tokens_required: int = 1) -> Tuple[bool, Dict[str, Any]]:
+        if ENABLE_REDIS_RATE_LIMITING and self._redis_limiter:
+            try:
+                return self._redis_limiter.is_allowed(
+                    client_id, endpoint, self.max_per_minute, tokens_required
+                )
+            except Exception as exc:
+                logger.warning("Redis rate limiter unavailable, falling back to memory bucket: %s", exc)
+
+        return self._memory_limiter.is_allowed(client_id, endpoint, tokens_required)
 
 
 # Global limiter instances

@@ -13,6 +13,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  JWT_SECRET_KEY: ci-test-jwt-secret-key
+
 jobs:
   backend-tests:
     name: Backend Tests
@@ -52,12 +55,14 @@ jobs:
           DATABASE_URL: postgresql://pesaguard:pesaguard@localhost:5432/pesaguard
           REDIS_URL: redis://localhost:6379/0
           PESAGUARD_API_AUTH_REQUIRED: "1"
+          PESAGUARD_LOAD_AUX_APPS: "0"
         run: pytest pesaguard_backend_pipeline/tests/ -q --tb=short
       - name: Start webhook API for smoke test
         env:
           DATABASE_URL: sqlite:///./e2e.db
           REDIS_URL: redis://localhost:6379/0
           PESAGUARD_ADMIN_API_TOKEN: ci-test-token
+          PESAGUARD_LOAD_AUX_APPS: "0"
         run: |
           python -m pesaguard_backend_pipeline.app &
           echo $! > flask.pid
