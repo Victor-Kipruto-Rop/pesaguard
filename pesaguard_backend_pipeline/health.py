@@ -14,6 +14,10 @@ DEFAULT_DATABASE_URL = os.getenv(
 )
 
 
+def _env_flag(name: str, default: str = "0") -> bool:
+    return os.getenv(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _database_connect_args(database_url: str) -> Dict[str, Any]:
     if database_url.startswith("sqlite"):
         return {"check_same_thread": False}
@@ -122,19 +126,37 @@ def build_health_payload() -> Dict[str, Any]:
     kafka_result = check_kafka_connectivity()
     redis_result = check_redis_connectivity()
     daraja_result = check_daraja_connectivity()
+
+    check_kafka = _env_flag("PESAGUARD_HEALTH_CHECK_KAFKA", "0")
+    check_redis = _env_flag("PESAGUARD_HEALTH_CHECK_REDIS", "1")
+    check_daraja = _env_flag("PESAGUARD_HEALTH_CHECK_DARAJA", "0")
+
+    if not check_kafka:
+        kafka_result = {"status": "skipped", "kafka": {"status": "skipped", "reason": "disabled_by_config"}}
+    if not check_redis:
+        redis_result = {"status": "skipped", "redis": {"status": "skipped", "reason": "disabled_by_config"}}
+    if not check_daraja:
+        daraja_result = {"status": "skipped", "daraja": {"status": "skipped", "reason": "disabled_by_config"}}
     
     # Determine overall status:
     # - "ok" if all critical services (DB) are up
     # - "degraded" if DB is up but optional services (Kafka, Redis, Daraja) are not
     # - "failed" if critical services (DB) are down
     db_ok = db_result["database"]["status"] == "ok"
-    kafka_ok = kafka_result["kafka"]["status"] == "ok"
-    redis_ok = redis_result["redis"]["status"] == "ok"
-    daraja_ok = daraja_result["daraja"]["status"] == "ok"
+
+    optional_results = []
+    if check_kafka:
+        optional_results.append(kafka_result["kafka"]["status"])
+    if check_redis:
+        optional_results.append(redis_result["redis"]["status"])
+    if check_daraja:
+        optional_results.append(daraja_result["daraja"]["status"])
     
     if not db_ok:
         overall_status = "failed"
-    elif kafka_ok and redis_ok and daraja_ok:
+    elif optional_results and all(status == "ok" for status in optional_results):
+        overall_status = "ok"
+    elif not optional_results:
         overall_status = "ok"
     else:
         overall_status = "degraded"

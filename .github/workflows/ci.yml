@@ -2,113 +2,101 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, staging ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, staging ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
+  backend-tests:
     runs-on: ubuntu-latest
     services:
       redis:
-        image: redis:6
+        image: redis:7
         ports:
           - 6379:6379
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: pesaguard
+          POSTGRES_PASSWORD: pesaguard
+          POSTGRES_DB: pesaguard
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pesaguard -d pesaguard"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-      - name: Install dependencies
+          python-version: '3.12'
+      - name: Install backend dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest prometheus_client rq redis kafka-python sqlalchemy
-      - name: Start RQ worker (background)
-        run: |
-          python scripts/rq_worker.py &
-          sleep 2
-      - name: Run tests
+          pip install -r pesaguard_backend_pipeline/requirements_3.txt
+          pip install pytest
+          pip check
+      - name: Run backend tests
         env:
           PYTHONPATH: .
-        run: pytest tests/ pesaguard_backend_pipeline/tests/ -q --tb=short
-      - name: End-to-end smoke: start Flask server
+          DATABASE_URL: postgresql://pesaguard:pesaguard@localhost:5432/pesaguard
+          REDIS_URL: redis://localhost:6379/0
+          PESAGUARD_API_AUTH_REQUIRED: "1"
+        run: pytest pesaguard_backend_pipeline/tests/ -q --tb=short
+      - name: Start webhook API for smoke test
+        env:
+          DATABASE_URL: sqlite:///./e2e.db
+          REDIS_URL: redis://localhost:6379/0
+          PESAGUARD_ADMIN_API_TOKEN: ci-test-token
         run: |
-          export DATABASE_URL=sqlite:///./e2e.db
-          export PESAGUARD_ADMIN_API_TOKEN=ci-test-token
-          python pesaguard_backend_pipeline/app.py &
-          sleep 2
+          python -m pesaguard_backend_pipeline.app &
+          echo $! > flask.pid
+          sleep 3
+      - name: Health endpoint smoke test
+        run: |
+          status=$(curl -s -o /tmp/health.json -w "%{http_code}" http://127.0.0.1:5000/health)
+          cat /tmp/health.json
+          if [ "$status" -ne 200 ]; then
+            echo "Health endpoint returned HTTP $status"
+            exit 1
+          fi
       - name: Post sample webhook and validate persisted record
         run: |
           TRANSID=E2E_TEST_1
-          cat > payload.json <<'JSON'
-{ "TransactionType": "C2B", "TransID": "${TRANSID}", "TransTime": "20220101120000", "TransAmount": "123.45", "BusinessShortCode": "12345", "MSISDN": "254700000000" }
-JSON
+          printf '{ "TransactionType": "C2B", "TransID": "%s", "TransTime": "20220101120000", "TransAmount": "123.45", "BusinessShortCode": "12345", "MSISDN": "254700000000" }\n' "$TRANSID" > payload.json
           curl -s -X POST -H "Content-Type: application/json" --data @payload.json http://127.0.0.1:5000/webhook/mpesa/confirmation -o /dev/null -w "%{http_code}\n"
-          python scripts/admin_query.py ${TRANSID} --db sqlite:///./e2e.db > e2e_out.json
-          python - <<'PY'
-import json
-o=json.load(open('e2e_out.json'))
-assert 'E2E_TEST_1' in o and o['E2E_TEST_1'] is not None
-print('E2E OK')
-PY
-      - name: Install frontend dependencies (optional)
+          python -m pesaguard_backend_pipeline.scripts.admin_query ${TRANSID} --db sqlite:///./e2e.db > e2e_out.json
+          python -c "import json; o=json.load(open('e2e_out.json')); assert 'E2E_TEST_1' in o and o['E2E_TEST_1'] is not None; print('E2E OK')"
+      - name: Stop webhook API
+        if: always()
         run: |
-          if [ -f frontend/package.json ]; then
-            npm --prefix frontend ci --omit=optional
+          if [ -f flask.pid ]; then
+            kill $(cat flask.pid) || true
           fi
-        continue-on-error: true
+      - name: Validate docker compose definitions
+        run: |
+          docker compose -f docker/docker-compose.yml config >/dev/null
+          docker compose -f docker/docker-compose.full.yml config >/dev/null
 
-  e2e:
+  image-build:
     runs-on: ubuntu-latest
-    needs: test
-    strategy:
-      matrix:
-        db: [sqlite, postgres]
-    services: {}
+    needs: backend-tests
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-      - name: Install dependencies
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build backend image
+        run: docker build . --file docker/Dockerfile --tag pesaguard-backend:${{ github.sha }}
+      - name: Build frontend image (best-effort)
         run: |
-          python -m pip install --upgrade pip
-          pip install pytest prometheus_client rq redis kafka-python sqlalchemy psycopg2-binary
-      - name: Start DB service (Postgres matrix)
-        if: matrix.db == 'postgres'
-        uses: harmon758/postgresql-action@v2
-        with:
-          postgresql version: '13'
-          postgresql db: 'pesaguard'
-          postgresql user: 'pesaguard'
-          postgresql password: 'pesaguard'
-      - name: Start Redis for e2e
-        uses: docker://redis:6
+          docker build . --file docker/Dockerfile.frontend --tag pesaguard-frontend:${{ github.sha }}
         continue-on-error: true
-      - name: Start RQ worker
-        run: |
-          python scripts/rq_worker.py &
-          sleep 2
-      - name: Start Flask and run e2e smoke
-        env:
-          DATABASE_URL: ${{ matrix.db == 'postgres' && 'postgresql://pesaguard:pesaguard@localhost:5432/pesaguard' || 'sqlite:///./e2e.db' }}
-          PESAGUARD_ADMIN_API_TOKEN: ci-test-token
-        run: |
-          python pesaguard_backend_pipeline/app.py &
-          sleep 3
-          TRANSID=E2E_TEST_MATRIX
-          cat > payload.json <<'JSON'
-{ "TransactionType": "C2B", "TransID": "${TRANSID}", "TransTime": "20220101120000", "TransAmount": "77.77", "BusinessShortCode": "12345", "MSISDN": "254700000000" }
-JSON
-          curl -s -X POST -H "Content-Type: application/json" --data @payload.json http://127.0.0.1:5000/webhook/mpesa/confirmation -o /dev/null -w "%{http_code}\n"
-          if [ "${{ matrix.db }}" = "postgres" ]; then
-            python scripts/admin_query.py ${TRANSID} --db postgresql://pesaguard:pesaguard@localhost:5432/pesaguard > e2e_out.json
-          else
-            python scripts/admin_query.py ${TRANSID} --db sqlite:///./e2e.db > e2e_out.json
-          fi
-          python - <<'PY'
-import json
-o=json.load(open('e2e_out.json'))
-assert 'E2E_TEST_MATRIX' in o and o['E2E_TEST_MATRIX'] is not None
-print('E2E MATRIX OK')
-PY

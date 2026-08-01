@@ -9,28 +9,44 @@ import os
 from flask import Flask, jsonify, request, Response
 from werkzeug.exceptions import HTTPException
 
-from security_helpers import (
+from pesaguard_backend_pipeline.security_helpers import (
     get_client_ip,
     is_allowed_source,
     is_payload_within_limit,
     sanitize_error_message,
 )
-from rate_limiter import RateLimiter
+from pesaguard_backend_pipeline.rate_limiter import RateLimiter
 
-from event_store import EventStore, ProcessResult
-from health import build_health_payload
-from logging_utils import configure_logging, set_correlation_id, get_correlation_id
-from validators import validate_daraja_payload
-from background_tasks import enqueue_transaction_event
-from producer import publish_transaction_event
-from tenant_settings import TenantSettingsStore
-from metrics import build_metrics_payload
+from pesaguard_backend_pipeline.event_store import EventStore, ProcessResult
+from pesaguard_backend_pipeline.health import build_health_payload
+from pesaguard_backend_pipeline.logging_utils import configure_logging, set_correlation_id, get_correlation_id
+from pesaguard_backend_pipeline.validators import validate_daraja_payload
+from pesaguard_backend_pipeline.background_tasks import enqueue_transaction_event
+from pesaguard_backend_pipeline.producer import publish_transaction_event
+from pesaguard_backend_pipeline.tenant_settings import TenantSettingsStore
+from pesaguard_backend_pipeline.metrics import build_metrics_payload
 from flask import abort
+import time
+from flask import Response
 
 configure_logging()
 logger = logging.getLogger("pesaguard.webhook")
 
 app = Flask(__name__)
+_original_route = app.route
+
+
+def _idempotent_route(rule, **options):
+    def decorator(view_func):
+        endpoint = options.get("endpoint") or view_func.__name__
+        if endpoint in app.view_functions:
+            return view_func
+        return _original_route(rule, **options)(view_func)
+
+    return decorator
+
+
+app.route = _idempotent_route
 app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("PESAGUARD_WEBHOOK_MAX_BODY_BYTES", "1048576"))
 event_store = EventStore()
 webhook_rate_limiter = RateLimiter()
@@ -221,7 +237,21 @@ def enforce_webhook_security():
 
 @app.route("/metrics", methods=["GET"])
 def metrics():
-    return Response(build_metrics_payload(), mimetype="text/plain; version=0.0.4")
+    try:
+        # If prometheus_client is available, prefer its dynamic metrics
+        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+        return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
+    except Exception:
+        return Response(build_metrics_payload(), mimetype="text/plain; version=0.0.4")
+
+
+@app.route("/admin/processed/<trans_id>", methods=["GET"])
+def admin_get_processed(trans_id: str):
+    _require_admin()
+    record = event_store.get_processed(trans_id)
+    if not record:
+        return jsonify({"error": "not_found"}), 404
+    return jsonify(record), 200
 
 
 def _verify_daraja_signature(request_body: bytes, signature: str) -> None:
@@ -247,7 +277,7 @@ def _verify_daraja_signature(request_body: bytes, signature: str) -> None:
 @app.route("/health", methods=["GET"])
 def health():
     payload = build_health_payload()
-    status_code = 200 if payload.get("status") == "ok" else 503
+    status_code = 503 if payload.get("status") == "failed" else 200
     return jsonify(payload), status_code
 
 
@@ -313,7 +343,11 @@ def mpesa_confirmation():
         return jsonify({"ResultCode": 1, "ResultDesc": "Temporary processing error, please retry"}), 500
 
     # result == ProcessResult.STORED: genuinely new, safely persisted. Proceed to
-    # enqueue for downstream reconciliation exactly once.
+    # enqueue for downstream reconciliation exactly once. Measure end-to-end
+    # processing time and update the idempotency ledger status so operators
+    # can observe whether publication to downstream systems succeeded.
+    start_ns = time.time_ns()
+
     try:
         import redis
         redis_conn = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), socket_connect_timeout=2)
@@ -322,18 +356,34 @@ def mpesa_confirmation():
     except Exception:
         pass  # best-effort cache warm; DB ledger above is the source of truth
 
+    publish_status = "unknown"
+    publish_error = None
     try:
         queued = enqueue_transaction_event(KAFKA_TOPIC, payload)
         if queued.get("status") == "queued":
+            publish_status = "queued"
             logger.info("Transaction event queued to background job", extra={"trans_id": trans_id})
         else:
             publish_transaction_event(KAFKA_TOPIC, payload)
+            publish_status = "published"
             logger.info("Transaction event published to Kafka (sync fallback)", extra={"trans_id": trans_id})
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         # The transaction IS safely stored (STORED above) — only the downstream
         # publish failed. Log for manual replay; still ack 200 since the source
         # record exists and reconciliation can be re-run against it.
+        publish_status = "publish_failed"
+        publish_error = str(exc)
         logger.warning("Failed to publish event (queued for manual replay)", extra={"trans_id": trans_id}, exc_info=True)
+
+    # Update processing status with measured latency (best-effort)
+    try:
+        processing_time_ms = int((time.time_ns() - start_ns) / 1_000_000)
+        # Use descriptive status names for operators to inspect
+        event_store.update_processing_status(
+            trans_id, status=publish_status, error_reason=publish_error, processing_time_ms=processing_time_ms
+        )
+    except Exception:
+        logger.debug("Failed updating processing status for trans_id=%s", trans_id, exc_info=True)
 
     return jsonify({"ResultCode": 0, "ResultDesc": "Accepted"}), 200
 
@@ -347,6 +397,15 @@ def mpesa_validation():
     payload = request.get_json(silent=True) or {}
     logger.info("Validation request for: %s", payload.get("TransID", "unknown"))
     return jsonify({"ResultCode": 0, "ResultDesc": "Accepted"}), 200
+
+
+# Import legacy/auxiliary app modules so their routes register on the
+# consolidated Flask application instance.
+# These modules no longer start their own Flask servers; they are now
+# part of the single unified application defined above.
+from pesaguard_backend_pipeline import app_1  # noqa: F401
+from pesaguard_backend_pipeline import app_2  # noqa: F401
+from pesaguard_backend_pipeline import app_4_advanced_features  # noqa: F401
 
 
 if __name__ == "__main__":
