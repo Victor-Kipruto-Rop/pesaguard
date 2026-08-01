@@ -1,4 +1,4 @@
-"""Robust alert template loader and renderer for localized operational notifications."""
+"""Load alert templates from the backend alerting templates directory."""
 
 from __future__ import annotations
 
@@ -8,11 +8,9 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
-from localization_utils import normalise_locale
+from pesaguard_backend_pipeline.localization_utils import normalise_locale
 
-logger = logging.getLogger("pesaguard.templates")
-
-TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "alerting" / "templates"
+TEMPLATES_DIR = Path(__file__).resolve().parent / "alerting" / "templates"
 
 DEFAULT_FIELDS_EN: Dict[str, str] = {
     "title": "PesaGuard discrepancy detected",

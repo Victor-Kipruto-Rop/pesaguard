@@ -16,6 +16,21 @@ from sqlalchemy.orm import sessionmaker
 
 logger = logging.getLogger("pesaguard.background_tasks")
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from pesaguard_backend_pipeline.models import Base
+
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
+REPORTS_DATABASE_URL = os.getenv("REPORTS_DATABASE_URL", DATABASE_URL)
+reports_engine = create_engine(REPORTS_DATABASE_URL, pool_pre_ping=True)
+ReportsSession = sessionmaker(bind=reports_engine, expire_on_commit=False)
+
+try:
+    Base.metadata.create_all(reports_engine)
+except Exception:
+    pass
+
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 RQ_QUEUE_NAME = os.getenv("RQ_QUEUE_NAME", "transaction_events")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
@@ -119,8 +134,8 @@ def enqueue_transaction_event(topic: str, payload: dict) -> Dict[str, Any]:
 
 
 def _publish_transaction_event(topic: str, payload: dict) -> None:
-    """Worker job function that wraps synchronous Kafka publishing."""
-    from producer import publish_transaction_event
+    from pesaguard_backend_pipeline.producer import publish_transaction_event
+
     publish_transaction_event(topic, payload)
 
 
@@ -150,13 +165,21 @@ def generate_reports(report_type: str = "daily", tenant_id: Optional[str] = None
         tenant_id: Optional single-tenant filter override.
     """
     try:
-        from models import Discrepancy, Report
-        from tenant_settings import TenantSettingsStore
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from pesaguard_backend_pipeline.models import Report, Discrepancy
+        from pesaguard_backend_pipeline.tenant_settings import TenantSettingsStore
+        from datetime import datetime, timedelta
+        import uuid
+        import os
     except Exception as exc:
         logger.error("Failed to load required dependencies for report generation: %s", exc)
         return {"status": "failed", "error": str(exc)}
 
-    now = datetime.now(timezone.utc)
+    core_engine = create_engine(DATABASE_URL)
+    Session = sessionmaker(bind=core_engine)
+
+    now = datetime.utcnow()
     if report_type == "daily":
         period_end = now.replace(hour=0, minute=0, second=0, microsecond=0)
         period_start = period_end - timedelta(days=1)
@@ -176,20 +199,32 @@ def generate_reports(report_type: str = "daily", tenant_id: Optional[str] = None
             logger.exception("Failed determining tenant list for report generation: %s", exc)
             return {"status": "failed", "error": "could_not_determine_tenant_list"}
 
-    created_count = 0
-    failed_tenants: List[str] = []
+    with Session() as session, ReportsSession() as reports_session:
+        for tenant in tenants:
+            try:
+                count = (
+                    session.query(Discrepancy)
+                    .filter(Discrepancy.tenant_id == tenant)
+                    .filter(Discrepancy.detected_at >= period_start)
+                    .filter(Discrepancy.detected_at < period_end)
+                    .count()
+                )
+                report = Report(
+                    id=f"rpt_{uuid.uuid4().hex[:12]}",
+                    tenant_id=tenant,
+                    report_type=report_type,
+                    period_start=period_start,
+                    period_end=period_end,
+                    content={"discrepancy_count": count},
+                    status="generated",
+                )
+                reports_session.add(report)
+                created += 1
+            except Exception:
+                reports_session.rollback()
+                continue
 
-    # Execute isolated per-tenant report generation transactions
-    for tenant in tenants:
-        session = TaskSessionLocal()
-        try:
-            discrepancy_count = (
-                session.query(Discrepancy)
-                .filter(Discrepancy.tenant_id == tenant)
-                .filter(Discrepancy.detected_at >= period_start)
-                .filter(Discrepancy.detected_at < period_end)
-                .count()
-            )
+            reports_session.commit()
 
             report = Report(
                 id=f"rpt_{int(datetime.now(timezone.utc).timestamp())}_{uuid.uuid4().hex[:6]}",

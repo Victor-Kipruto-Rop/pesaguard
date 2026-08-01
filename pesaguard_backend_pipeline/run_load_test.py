@@ -15,7 +15,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Set, Tuple
 
-from reconciliation_engine import evaluate_transaction
+from pesaguard_backend_pipeline.reconciliation_engine import evaluate_transaction
 
 
 def generate_mock_event_pair(index: int, force_anomaly: str | None = None) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:

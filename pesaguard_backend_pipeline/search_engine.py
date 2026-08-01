@@ -14,8 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from sqlalchemy import and_, not_, or_
 from sqlalchemy.orm import Session
-
-from models import Discrepancy
+from pesaguard_backend_pipeline.models import Discrepancy
 
 logger = logging.getLogger("pesaguard.search")
 

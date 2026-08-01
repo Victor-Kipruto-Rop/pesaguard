@@ -8,8 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
-
-from models import OnCallRotation
+from pesaguard_backend_pipeline.models import OnCallRotation
 
 logger = logging.getLogger("pesaguard.on_call")
 
@@ -268,12 +267,26 @@ class OnCallService:
         message: str,
         escalation_level: int = 1,
     ) -> Dict[str, Any]:
-        """Identify active on-call operator and dispatch emergency alerts via SMS and Email."""
-        try:
-            from alerting import send_email_alert, send_sms_alert
-        except ImportError:
-            from alert_service import send_email_alert, send_sms_alert
-
+        """Notify on-call operator of escalation.
+        
+        Finds active on-call operator at specified escalation level
+        and sends alert via SMS/email/slack.
+        
+        Args:
+            tenant_id: Tenant identifier
+            incident_id: Unique incident ID
+            severity: Severity level (critical, warning, info)
+            message: Alert message
+            escalation_level: Which tier of on-call to notify (1=first line, 2=second, etc.)
+            
+        Returns:
+            Dict with notification status and operator contacted
+        """
+        from pesaguard_backend_pipeline.notifier import send_sms_alert, send_email_alert
+        import logging
+        logger = logging.getLogger("pesaguard.on_call")
+        
+        # Get active on-call operator at this escalation level
         active_ops = self.get_active_rotations(tenant_id, escalation_level=escalation_level)
         if not active_ops:
             logger.warning(

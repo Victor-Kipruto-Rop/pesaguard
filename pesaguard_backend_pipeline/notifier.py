@@ -23,8 +23,9 @@ try:
 except ImportError:
     HAS_AFRICAS_TALKING = False
 
-from alert_template_loader import load_alert_fields, render_message_template
-from localization_utils import format_ke_currency, format_ke_datetime, normalise_locale
+from pesaguard_backend_pipeline.africas_talking import AfricasTalkingClient
+from pesaguard_backend_pipeline.alert_template_loader import load_alert_fields, render_message_template
+from pesaguard_backend_pipeline.localization_utils import format_ke_currency, format_ke_datetime, normalise_locale
 
 logger = logging.getLogger("pesaguard.alerting")
 

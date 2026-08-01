@@ -11,11 +11,11 @@ from sqlalchemy.orm import sessionmaker
 
 import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "..", "storage", "models"))
-from models import Base, Transaction, Discrepancy  # noqa: E402
+from pesaguard_backend_pipeline.models import Base, Transaction, Discrepancy  # noqa: E402
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
 
-from app import app
+from pesaguard_backend_pipeline.app import app
 engine = create_engine(DATABASE_URL)
 Session = sessionmaker(bind=engine)
 
@@ -38,6 +38,9 @@ def _require_dashboard_auth():
 
 @app.before_request
 def _enforce_auth():
+    """Only enforce auth on /api/ routes; allow other paths to pass through."""
+    if not request.path.startswith("/api/"):
+        return None
     _require_dashboard_auth()
 
 

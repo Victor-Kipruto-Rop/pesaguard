@@ -10,8 +10,8 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
-from models import Discrepancy
-from notifier import send_email_alert, send_slack_alert, send_sms_alert
+from pesaguard_backend_pipeline.models import Discrepancy
+from pesaguard_backend_pipeline.notifier import send_email_alert, send_slack_alert, send_sms_alert
 
 logger = logging.getLogger("pesaguard.alerting.service")
 

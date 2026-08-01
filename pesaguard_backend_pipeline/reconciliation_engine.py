@@ -11,7 +11,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Set
 
-from event_store import ProcessResult
+from pesaguard_backend_pipeline.event_store import ProcessResult
 
 logger = logging.getLogger("pesaguard.reconciliation_engine")
 

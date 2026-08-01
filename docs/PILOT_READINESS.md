@@ -34,7 +34,7 @@ This document outlines the 6 critical features implemented for PesaGuard pilot l
 ```bash
 # 1. Apply migration
 cd /opt/pesaguard
-alembic upgrade head
+alembic -c pesaguard_backend_pipeline/alembic.ini upgrade head
 
 # 2. Verify constraint
 psql -c "\\d transactions" | grep uq_transaction

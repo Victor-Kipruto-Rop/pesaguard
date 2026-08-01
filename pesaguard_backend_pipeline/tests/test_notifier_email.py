@@ -2,8 +2,8 @@ import os
 import sys
 sys.path.insert(0, 'pesaguard_backend_pipeline')
 
-import notifier
-from notifier import send_email_alert, send_sms_alert
+from pesaguard_backend_pipeline import notifier
+from pesaguard_backend_pipeline.notifier import send_email_alert, send_sms_alert
 
 
 class DummySMTP:
@@ -101,7 +101,7 @@ def test_format_alert_text_normalizes_unknown_locale_to_english():
 
 
 def test_alerting_service_resolves_locale_from_tenant_settings(monkeypatch):
-    from alerting_service import AlertingService
+    from pesaguard_backend_pipeline.alerting_service import AlertingService
 
     service = AlertingService(session=None, tenant_settings={
         'default': {'preferred_locale': 'en'},

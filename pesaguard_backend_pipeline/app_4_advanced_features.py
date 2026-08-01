@@ -28,22 +28,24 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from webhook_manager import WebhookManager
-from auth_rbac import AuthRBAC, require_auth, require_tenant_access, get_current_user
-from rate_limiter import rate_limit, get_rate_limit_status
-from email_service import EmailService
-from escalation_engine import EscalationEngine
-from on_call_service import OnCallService
-from search_engine import AdvancedSearchEngine
-from action_audit import ActionAuditEntry
-from models import Base, Discrepancy, Report, DeadLetter
-from tenant_settings import TenantSettingsStore
+from pesaguard_backend_pipeline.webhook_manager import WebhookManager
+from pesaguard_backend_pipeline.auth_rbac import AuthRBAC, require_auth, require_tenant_access, get_current_user
+from pesaguard_backend_pipeline.rate_limiter import rate_limit, get_rate_limit_status
+from pesaguard_backend_pipeline.email_service import EmailService
+from pesaguard_backend_pipeline.escalation_engine import EscalationEngine
+from pesaguard_backend_pipeline.on_call_service import OnCallService
+from pesaguard_backend_pipeline.search_engine import AdvancedSearchEngine
+from pesaguard_backend_pipeline.action_audit import ActionAuditEntry
+from pesaguard_backend_pipeline.models import Base, Discrepancy, Report, DeadLetter
+from pesaguard_backend_pipeline.tenant_settings import TenantSettingsStore
 
 configure_logging = lambda: None  # Import from logging_utils if available
 logger = logging.getLogger("pesaguard.advanced_features")
 
-from app import app
+from pesaguard_backend_pipeline.app import app
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
+REPORTS_DATABASE_URL = os.getenv("REPORTS_DATABASE_URL", DATABASE_URL)
+AUDIT_DATABASE_URL = os.getenv("AUDIT_DATABASE_URL", DATABASE_URL)
 
 
 def create_db_engine(url: str):
@@ -58,7 +60,30 @@ def create_db_engine(url: str):
 
 
 engine = create_db_engine(DATABASE_URL)
-SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+reports_engine = create_db_engine(REPORTS_DATABASE_URL)
+audit_engine = create_db_engine(AUDIT_DATABASE_URL)
+
+
+def _reports_url() -> str:
+    return os.getenv("REPORTS_DATABASE_URL") or os.getenv("DATABASE_URL") or DATABASE_URL
+
+
+def _audit_url() -> str:
+    return os.getenv("AUDIT_DATABASE_URL") or os.getenv("DATABASE_URL") or DATABASE_URL
+
+
+def SessionLocal(read_only: bool | None = None):
+    """Create a session. Respects read_only parameter for compatibility with read replicas."""
+    # app_4_advanced_features doesn't use replica engines, so read_only is ignored
+    return sessionmaker(bind=engine, expire_on_commit=False)()
+
+
+def ReportsSessionLocal():
+    return sessionmaker(bind=create_db_engine(_reports_url()), expire_on_commit=False)()
+
+
+def AuditSessionLocal():
+    return sessionmaker(bind=create_db_engine(_audit_url()), expire_on_commit=False)()
 
 email_service = EmailService(
     smtp_server=os.getenv("SMTP_SERVER", "localhost"),
@@ -80,7 +105,12 @@ def resolve_email_locale(tenant_id: str | None, user_id: str | None = None, sett
 
 
 def _record_action_audit(session, tenant_id: str, actor: str, action: str, details: dict | None = None) -> None:
+    audit_session = None
     try:
+        if AUDIT_DATABASE_URL != DATABASE_URL:
+            audit_session = AuditSessionLocal()
+            session = audit_session
+
         # FIXED: `uuid` was used here but never imported anywhere in the file.
         # Every call to this function raised NameError, which was silently
         # swallowed by the except below — meaning NO action audit entries
@@ -97,6 +127,12 @@ def _record_action_audit(session, tenant_id: str, actor: str, action: str, detai
         session.commit()
     except Exception:
         logger.exception("Failed to persist audit entry")
+    finally:
+        if audit_session is not None:
+            try:
+                audit_session.close()
+            except Exception:
+                pass
 
 
 def _incident_belongs_to_tenant(session, incident_id: str, tenant_id: str) -> Optional[Discrepancy]:
@@ -118,7 +154,14 @@ def _incident_belongs_to_tenant(session, incident_id: str, tenant_id: str) -> Op
 
 @app.before_request
 def _ensure_tables():
-    Base.metadata.create_all(engine)
+    if os.getenv("USE_IN_MEMORY_TEST_DB") == "true":
+        return None
+    try:
+        Base.metadata.create_all(engine)
+        Base.metadata.create_all(reports_engine)
+        Base.metadata.create_all(audit_engine)
+    except Exception:
+        pass
 
 
 @app.after_request
@@ -290,7 +333,7 @@ def create_webhook():
     """Register a new webhook for a tenant."""
     data = request.json or {}
     tenant_id = data.get("tenant_id")
-    session = SessionLocal()
+    session = AuditSessionLocal()
 
     try:
         webhook_mgr = WebhookManager(session)
@@ -319,7 +362,7 @@ def create_webhook():
 def list_webhooks():
     """List all webhooks for a tenant."""
     tenant_id = request.args.get("tenant_id")
-    session = SessionLocal()
+    session = AuditSessionLocal()
 
     try:
         webhook_mgr = WebhookManager(session)
@@ -346,7 +389,7 @@ def list_webhooks():
 def update_webhook(webhook_id):
     """Update webhook configuration."""
     data = request.json or {}
-    session = SessionLocal()
+    session = AuditSessionLocal()
 
     try:
         webhook_mgr = WebhookManager(session)
@@ -368,7 +411,7 @@ def update_webhook(webhook_id):
 def get_webhook_deliveries(webhook_id):
     """Get delivery history for a webhook."""
     limit = request.args.get("limit", 50, type=int)
-    session = SessionLocal()
+    session = ReportsSessionLocal()
 
     try:
         webhook_mgr = WebhookManager(session)
@@ -575,7 +618,7 @@ def send_reconciliation_email():
     tenant_id = data.get("tenant_id")
     recipient = data.get("recipient_email")
     report_data = data.get("report_data", {})
-    session = SessionLocal()
+    session = AuditSessionLocal()
 
     try:
         current_user = get_current_user()
@@ -607,7 +650,7 @@ def send_escalation_email():
     tenant_id = data.get("tenant_id")
     recipient = data.get("recipient_email")
     incident = data.get("incident_data", {})
-    session = SessionLocal()
+    session = AuditSessionLocal()
 
     try:
         current_user = get_current_user()
@@ -637,7 +680,7 @@ def get_email_history():
     """Get email notification history for a tenant."""
     tenant_id = request.args.get("tenant_id")
     limit = request.args.get("limit", 50, type=int)
-    session = SessionLocal()
+    session = AuditSessionLocal()
 
     try:
         history = email_service.get_email_history(session, tenant_id, limit)
@@ -764,7 +807,7 @@ def public_get_reports(tenant_id: str):
     """Return generated reports for the tenant (daily/weekly)."""
     limit = request.args.get("limit", 50, type=int)
     offset = request.args.get("offset", 0, type=int)
-    session = SessionLocal()
+    session = ReportsSessionLocal()
 
     try:
         q = (
@@ -799,7 +842,7 @@ def public_get_reports(tenant_id: str):
 # RATE LIMITED BULK OPERATIONS
 # ============================================================================
 
-@app.route("/bulk/assign", methods=["POST"])
+@app.route("/bulk/assign", methods=["POST"], endpoint="bulk_assign_incidents_advanced")
 @require_auth("bulk:operations")
 @rate_limit(max_requests_per_minute=5, tokens_per_request=1, endpoint_name="bulk_assign")
 @require_tenant_access()
@@ -843,7 +886,7 @@ def bulk_assign_incidents():
         session.close()
 
 
-@app.route("/bulk/escalate", methods=["POST"])
+@app.route("/bulk/escalate", methods=["POST"], endpoint="bulk_escalate_incidents_advanced")
 @require_auth("bulk:operations")
 @rate_limit(max_requests_per_minute=3, tokens_per_request=2, endpoint_name="bulk_escalate")
 @require_tenant_access()

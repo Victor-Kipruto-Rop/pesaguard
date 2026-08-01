@@ -67,12 +67,12 @@ If running Prometheus in Docker compose or locally, point the `scrape_configs` `
 Admin CLI
 ---------
 
-A small CLI to query processed transaction records directly is available at `scripts/admin_query.py`.
+A small CLI to query processed transaction records directly is available at `pesaguard_backend_pipeline/scripts/admin_query.py`.
 Example:
 
 ```bash
-python scripts/admin_query.py T12345 T67890
-python scripts/admin_query.py --file trans_ids.txt
+python -m pesaguard_backend_pipeline.scripts.admin_query T12345 T67890
+python -m pesaguard_backend_pipeline.scripts.admin_query --file trans_ids.txt
 ```
 
 CI

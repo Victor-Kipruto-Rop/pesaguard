@@ -16,9 +16,8 @@ from email.mime.text import MIMEText
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
-
-from localization_utils import format_ke_currency, format_ke_datetime, normalise_locale
-from models import EmailNotification
+from pesaguard_backend_pipeline.localization_utils import format_ke_currency, format_ke_datetime, normalise_locale
+from pesaguard_backend_pipeline.models import EmailNotification
 
 logger = logging.getLogger("pesaguard.email")
 

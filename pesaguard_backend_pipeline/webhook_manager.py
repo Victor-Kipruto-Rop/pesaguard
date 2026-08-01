@@ -22,8 +22,7 @@ from urllib.parse import urlparse
 
 import requests
 from sqlalchemy.orm import Session
-
-from models import WebhookConfig, WebhookDelivery
+from pesaguard_backend_pipeline.models import WebhookConfig, WebhookDelivery, Discrepancy
 
 logger = logging.getLogger("pesaguard.webhooks")
 

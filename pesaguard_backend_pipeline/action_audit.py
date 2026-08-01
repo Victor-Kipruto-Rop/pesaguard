@@ -10,6 +10,7 @@ from pesaguard_backend_pipeline.models import Base
 
 class ActionAuditEntry(Base):
     __tablename__ = "action_audit_entries"
+    __table_args__ = {"extend_existing": True}
 
     id = Column(String, primary_key=True)
     tenant_id = Column(String, nullable=False, index=True)  # Indexed for multi-tenant query performance

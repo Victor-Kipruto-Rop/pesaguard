@@ -26,7 +26,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
-from models import Base, Transaction, ProcessedTransaction
+from pesaguard_backend_pipeline.models import Base, Transaction, ProcessedTransaction
 
 logger = logging.getLogger("pesaguard.event_store")
 
@@ -400,7 +400,7 @@ class EventStore:
         but genuine failures here are logged, not silently swallowed.
         """
         try:
-            from models import DeadLetter
+            from pesaguard_backend_pipeline.models import DeadLetter
 
             self._ensure_ready()
             with self.Session() as session:

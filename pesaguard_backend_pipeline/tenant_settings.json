@@ -7,29 +7,6 @@
     "cross_border_transfer_allowed": false,
     "deployment_region": "ke-1",
     "log_region": "ke-1",
-    "preferred_locale": "en",
-    "thresholds": {
-      "critical": 5000,
-      "warning": 1000
-    }
-  },
-  "tenant-a": {
-    "alert_channels": [
-      "slack"
-    ],
-    "backup_region": "ke-1",
-    "cross_border_transfer_allowed": false,
-    "deployment_region": "ke-1",
-    "key": "value",
-    "log_region": "ke-1",
-    "preferred_locale": "sw",
-    "tenant_id": "tenant-a",
-    "thresholds": {
-      "critical": 5000,
-      "warning": 1000
-    },
-    "user_locale_overrides": {
-      "user-2": "en"
-    }
+    "cross_border_transfer_allowed": false
   }
 }
