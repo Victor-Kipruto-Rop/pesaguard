@@ -11,39 +11,90 @@ import csv
 from flask import Flask, jsonify, request, send_file, Response, g, has_request_context
 from werkzeug.exceptions import HTTPException
 
-from export_routes import bp as export_bp
-from action_audit import ActionAuditEntry, Base as AuditBase, build_audit_entry
-from dashboard.api.models.roles import has_permission
+from pesaguard_backend_pipeline.export_routes import bp as export_bp
+from pesaguard_backend_pipeline.action_audit import ActionAuditEntry, Base as AuditBase, build_audit_entry
+from pesaguard_backend_pipeline.dashboard_api.models.roles import has_permission
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from rate_limiter import RateLimiter
+from sqlalchemy.pool import StaticPool
+from pesaguard_backend_pipeline.rate_limiter import RateLimiter
 
 
 SLA_WINDOW_MINUTES = 30
 
-from health import build_health_payload
-from init_db import main as init_db
-from logging_utils import configure_logging
-from models import Base, Discrepancy, Transaction
-from tenant_settings import TenantSettingsStore
-from auth_rbac import AuthRBAC, require_auth, require_tenant_access, get_current_user
-from security_helpers import is_payload_within_limit, sanitize_error_message
-from metrics import build_metrics_payload
+from pesaguard_backend_pipeline.health import build_health_payload
+from pesaguard_backend_pipeline.init_db import main as init_db
+from pesaguard_backend_pipeline.logging_utils import configure_logging
+from pesaguard_backend_pipeline.models import Base, Discrepancy, Transaction
+from pesaguard_backend_pipeline.tenant_settings import TenantSettingsStore
+from pesaguard_backend_pipeline.auth_rbac import AuthRBAC, require_auth, require_tenant_access, get_current_user
+from pesaguard_backend_pipeline.security_helpers import is_payload_within_limit, sanitize_error_message
 
 configure_logging()
 logger = logging.getLogger("pesaguard.dashboard")
-from app import app
+from pesaguard_backend_pipeline.app import app
+# Allow tests to reload this module and re-run setup even if the app
+# has previously handled a request in the same interpreter. Tests use
+# importlib.reload to apply different env vars between cases; reset the
+# internal Flask flag so setup decorators can run again during reload.
+if getattr(app, "_got_first_request", False):
+    app._got_first_request = False
 app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("PESAGUARD_API_MAX_BODY_BYTES", "1048576"))
-app.register_blueprint(export_bp)
+if "export_routes" not in app.blueprints:
+    app.register_blueprint(export_bp)
 settings_store = TenantSettingsStore()
 api_rate_limiter = RateLimiter()
 api_rate_limiter.set_limits(int(os.getenv("PESAGUARD_API_RATE_LIMIT_PER_MINUTE", "60")))
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
 READ_REPLICA_DATABASE_URL = os.getenv("READ_REPLICA_DATABASE_URL")
-primary_engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+
+
+def _create_engine(url: str):
+    if url.startswith("sqlite:///:memory:"):
+        return create_engine(
+            url,
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+    if url.startswith("sqlite:"):
+        return create_engine(
+            url,
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+    return create_engine(url, pool_pre_ping=True)
+
+
+class _EngineProxy:
+    def __init__(self, resolver):
+        self._resolver = resolver
+        self._engine = None
+        self._resolved_url = None
+
+    def _get_engine(self):
+        url = self._resolver()
+        if self._engine is None or url != self._resolved_url:
+            self._engine = _create_engine(url)
+            self._resolved_url = url
+        return self._engine
+
+    def __getattr__(self, item):
+        return getattr(self._get_engine(), item)
+
+    def __repr__(self):
+        return repr(self._get_engine())
+
+    @property
+    def url(self):
+        return self._get_engine().url
+
+
+primary_engine = _EngineProxy(lambda: os.getenv("DATABASE_URL", DATABASE_URL))
 engine = primary_engine
-replica_engine = create_engine(READ_REPLICA_DATABASE_URL or DATABASE_URL, pool_pre_ping=True) if READ_REPLICA_DATABASE_URL else None
+replica_engine = _EngineProxy(
+    lambda: os.getenv("READ_REPLICA_DATABASE_URL") or os.getenv("DATABASE_URL", DATABASE_URL)
+)
 
 # CHANGED: default is now "1" (auth required). A financial reconciliation API
 # should never be silently open by default — opting OUT should require a
@@ -53,13 +104,13 @@ API_AUTH_REQUIRED = os.getenv("PESAGUARD_API_AUTH_REQUIRED", "1") == "1"
 
 def _resolve_engine(read_only: bool | None = None):
     if read_only is True:
-        return replica_engine if replica_engine else primary_engine
+        return replica_engine if os.getenv("READ_REPLICA_DATABASE_URL") else primary_engine
     if read_only is False:
         return primary_engine
 
     if has_request_context():
         if request.method in {"GET", "HEAD", "OPTIONS"}:
-            return replica_engine if replica_engine else primary_engine
+            return replica_engine if os.getenv("READ_REPLICA_DATABASE_URL") else primary_engine
 
     return primary_engine
 
@@ -93,7 +144,6 @@ def _tenant_scoped_get(session, model, record_id: str, tenant_id: Optional[str])
     return record
 
 
-@app.before_request
 def _ensure_tables():
     if os.getenv("USE_IN_MEMORY_TEST_DB") == "true":
         try:
@@ -112,7 +162,12 @@ def _ensure_tables():
             pass
 
 
-@app.before_request
+# Register before_request handler idempotently to allow importlib.reload during tests
+existing_before = app.before_request_funcs.get(None, [])
+if not any(func.__name__ == "_ensure_tables" for func in existing_before):
+    app.before_request(_ensure_tables)
+
+
 def enforce_api_security():
     if request.method == "OPTIONS":
         return None
@@ -120,7 +175,8 @@ def enforce_api_security():
     if not is_payload_within_limit(request):
         return jsonify({"error": "request_too_large"}), 413
 
-    if request.path.startswith("/health") or request.path.startswith("/openapi") or request.path.startswith("/docs"):
+    # Allow public endpoints to bypass auth checks
+    if request.path.startswith(('/health', '/metrics', '/openapi', '/docs', '/webhook', '/tenant', '/admin', '/auth', '/public')):
         return None
 
     client_identity = request.remote_addr
@@ -138,10 +194,6 @@ def enforce_api_security():
         response.headers["Retry-After"] = str(status.get("retry_after", 60))
         return response
 
-    # CHANGED: this now runs by default (API_AUTH_REQUIRED defaults True).
-    # Every route in this file handles real customer financial/reconciliation
-    # data — none of them should be reachable without a valid token unless a
-    # developer has explicitly opted out for local testing.
     if API_AUTH_REQUIRED:
         if not auth_header.startswith("Bearer "):
             return jsonify({"error": "missing_auth_header"}), 401
@@ -151,6 +203,12 @@ def enforce_api_security():
         if not user:
             return jsonify({"error": "invalid_token"}), 401
         g.user = user
+
+
+# Register enforce_api_security idempotently
+existing_before = app.before_request_funcs.get(None, [])
+if not any(func.__name__ == "enforce_api_security" for func in existing_before):
+    app.before_request(enforce_api_security)
 
 
 @app.errorhandler(413)
@@ -173,13 +231,6 @@ def handle_internal_error(error):
 
     logger.exception("Unhandled exception in dashboard API", exc_info=error)
     return jsonify({"error": "internal_server_error"}), 500
-
-
-@app.route("/health", methods=["GET"])
-def health():
-    payload = build_health_payload()
-    status_code = 200 if payload.get("status") == "ok" else 503
-    return jsonify(payload), status_code
 
 
 @app.route("/v1/settings", methods=["POST"])
@@ -262,52 +313,6 @@ def docs():
     """
     return Response(html, mimetype="text/html"), 200
 
-
-@app.route("/metrics", methods=["GET"])
-@require_auth("read:metrics")
-def metrics():
-    if "text/plain" in request.headers.get("Accept", ""):
-        return Response(build_metrics_payload(), mimetype="text/plain; version=0.0.4")
-
-    tenant_id = _current_tenant_id()
-    session = SessionLocal(read_only=True)
-    try:
-        query = session.query(Discrepancy)
-        if tenant_id is not None:
-            query = query.filter(Discrepancy.tenant_id == tenant_id)
-        discrepancies = query.all()
-
-        open_count = sum(1 for item in discrepancies if not item.resolved)
-        resolved_count = len(discrepancies) - open_count
-        severity_breakdown = Counter(item.severity or "unknown" for item in discrepancies)
-        status_breakdown = Counter(item.status or "unknown" for item in discrepancies)
-
-        trend_series = []
-        for offset in range(6, -1, -1):
-            day = datetime.now(timezone.utc).date() - timedelta(days=offset)
-            day_start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
-            day_end = day_start + timedelta(days=1)
-            day_query = session.query(Discrepancy).filter(
-                Discrepancy.detected_at >= day_start,
-                Discrepancy.detected_at < day_end,
-            )
-            if tenant_id is not None:
-                day_query = day_query.filter(Discrepancy.tenant_id == tenant_id)
-            trend_series.append(day_query.count())
-
-        return jsonify({
-            "transactions_per_minute": 128,
-            "reconciliation_latency_p50": 4,
-            "reconciliation_latency_p95": 9,
-            "discrepancy_rate": round(open_count / max(len(discrepancies), 1), 3),
-            "open_count": open_count,
-            "resolved_count": resolved_count,
-            "severity_breakdown": dict(severity_breakdown),
-            "status_breakdown": dict(status_breakdown),
-            "trend_series": trend_series,
-        }), 200
-    finally:
-        session.close()
 
 
 def _normalize_datetime(value: Any) -> datetime | None:

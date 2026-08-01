@@ -9,3 +9,4 @@ psycopg2-binary==2.9.9
 requests==2.34.2
 redis==5.0.0
 rq==1.2.0
+PyJWT==2.13.0

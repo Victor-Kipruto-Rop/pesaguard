@@ -6,12 +6,68 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from flask import Blueprint, Response, jsonify, request
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-from models import Discrepancy
-from models import DeadLetter, InternalRecord, Report, Transaction
-from action_audit import ActionAuditEntry
+from pesaguard_backend_pipeline.models import Discrepancy
+from pesaguard_backend_pipeline.models import DeadLetter, InternalRecord, Report, Transaction
+from pesaguard_backend_pipeline.action_audit import ActionAuditEntry
+
+
+def _create_engine(url: str):
+    if url.startswith("sqlite:///:memory:"):
+        return create_engine(
+            url,
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+    if url.startswith("sqlite:"):
+        return create_engine(
+            url,
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+    return create_engine(url, pool_pre_ping=True)
+
+
+REPORTS_DATABASE_URL = os.getenv(
+    "REPORTS_DATABASE_URL",
+    os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard"),
+)
+AUDIT_DATABASE_URL = os.getenv(
+    "AUDIT_DATABASE_URL",
+    os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard"),
+)
+
+
+def _fallback_database_engine():
+    try:
+        from pesaguard_backend_pipeline import app_2 as dashboard_app
+
+        return dashboard_app.primary_engine
+    except Exception:
+        return _create_engine(os.getenv("DATABASE_URL") or REPORTS_DATABASE_URL)
+
+
+def REPORTS_SESSION():
+    report_url = os.getenv("REPORTS_DATABASE_URL")
+    if report_url:
+        engine = _create_engine(report_url)
+    else:
+        engine = _fallback_database_engine()
+    return sessionmaker(bind=engine, expire_on_commit=False)()
+
+
+def AUDIT_SESSION():
+    audit_url = os.getenv("AUDIT_DATABASE_URL")
+    if audit_url:
+        engine = _create_engine(audit_url)
+    else:
+        engine = _fallback_database_engine()
+    return sessionmaker(bind=engine, expire_on_commit=False)()
 
 bp = Blueprint("export_routes", __name__, url_prefix="/v1")
 
@@ -22,9 +78,7 @@ def export_csv():
     if not tenant_id:
         return jsonify({"error": "tenant_id is required"}), 400
 
-    from app_2 import SessionLocal
-
-    session = SessionLocal()
+    session = REPORTS_SESSION()
     try:
         rows = session.query(Discrepancy).filter(Discrepancy.tenant_id == tenant_id)
         if request.args.get("from"):
@@ -55,7 +109,7 @@ def export_csv():
 @bp.route("/customers/<tenant_id>/deadletters", methods=["GET"])
 def customer_deadletters(tenant_id: str):
     """Return dead-letter entries for a tenant."""
-    from app_2 import SessionLocal
+    from pesaguard_backend_pipeline.app_2 import SessionLocal
 
     session = SessionLocal()
     try:
@@ -75,9 +129,7 @@ def customer_deadletters(tenant_id: str):
 @bp.route("/customers/<tenant_id>/reports", methods=["GET"])
 def customer_reports(tenant_id: str):
     """List generated reports for a tenant."""
-    from app_2 import SessionLocal
-
-    session = SessionLocal()
+    session = REPORTS_SESSION()
     try:
         rows = session.query(Report).filter(Report.tenant_id == tenant_id).order_by(Report.period_start.desc()).all()
         items = [{
@@ -95,9 +147,7 @@ def customer_reports(tenant_id: str):
 @bp.route("/customers/<tenant_id>/audit", methods=["GET"])
 def customer_audit(tenant_id: str):
     """Return audit action entries for a tenant."""
-    from app_2 import SessionLocal
-
-    session = SessionLocal()
+    session = AUDIT_SESSION()
     try:
         rows = session.query(ActionAuditEntry).filter(ActionAuditEntry.tenant_id == tenant_id).order_by(ActionAuditEntry.created_at.desc()).limit(200).all()
         items = [{
@@ -115,7 +165,7 @@ def customer_audit(tenant_id: str):
 @bp.route("/customers/<tenant_id>/transactions", methods=["GET"])
 def customer_transactions(tenant_id: str):
     """Return recent transactions related to the tenant. Filtering is basic for pilot."""
-    from app_2 import SessionLocal
+    from pesaguard_backend_pipeline.app_2 import SessionLocal
 
     since = request.args.get("since")
     session = SessionLocal()
@@ -147,7 +197,7 @@ def customer_transaction_detail(tenant_id: str, trans_id: str):
     """Return the full record for a single transaction, including the raw
     Daraja payload and a best-effort matched internal record, for the
     transaction detail side panel."""
-    from app_2 import SessionLocal
+    from pesaguard_backend_pipeline.app_2 import SessionLocal
 
     session = SessionLocal()
     try:
