@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Set
 
 from event_store import ProcessResult
+from reconciliation_utils import normalize_daraja_event
 
 logger = logging.getLogger("pesaguard.reconciliation_engine")
 
@@ -35,6 +36,10 @@ def evaluate_transaction(
     Returns:
         Structured evaluation outcome dict
     """
+    normalized = normalize_daraja_event(event)
+    if normalized:
+        event = {**event, **normalized}
+
     trans_id = str(event.get("TransID") or event.get("trans_id") or "unknown").strip()
     duplicate = trans_id in seen_trans_ids
 
