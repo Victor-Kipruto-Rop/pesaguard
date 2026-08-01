@@ -15,11 +15,10 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Any, Optional, Callable
 
 import requests
-from sqlalchemy.orm import Session, attributes
-
-from models import EscalationRule, Discrepancy, OnCallRotation
-from email_service import EmailService
-from tenant_settings import TenantSettingsStore
+from sqlalchemy.orm import Session
+from pesaguard_backend_pipeline.models import EscalationRule, Discrepancy, OnCallRotation
+from pesaguard_backend_pipeline.email_service import EmailService
+from pesaguard_backend_pipeline.tenant_settings import TenantSettingsStore
 
 logger = logging.getLogger("pesaguard.escalation")
 
@@ -349,10 +348,19 @@ class EscalationEngine:
         logger.info("Deleted escalation rule_id=%s", rule_id)
         return {"status": "deleted"}
 
-    def check_webhook_health(self, tenant_id: str, webhook_id: Optional[str] = None) -> Dict[str, Any]:
-        """Evaluate recent webhook execution failure rates and trigger health alerts if degraded."""
-        from models import WebhookDelivery
-
+    def check_webhook_health(self, tenant_id: str, webhook_id: str = None) -> Dict[str, Any]:
+        """Check health of webhooks and escalate if failures detected.
+        
+        Monitors WebhookDelivery table for recent failures:
+          - Recent failed deliveries (attempt_count > 0)
+          - Dead letter queue accumulation
+          - Webhook timeout patterns
+        
+        Escalates if failure rate exceeds threshold (default 10%).
+        """
+        from pesaguard_backend_pipeline.models import WebhookDelivery, DeadLetter
+        from datetime import datetime, timezone, timedelta
+        
         now = datetime.now(timezone.utc)
         check_window = now - timedelta(minutes=30)
 
@@ -409,9 +417,18 @@ class EscalationEngine:
         return result
 
     def check_queue_backlog(self, tenant_id: str) -> Dict[str, Any]:
-        """Monitor event processing queues and escalate if backlog thresholds are exceeded."""
-        from models import DeadLetter
-
+        """Check for event queue backlog and escalate if processing lag detected.
+        
+        Monitors reconciliation job performance:
+          - Kafka consumer lag (if applicable)
+          - Dead letter queue size
+          - Processing latency
+        
+        Escalates if backlog exceeds threshold (default 1000 messages or 5 min lag).
+        """
+        from pesaguard_backend_pipeline.models import DeadLetter
+        from datetime import datetime, timezone, timedelta
+        
         now = datetime.now(timezone.utc)
         check_window = now - timedelta(minutes=5)
 
@@ -478,3 +495,11 @@ class EscalationEngine:
             "priority": rule.priority,
             "created_at": rule.created_at.isoformat() if rule.created_at else None,
         }
+
+
+# Some tests (which run modules in different import contexts) monkeypatch
+# the short module name `escalation_engine.EmailService`. Ensure the
+# module is also available under that short name so monkeypatch targets
+# work regardless of how the test runner imported this package.
+import sys
+sys.modules.setdefault("escalation_engine", sys.modules[__name__])

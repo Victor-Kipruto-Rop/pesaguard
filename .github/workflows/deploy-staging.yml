@@ -1,85 +1,80 @@
-name: Deploy to Staging
+name: Deploy to staging
 
 on:
   push:
     branches: [ staging ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: true
 
 jobs:
-  test-and-deploy:
+  test:
     runs-on: ubuntu-latest
-
-    services:
-      postgres:
-        image: postgres:15-alpine
-        env:
-          POSTGRES_USER: pesaguard
-          POSTGRES_PASSWORD: pesaguard
-          POSTGRES_DB: pesaguard_staging
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update && sudo apt-get install -y libpq-dev gcc
-
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          elif [ -f pesaguard_backend_pipeline/requirements.txt ]; then
-            pip install -r pesaguard_backend_pipeline/requirements.txt
-          else
-            pip install Flask==3.1.0 SQLAlchemy==2.0.38 psycopg2-binary==2.9.10 redis==5.2.1 rq==2.1.0 pytest==8.3.4 requests==2.32.3
-          fi
-
-      - name: Run backend integration tests
+          pip install -r pesaguard_backend_pipeline/requirements_3.txt
+      - name: Run backend tests
         env:
           PYTHONPATH: .
-          DATABASE_URL: postgresql://pesaguard:pesaguard@localhost:5432/pesaguard_staging
-          REDIS_URL: redis://localhost:6379/0
-          DARAJA_SHARED_SECRET: staging_ci_secret_key
-          PESAGUARD_ALLOW_UNRESTRICTED_WEBHOOK_SOURCE: 1
-        run: |
-          pytest -v --tb=short
+        run: pytest pesaguard_backend_pipeline/tests/ -q --tb=short
 
-      - name: Trigger Staging Deployment (Render / Webhook / SSH)
-        env:
-          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_STAGING_DEPLOY_HOOK }}
-        run: |
-          if [ -n "$RENDER_DEPLOY_HOOK_URL" ]; then
-            echo "Triggering Render deployment webhook..."
-            curl -X POST "$RENDER_DEPLOY_HOOK_URL"
-          else
-            echo "Staging deployment check passed for commit ${{ github.sha }} (No deploy hook configured)."
-          fi
+  build-and-push:
+    runs-on: ubuntu-latest
+    needs: test
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set image tag
+        id: meta
+        run: echo "tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/backend:staging
+            ghcr.io/${{ github.repository }}/backend:${{ steps.meta.outputs.tag }}
 
-      - name: Notify Deployment Success
-        if: success()
-        run: |
-          echo "Staging deployment successfully triggered from commit ${{ github.sha }} on branch staging."
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment:
+      name: staging
+    steps:
+      - name: Deploy to staging host over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          script: |
+            set -e
+            cd ${STAGING_PATH:-/opt/pesaguard}
+            export BACKEND_IMAGE=ghcr.io/${{ github.repository }}/backend:${{ needs.build-and-push.outputs.image_tag }}
+            docker login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GHCR_DEPLOY_TOKEN }}
+            docker compose -f docker/docker-compose.yml pull webhook_receiver dashboard_api reconciliation_job rq_worker
+            docker compose -f docker/docker-compose.yml up -d webhook_receiver dashboard_api reconciliation_job rq_worker
+            docker compose -f docker/docker-compose.yml ps

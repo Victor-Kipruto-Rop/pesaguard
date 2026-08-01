@@ -1,80 +1,95 @@
-"""
-Enterprise Export and Customer Telemetry API Endpoints for PesaGuard.
-
-Provides tenant-isolated data exports (CSV), audit histories, report listings,
-dead-letter management views, and transaction lookup interfaces.
-"""
-
-from __future__ import annotations
-
 import csv
 import io
-import logging
 import os
 import sys
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from flask import Blueprint, Response, jsonify, request
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
 
-from action_audit import ActionAuditEntry
-from auth_rbac import require_auth, require_tenant_access
-from models import DeadLetter, Discrepancy, InternalRecord, Report, Transaction
+from pesaguard_backend_pipeline.models import Discrepancy
+from pesaguard_backend_pipeline.models import DeadLetter, InternalRecord, Report, Transaction
+from pesaguard_backend_pipeline.action_audit import ActionAuditEntry
 
-logger = logging.getLogger("pesaguard.export_routes")
+
+def _create_engine(url: str):
+    if url.startswith("sqlite:///:memory:"):
+        return create_engine(
+            url,
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+    if url.startswith("sqlite:"):
+        return create_engine(
+            url,
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+    return create_engine(url, pool_pre_ping=True)
+
+
+REPORTS_DATABASE_URL = os.getenv(
+    "REPORTS_DATABASE_URL",
+    os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard"),
+)
+AUDIT_DATABASE_URL = os.getenv(
+    "AUDIT_DATABASE_URL",
+    os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard"),
+)
+
+
+def _fallback_database_engine():
+    try:
+        from pesaguard_backend_pipeline import app_2 as dashboard_app
+
+        return dashboard_app.primary_engine
+    except Exception:
+        return _create_engine(os.getenv("DATABASE_URL") or REPORTS_DATABASE_URL)
+
+
+def REPORTS_SESSION():
+    report_url = os.getenv("REPORTS_DATABASE_URL")
+    if report_url:
+        engine = _create_engine(report_url)
+    else:
+        engine = _fallback_database_engine()
+    return sessionmaker(bind=engine, expire_on_commit=False)()
+
+
+def AUDIT_SESSION():
+    audit_url = os.getenv("AUDIT_DATABASE_URL")
+    if audit_url:
+        engine = _create_engine(audit_url)
+    else:
+        engine = _fallback_database_engine()
+    return sessionmaker(bind=engine, expire_on_commit=False)()
 
 bp = Blueprint("export_routes", __name__, url_prefix="/v1")
 
 
-def _get_db_session():
-    """Lazily import and instantiate the database session factory."""
-    try:
-        from app_2 import SessionLocal
-        return SessionLocal()
-    except ImportError:
-        from models import TaskSessionLocal
-        return TaskSessionLocal()
-
-
 @bp.route("/export/csv", methods=["GET"])
-@require_auth(required_permission="read:discrepancies")
-@require_tenant_access()
 def export_csv():
-    """Export tenant discrepancy records as a downloadable CSV stream."""
     tenant_id = request.args.get("tenant_id", "").strip()
     if not tenant_id:
-        return jsonify({"error": "missing_tenant_id", "message": "tenant_id parameter is required."}), 400
+        return jsonify({"error": "tenant_id is required"}), 400
 
-    from_str = request.args.get("from", "").strip()
-    to_str = request.args.get("to", "").strip()
-
-    session = _get_db_session()
+    session = REPORTS_SESSION()
     try:
-        query = session.query(Discrepancy).filter(Discrepancy.tenant_id == tenant_id)
+        rows = session.query(Discrepancy).filter(Discrepancy.tenant_id == tenant_id)
+        if request.args.get("from"):
+            rows = rows.filter(Discrepancy.detected_at >= request.args.get("from"))
+        if request.args.get("to"):
+            rows = rows.filter(Discrepancy.detected_at <= request.args.get("to"))
 
-        if from_str:
-            try:
-                from_dt = datetime.fromisoformat(from_str.replace("Z", "+00:00"))
-                query = query.filter(Discrepancy.detected_at >= from_dt)
-            except ValueError:
-                return jsonify({"error": "invalid_date_format", "message": "Invalid 'from' ISO date format."}), 400
-
-        if to_str:
-            try:
-                to_dt = datetime.fromisoformat(to_str.replace("Z", "+00:00"))
-                query = query.filter(Discrepancy.detected_at <= to_dt)
-            except ValueError:
-                return jsonify({"error": "invalid_date_format", "message": "Invalid 'to' ISO date format."}), 400
-
-        items = query.order_by(Discrepancy.detected_at.desc()).limit(5000).all()
-
+        items = rows.order_by(Discrepancy.detected_at.desc()).all()
         output = io.StringIO()
-        fieldnames = ["id", "trans_id", "anomaly_type", "status", "severity", "resolved", "tenant_id", "detected_at"]
-        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer = csv.DictWriter(output, fieldnames=["id", "trans_id", "anomaly_type", "status", "severity", "resolved", "tenant_id"])
         writer.writeheader()
-
         for item in items:
             writer.writerow({
                 "id": item.id,
@@ -84,99 +99,57 @@ def export_csv():
                 "severity": item.severity,
                 "resolved": "true" if item.resolved else "false",
                 "tenant_id": item.tenant_id,
-                "detected_at": item.detected_at.isoformat() if item.detected_at else "",
             })
-
         output.seek(0)
-        filename = f"pesaguard-export-{tenant_id}-{datetime.now(timezone.utc).strftime('%Y%m%d')}.csv"
-        return Response(
-            output.getvalue(),
-            mimetype="text/csv",
-            headers={"Content-Disposition": f"attachment; filename={filename}"},
-        )
-    except Exception as exc:
-        logger.exception("Failed to generate CSV export for tenant_id=%s: %s", tenant_id, exc)
-        return jsonify({"error": "export_failed", "message": "Failed to generate CSV export."}), 500
+        return Response(output.getvalue(), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=pesaguard-export.csv"})
     finally:
         session.close()
 
 
 @bp.route("/customers/<tenant_id>/deadletters", methods=["GET"])
-@require_auth(required_permission="read:discrepancies")
-@require_tenant_access()
 def customer_deadletters(tenant_id: str):
-    """Return dead-letter queue entries for a tenant."""
-    session = _get_db_session()
+    """Return dead-letter entries for a tenant."""
+    from pesaguard_backend_pipeline.app_2 import SessionLocal
+
+    session = SessionLocal()
     try:
-        rows = (
-            session.query(DeadLetter)
-            .filter(DeadLetter.tenant_id == tenant_id)
-            .order_by(getattr(DeadLetter, "created_at", getattr(DeadLetter, "received_at", None)).desc())
-            .limit(200)
-            .all()
-        )
-        items = []
-        for r in rows:
-            ts = getattr(r, "created_at", getattr(r, "received_at", None))
-            items.append({
-                "id": r.id,
-                "reason": r.reason,
-                "error_detail": r.error_detail,
-                "processed": r.processed,
-                "created_at": ts.isoformat() if ts else None,
-            })
-        return jsonify({"tenant_id": tenant_id, "items": items}), 200
-    except Exception as exc:
-        logger.exception("Failed fetching deadletters for tenant_id=%s: %s", tenant_id, exc)
-        return jsonify({"error": "fetch_failed", "message": "Failed to retrieve dead-letter queue."}), 500
+        rows = session.query(DeadLetter).filter(DeadLetter.tenant_id == tenant_id).order_by(DeadLetter.received_at.desc()).all()
+        items = [{
+            "id": r.id,
+            "reason": r.reason,
+            "error_detail": r.error_detail,
+            "processed": r.processed,
+            "received_at": r.received_at.isoformat() if r.received_at else None,
+        } for r in rows]
+        return jsonify({"items": items}), 200
     finally:
         session.close()
 
 
 @bp.route("/customers/<tenant_id>/reports", methods=["GET"])
-@require_auth(required_permission="read:analytics")
-@require_tenant_access()
 def customer_reports(tenant_id: str):
-    """List generated reconciliation reports for a tenant."""
-    session = _get_db_session()
+    """List generated reports for a tenant."""
+    session = REPORTS_SESSION()
     try:
-        rows = (
-            session.query(Report)
-            .filter(Report.tenant_id == tenant_id)
-            .order_by(Report.period_start.desc())
-            .limit(100)
-            .all()
-        )
+        rows = session.query(Report).filter(Report.tenant_id == tenant_id).order_by(Report.period_start.desc()).all()
         items = [{
             "id": r.id,
             "report_type": r.report_type,
             "period_start": r.period_start.isoformat() if r.period_start else None,
             "period_end": r.period_end.isoformat() if r.period_end else None,
-            "content": r.content,
             "status": r.status,
         } for r in rows]
-        return jsonify({"tenant_id": tenant_id, "items": items}), 200
-    except Exception as exc:
-        logger.exception("Failed fetching reports for tenant_id=%s: %s", tenant_id, exc)
-        return jsonify({"error": "fetch_failed", "message": "Failed to retrieve reports."}), 500
+        return jsonify({"items": items}), 200
     finally:
         session.close()
 
 
 @bp.route("/customers/<tenant_id>/audit", methods=["GET"])
-@require_auth(required_permission="read:settings")
-@require_tenant_access()
 def customer_audit(tenant_id: str):
-    """Return historical action audit trail entries for a tenant."""
-    session = _get_db_session()
+    """Return audit action entries for a tenant."""
+    session = AUDIT_SESSION()
     try:
-        rows = (
-            session.query(ActionAuditEntry)
-            .filter(ActionAuditEntry.tenant_id == tenant_id)
-            .order_by(ActionAuditEntry.created_at.desc())
-            .limit(200)
-            .all()
-        )
+        rows = session.query(ActionAuditEntry).filter(ActionAuditEntry.tenant_id == tenant_id).order_by(ActionAuditEntry.created_at.desc()).limit(200).all()
         items = [{
             "id": a.id,
             "actor": a.actor,
@@ -184,32 +157,28 @@ def customer_audit(tenant_id: str):
             "details": a.details,
             "created_at": a.created_at.isoformat() if a.created_at else None,
         } for a in rows]
-        return jsonify({"tenant_id": tenant_id, "items": items}), 200
-    except Exception as exc:
-        logger.exception("Failed fetching audit entries for tenant_id=%s: %s", tenant_id, exc)
-        return jsonify({"error": "fetch_failed", "message": "Failed to retrieve audit trail."}), 500
+        return jsonify({"items": items}), 200
     finally:
         session.close()
 
 
 @bp.route("/customers/<tenant_id>/transactions", methods=["GET"])
-@require_auth(required_permission="read:discrepancies")
-@require_tenant_access()
 def customer_transactions(tenant_id: str):
-    """Return recent transaction events associated with the system."""
-    since_str = request.args.get("since", "").strip()
-    session = _get_db_session()
+    """Return recent transactions related to the tenant. Filtering is basic for pilot."""
+    from pesaguard_backend_pipeline.app_2 import SessionLocal
+
+    since = request.args.get("since")
+    session = SessionLocal()
     try:
-        query = session.query(Transaction).order_by(Transaction.created_at.desc())
-
-        if since_str:
+        rows = session.query(Transaction).order_by(Transaction.created_at.desc())
+        # For pilot, allow optional time filtering
+        if since:
             try:
-                cutoff = datetime.fromisoformat(since_str.replace("Z", "+00:00"))
-                query = query.filter(Transaction.created_at >= cutoff)
-            except ValueError:
-                return jsonify({"error": "invalid_date_format", "message": "Invalid 'since' ISO timestamp."}), 400
-
-        rows = query.limit(200).all()
+                from datetime import datetime
+                cutoff = datetime.fromisoformat(since)
+                rows = rows.filter(Transaction.created_at >= cutoff)
+            except Exception:
+                pass
         items = [{
             "trans_id": t.trans_id,
             "trans_amount": t.trans_amount,
@@ -217,25 +186,24 @@ def customer_transactions(tenant_id: str):
             "business_short_code": t.business_short_code,
             "trans_time": t.trans_time,
             "created_at": t.created_at.isoformat() if t.created_at else None,
-        } for t in rows]
-        return jsonify({"tenant_id": tenant_id, "items": items}), 200
-    except Exception as exc:
-        logger.exception("Failed fetching transactions for tenant_id=%s: %s", tenant_id, exc)
-        return jsonify({"error": "fetch_failed", "message": "Failed to retrieve transactions."}), 500
+        } for t in rows.limit(200).all()]
+        return jsonify({"items": items}), 200
     finally:
         session.close()
 
 
 @bp.route("/customers/<tenant_id>/transactions/<trans_id>", methods=["GET"])
-@require_auth(required_permission="read:discrepancies")
-@require_tenant_access()
 def customer_transaction_detail(tenant_id: str, trans_id: str):
-    """Return complete record for a transaction including raw payload and matched internal ledger record."""
-    session = _get_db_session()
+    """Return the full record for a single transaction, including the raw
+    Daraja payload and a best-effort matched internal record, for the
+    transaction detail side panel."""
+    from pesaguard_backend_pipeline.app_2 import SessionLocal
+
+    session = SessionLocal()
     try:
         txn = session.query(Transaction).filter(Transaction.trans_id == trans_id).first()
         if not txn:
-            return jsonify({"error": "not_found", "message": "Transaction record not found."}), 404
+            return jsonify({"error": "not found"}), 404
 
         matched_record = None
         candidate = (
@@ -244,7 +212,7 @@ def customer_transaction_detail(tenant_id: str, trans_id: str):
             .order_by(InternalRecord.synced_at.desc())
             .first()
         )
-        if candidate is not None and abs((candidate.amount or 0.0) - (txn.trans_amount or 0.0)) < 0.01:
+        if candidate is not None and abs((candidate.amount or 0) - (txn.trans_amount or 0)) < 0.01:
             matched_record = {
                 "internal_ref": candidate.internal_ref,
                 "amount": candidate.amount,
@@ -254,7 +222,6 @@ def customer_transaction_detail(tenant_id: str, trans_id: str):
             }
 
         payload = {
-            "tenant_id": tenant_id,
             "trans_id": txn.trans_id,
             "trans_amount": txn.trans_amount,
             "msisdn": txn.msisdn,
@@ -265,8 +232,5 @@ def customer_transaction_detail(tenant_id: str, trans_id: str):
             "matched_record": matched_record,
         }
         return jsonify(payload), 200
-    except Exception as exc:
-        logger.exception("Failed fetching transaction detail trans_id=%s for tenant_id=%s: %s", trans_id, tenant_id, exc)
-        return jsonify({"error": "fetch_failed", "message": "Failed to retrieve transaction detail."}), 500
     finally:
         session.close()

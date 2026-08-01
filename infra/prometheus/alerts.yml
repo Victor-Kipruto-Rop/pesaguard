@@ -1,0 +1,20 @@
+groups:
+  - name: pesaguard.rules
+    rules:
+      - alert: PesaGuardMarkProcessedErrorsHigh
+        expr: rate(pesaguard_mark_processed_error_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High rate of mark_processed errors (>0.1/s over 5m)"
+          description: "mark_processed() has >0.1 errors/sec for the last 5 minutes. Check DB connectivity and disk space."
+
+      - alert: PesaGuardProcessingLatencyHigh
+        expr: histogram_quantile(0.95, sum(rate(pesaguard_mark_processed_processing_seconds_bucket[5m])) by (le)) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "95th percentile processing latency > 2s"
+          description: "P95 processing latency for mark_processed is greater than 2 seconds. Investigate downstream publishing/backlog."

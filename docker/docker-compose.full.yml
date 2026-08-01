@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   postgres:
     image: postgres:16
@@ -7,10 +5,34 @@ services:
       POSTGRES_USER: pesaguard
       POSTGRES_PASSWORD: pesaguard
       POSTGRES_DB: pesaguard
-    ports:
-      - "5432:5432"
+      POSTGRES_MULTIPLE_DATABASES: pesaguard_reports,pesaguard_audit,pesaguard_worker_state
+      POSTGRES_REPLICATION_USER: pesaguard_repl
+      POSTGRES_REPLICATION_PASSWORD: pesaguard_repl
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - max_wal_senders=5
+      - -c
+      - max_replication_slots=5
+      - -c
+      - listen_addresses=*
+
+  postgres_replica:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: pesaguard
+      POSTGRES_PRIMARY_HOST: postgres
+      POSTGRES_REPLICATION_USER: pesaguard_repl
+      POSTGRES_REPLICATION_PASSWORD: pesaguard_repl
+    volumes:
+      - pgdata_replica:/var/lib/postgresql/data
+      - ./postgres-replica-entrypoint.sh:/usr/local/bin/postgres-replica-entrypoint.sh:ro
+    entrypoint: ["/usr/local/bin/postgres-replica-entrypoint.sh"]
 
   kafka:
     image: confluentinc/cp-kafka:7.6.0
@@ -32,7 +54,7 @@ services:
 
   backend:
     build: .
-    command: python app.py
+    command: python -m pesaguard_backend_pipeline.app
     environment:
       DATABASE_URL: postgresql://pesaguard:pesaguard@postgres:5432/pesaguard
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
@@ -44,13 +66,16 @@ services:
 
   dashboard:
     build: .
-    command: python app_2.py
+    command: python -m pesaguard_backend_pipeline.app
     environment:
+      PORT: "5001"
       DATABASE_URL: postgresql://pesaguard:pesaguard@postgres:5432/pesaguard
+      READ_REPLICA_DATABASE_URL: postgresql://pesaguard:pesaguard@postgres_replica:5432/pesaguard
     ports:
       - "5001:5001"
     depends_on:
       - postgres
+      - postgres_replica
 
   frontend:
     build:
@@ -65,3 +90,4 @@ services:
 
 volumes:
   pgdata:
+  pgdata_replica:

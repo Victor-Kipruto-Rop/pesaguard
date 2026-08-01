@@ -51,6 +51,7 @@ const MORE_NAV: NavItem[] = [
   { href: '/insights', labelKey: 'sidebar.insights', icon: 'M4 19V9 M10 19V5 M16 19v-7 M22 19H2' },
   { href: '/tools', labelKey: 'sidebar.tools', icon: 'M14 4l6 6 M8 20l-4-4 8-8 4 4Z' },
   { href: '/status', labelKey: 'sidebar.status', icon: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z M9 12l2 2 4-4' },
+  { href: '/admin/monitoring', labelKey: 'sidebar.monitoring', icon: 'M2 12h4l2-7 4 14 2-7h8' },
   { href: '/support', labelKey: 'sidebar.support', icon: 'M12 20a8 8 0 1 0-8-8v1.5a1.5 1.5 0 0 0 3 0V8a5 5 0 1 1 5 5 M12 22v-2' },
   { href: '/docs', labelKey: 'sidebar.docs', icon: 'M7 3h8l4 4v14H7z M15 3v5h5' },
   { href: '/settings', labelKey: 'sidebar.settings', icon: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z' },

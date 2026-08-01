@@ -348,6 +348,34 @@
     "resolvedIncidents": "Resolved incidents",
     "totalIncidents": "Total incidents"
   },
+  "admin": {
+    "tenantDashboard": "Tenant dashboard",
+    "tenantDashboardSummary": "Operational overview for a single tenant",
+    "customersEyebrow": "Customers & tenants",
+    "customersTitle": "Customers",
+    "customersSummary": "Manage and inspect tenant status and onboarding progress.",
+    "customersLive": "Customers live",
+    "pilotActive": "Pilot active tenants",
+    "systemHealth": "System health overview",
+    "viewMonitoring": "View monitoring"
+  },
+  "tenants": {
+    "transactionsToday": "Transactions processed today",
+    "vsYesterday": "vs yesterday",
+    "matchRate": "Reconciliation match rate",
+    "vsYesterdayPercent": "vs yesterday",
+    "openAnomalies": "Open anomalies",
+    "uptime24h": "System uptime (24h)",
+    "matchRateTrend": "Match rate trend",
+    "liveActivity": "Live activity feed",
+    "reviewAnomalies": "Review anomalies",
+    "anomaliesNeedAttention": "need review",
+    "noAnomalies": "No anomalies right now",
+    "viewAnomalies": "View anomalies",
+    "unmatchedTransactions": "Unmatched transactions",
+    "unmatchedHint": "Transactions pending match review",
+    "viewReconciliation": "View reconciliation"
+  },
   "toolsPage": {
     "eyebrow": "Advanced Tools",
     "title": "Bulk operations & reporting",

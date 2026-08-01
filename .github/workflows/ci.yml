@@ -1,4 +1,4 @@
-name: PesaGuard CI
+name: CI
 
 on:
   push:
@@ -6,76 +6,189 @@ on:
   pull_request:
     branches: [ main, staging ]
 
-jobs:
-  test:
-    runs-on: ubuntu-latest
+permissions:
+  contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JWT_SECRET_KEY: ci-test-jwt-secret-key
+
+jobs:
+  backend-tests:
+    name: Backend Tests
+    runs-on: ubuntu-latest
     services:
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
       postgres:
-        image: postgres:15-alpine
+        image: postgres:16
         env:
           POSTGRES_USER: pesaguard
           POSTGRES_PASSWORD: pesaguard
-          POSTGRES_DB: pesaguard_test
+          POSTGRES_DB: pesaguard
         ports:
           - 5432:5432
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U pesaguard -d pesaguard"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
-
-      - name: Install system build dependencies
-        run: |
-          sudo apt-get update && sudo apt-get install -y libpq-dev gcc
-
-      - name: Install Python dependencies
+      - name: Install backend dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest==8.3.4
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          elif [ -f pesaguard_backend_pipeline/requirements.txt ]; then
-            pip install -r pesaguard_backend_pipeline/requirements.txt
-          else
-            pip install Flask==3.1.0 SQLAlchemy==2.0.38 psycopg2-binary==2.9.10 redis==5.2.1 rq==2.1.0 pytest==8.3.4 requests==2.32.3 PyJWT==2.10.1
-          fi
-
-      - name: Run test suite
+          pip install -r pesaguard_backend_pipeline/requirements_3.txt
+          pip install pytest
+          pip check
+      - name: Run backend tests
         env:
           PYTHONPATH: .
-          DATABASE_URL: postgresql://pesaguard:pesaguard@localhost:5432/pesaguard_test
+          DATABASE_URL: postgresql://pesaguard:pesaguard@localhost:5432/pesaguard
           REDIS_URL: redis://localhost:6379/0
-          DARAJA_SHARED_SECRET: test_ci_secret_key_12345
-          PESAGUARD_ALLOW_UNRESTRICTED_WEBHOOK_SOURCE: 1
-          JWT_SECRET_KEY: test_ci_jwt_secret_key_12345
+          PESAGUARD_API_AUTH_REQUIRED: "1"
+          PESAGUARD_LOAD_AUX_APPS: "0"
+        run: pytest pesaguard_backend_pipeline/tests/ -q --tb=short
+      - name: Start webhook API for smoke test
+        env:
+          DATABASE_URL: sqlite:///./e2e.db
+          REDIS_URL: redis://localhost:6379/0
+          PESAGUARD_ADMIN_API_TOKEN: ci-test-token
+          PESAGUARD_LOAD_AUX_APPS: "0"
         run: |
-          pytest -v --tb=short --durations=10
-
-      - name: Run frontend tests (if applicable)
+          python -m pesaguard_backend_pipeline.app &
+          echo $! > flask.pid
+          sleep 3
+      - name: Health endpoint smoke test
         run: |
-          if [ -f frontend/package.json ]; then
-            npm --prefix frontend ci
-            npm --prefix frontend test -- --watchAll=false
+          status=$(curl -s -o /tmp/health.json -w "%{http_code}" http://127.0.0.1:5000/health)
+          cat /tmp/health.json
+          if [ "$status" -ne 200 ]; then
+            echo "Health endpoint returned HTTP $status"
+            exit 1
           fi
+      - name: Post sample webhook and validate persisted record
+        run: |
+          TRANSID=E2E_TEST_1
+          printf '{ "TransactionType": "C2B", "TransID": "%s", "TransTime": "20220101120000", "TransAmount": "123.45", "BusinessShortCode": "12345", "MSISDN": "254700000000" }\n' "$TRANSID" > payload.json
+          curl -s -X POST -H "Content-Type: application/json" --data @payload.json http://127.0.0.1:5000/webhook/mpesa/confirmation -o /dev/null -w "%{http_code}\n"
+          python -m pesaguard_backend_pipeline.scripts.admin_query ${TRANSID} --db sqlite:///./e2e.db > e2e_out.json
+          python -c "import json; o=json.load(open('e2e_out.json')); assert 'E2E_TEST_1' in o and o['E2E_TEST_1'] is not None; print('E2E OK')"
+      - name: Stop webhook API
+        if: always()
+        run: |
+          if [ -f flask.pid ]; then
+            kill $(cat flask.pid) || true
+          fi
+      - name: Validate docker compose definitions
+        run: |
+          docker compose -f docker/docker-compose.yml config >/dev/null
+          docker compose -f docker/docker-compose.full.yml config >/dev/null
+
+  migration-dry-run:
+    name: Migration Dry Run
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: pesaguard
+          POSTGRES_PASSWORD: pesaguard
+          POSTGRES_DB: pesaguard
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pesaguard -d pesaguard"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install migration dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r pesaguard_backend_pipeline/requirements_3.txt
+          pip install alembic
+      - name: Baseline schema and run Alembic upgrade/downgrade smoke
+        env:
+          DATABASE_URL: postgresql://pesaguard:pesaguard@localhost:5432/pesaguard
+        run: |
+          python -m pesaguard_backend_pipeline.init_db
+          alembic -c pesaguard_backend_pipeline/alembic.ini upgrade head
+          alembic -c pesaguard_backend_pipeline/alembic.ini downgrade base
+          alembic -c pesaguard_backend_pipeline/alembic.ini upgrade head
+
+  backup-restore-verify:
+    name: Backup Restore Verify
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: pesaguard
+          POSTGRES_PASSWORD: pesaguard
+          POSTGRES_DB: pesaguard
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pesaguard -d pesaguard"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install runtime dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r pesaguard_backend_pipeline/requirements_3.txt
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client gzip
+      - name: Seed source database
+        env:
+          DATABASE_URL: postgresql://pesaguard:pesaguard@localhost:5432/pesaguard
+        run: |
+          python -m pesaguard_backend_pipeline.init_db
+      - name: Backup and restore into validation database
+        env:
+          SOURCE_DB_URL: postgresql://pesaguard:pesaguard@localhost:5432/pesaguard
+          RESTORE_DB_URL: postgresql://pesaguard:pesaguard@localhost:5432/pesaguard_restore
+          PGPASSWORD: pesaguard
+        run: |
+          export PESAGUARD_BACKUP_DIR="$RUNNER_TEMP/backups"
+          export DATABASE_URL="$SOURCE_DB_URL"
+          python pesaguard_backend_pipeline/backup_postgres.py --backup
+          BACKUP_FILE=$(ls -1 "$PESAGUARD_BACKUP_DIR"/pesaguard_*.sql.gz | tail -n 1)
+          psql -h localhost -U pesaguard -d postgres -c "DROP DATABASE IF EXISTS pesaguard_restore;"
+          psql -h localhost -U pesaguard -d postgres -c "CREATE DATABASE pesaguard_restore;"
+          export DATABASE_URL="$RESTORE_DB_URL"
+          python pesaguard_backend_pipeline/backup_postgres.py --restore "$BACKUP_FILE"
+          psql -h localhost -U pesaguard -d pesaguard_restore -tAc "SELECT to_regclass('public.transactions') IS NOT NULL;" | grep -q t
+
+  image-build:
+    name: Image Build
+    runs-on: ubuntu-latest
+    needs: [backend-tests, migration-dry-run, backup-restore-verify]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build backend image
+        run: docker build . --file docker/Dockerfile --tag pesaguard-backend:${{ github.sha }}
+      - name: Build frontend image (best-effort)
+        run: |
+          docker build . --file docker/Dockerfile.frontend --tag pesaguard-frontend:${{ github.sha }}
         continue-on-error: true

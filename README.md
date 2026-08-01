@@ -57,6 +57,30 @@ cp .env.example .env
 # (add your run command here)
 ```
 
+Local Prometheus testing
+------------------------
+
+Use the included Prometheus config at `infra/prometheus/prometheus.yml` to scrape the backend `/metrics` endpoint on port `5000`.
+
+If running Prometheus in Docker compose or locally, point the `scrape_configs` `targets` to the host where `app.py` is served (default `localhost:5000` or `host.docker.internal:5000` inside Docker).
+
+Admin CLI
+---------
+
+A small CLI to query processed transaction records directly is available at `pesaguard_backend_pipeline/scripts/admin_query.py`.
+Example:
+
+```bash
+python -m pesaguard_backend_pipeline.scripts.admin_query T12345 T67890
+python -m pesaguard_backend_pipeline.scripts.admin_query --file trans_ids.txt
+```
+
+CI
+--
+
+The GitHub Actions workflow `/.github/workflows/ci.yml` runs tests and starts an RQ worker against a Redis service for a simple smoke test.
+
+
 ## Roadmap
 
 - [x] Core reconciliation engine

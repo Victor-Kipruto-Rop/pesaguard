@@ -27,15 +27,16 @@ except ImportError:
     KafkaProducer = None  # type: ignore[assignment]
     HAS_KAFKA = False
 
-from action_audit import ActionAuditEntry
-from alerting_service import AlertingService
-from anomaly_rules import check_for_anomalies
-from base_connector import ConnectorRegistry
-from event_store import EventStore, ProcessResult
-from logging_utils import configure_logging
-from models import Base
-from reconciliation_engine import evaluate_transaction
-from tenant_settings import TenantSettingsStore
+from pesaguard_backend_pipeline.alerting_service import AlertingService
+from pesaguard_backend_pipeline.anomaly_rules import check_for_anomalies
+from pesaguard_backend_pipeline.base_connector import ConnectorRegistry
+from pesaguard_backend_pipeline.logging_utils import configure_logging
+from pesaguard_backend_pipeline.reconciliation_engine import evaluate_transaction
+from pesaguard_backend_pipeline.event_store import EventStore, ProcessResult
+from pesaguard_backend_pipeline.tenant_settings import TenantSettingsStore
+from pesaguard_backend_pipeline.action_audit import ActionAuditEntry
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 configure_logging()
 logger = logging.getLogger("pesaguard.reconciliation")
@@ -56,12 +57,19 @@ AuditSession = sessionmaker(bind=engine, expire_on_commit=False)
 event_store = EventStore(database_url=DB_URL)
 settings_store = TenantSettingsStore()
 
-try:
-    Base.metadata.create_all(engine)
-except Exception as exc:
-    logger.warning("Database schema check notice: %s", exc)
+# Local DB session for audit writes + idempotency checks
+DB_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
+AUDIT_DB_URL = os.getenv("AUDIT_DATABASE_URL", DB_URL)
+engine_for_audit = create_engine(AUDIT_DB_URL, pool_pre_ping=True)
+AuditSession = sessionmaker(bind=engine_for_audit, expire_on_commit=False)
+event_store = EventStore(database_url=DB_URL)
 
-_RUNNING = True
+# Ensure audit tables exist when module is imported (helps tests and first-run environments)
+try:
+    from pesaguard_backend_pipeline.models import Base as _Base
+    _Base.metadata.create_all(engine_for_audit)
+except Exception:
+    pass
 
 
 def _signal_handler(signum, frame):
@@ -191,6 +199,65 @@ def run():
                 trans_id = str(event.get("TransID") or event.get("trans_id") or "unknown").strip()
                 tenant_id = str(event.get("tenant_id") or event.get("TenantID") or DEFAULT_TENANT_ID)
 
+    for message in consumer:
+        event = message.value
+        trans_id = event.get("TransID", "unknown")
+        
+        try:
+            # Step 1: Database-backed idempotency check (ProcessedTransaction table)
+            if event_store.already_processed(trans_id):
+                logger.info("Idempotency: skipping duplicate trans_id=%s (already processed)", trans_id)
+                continue
+            
+            # Step 2: Anomaly detection (independent of idempotency)
+            seen_trans_ids = set()  # Local set within message processing
+            anomalies = check_for_anomalies(event, seen_trans_ids)
+            
+            # Step 3: Fetch matching internal records
+            connector = connector_registry.get_connector(TENANT_ID)
+            internal_records = connector.fetch_recent_records(since_minutes=WINDOW_MINUTES) if connector else []
+            
+            # Step 4: Evaluate reconciliation (uses local seen_trans_ids, not global)
+            tenant_cfg = settings_store.get(TENANT_ID)
+            evaluation = evaluate_transaction(
+                event,
+                internal_records,
+                seen_trans_ids,  # Local set for this message only
+                window_minutes=WINDOW_MINUTES,
+                tenant_settings=tenant_cfg
+            )
+            
+            # Step 5: Enrich evaluation
+            evaluation["tenant_id"] = TENANT_ID
+            evaluation["event"] = event
+            evaluation["checked_at"] = datetime.now(timezone.utc).isoformat()
+            evaluation["anomalies"] = anomalies + evaluation.get("anomalies", [])
+            
+            logger.info(
+                "Reconciliation outcome",
+                extra={
+                    "tenant_id": TENANT_ID,
+                    "trans_id": trans_id,
+                    "status": evaluation["status"],
+                    "severity": evaluation["severity"]
+                }
+            )
+            
+            # Step 6: Persist idempotency record in database (marks as processed)
+            result = event_store.mark_processed(event, tenant_id=TENANT_ID)
+
+            # Handle idempotency outcomes explicitly. DUPLICATE means another
+            # process already stored this trans_id — skip downstream work.
+            if result == ProcessResult.DUPLICATE:
+                logger.info("Reconciliation: duplicate detected at write time, skipping downstream processing", extra={"trans_id": trans_id})
+                continue
+            if result == ProcessResult.ERROR:
+                logger.error("Reconciliation: failed to record processed transaction, skipping downstream processing", extra={"trans_id": trans_id})
+                continue
+
+            # Step 7: Route to topic + dispatch alerts
+            if evaluation["status"] in {"needs_review", "missing_payment"} or anomalies:
+                producer.send(TOPIC_DISCREPANCIES, value=evaluation)
                 try:
                     if event_store.already_processed(trans_id):
                         logger.info("Idempotency: skipping duplicate trans_id=%s for tenant_id=%s", trans_id, tenant_id)

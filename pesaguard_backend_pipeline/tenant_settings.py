@@ -5,22 +5,7 @@ Exposes management routes for retrieving tenant configuration parameters, patchi
 notification thresholds and data residency preferences, and dispatching test alerts.
 """
 
-from __future__ import annotations
-
-import logging
-from typing import Any, Dict
-
-from flask import Blueprint, jsonify, request, g
-
-from alerting_service import AlertingService
-from rbac import PERM_MANAGE_SETTINGS, PERM_VIEW_SETTINGS, enforce_permission, has_permission
-from security_helpers import is_payload_within_limit, sanitize_error_message
-from tenant_settings_store import TenantSettingsStore
-
-logger = logging.getLogger("pesaguard.settings_api")
-
-settings_bp = Blueprint("settings_api", __name__, url_prefix="/api/v1/settings")
-settings_store = TenantSettingsStore()
+from pesaguard_backend_pipeline.localization_utils import normalise_locale
 
 
 def _get_current_context() -> tuple[str, str]:
@@ -30,6 +15,10 @@ def _get_current_context() -> tuple[str, str]:
     role = getattr(user, "role", "viewer") if user else "admin"
     return tenant_id, role
 
+    def __init__(self, path: Optional[str] = None):
+        default_path = os.path.join(os.path.dirname(__file__), "tenant_settings.json")
+        self.path = path or os.getenv("TENANT_SETTINGS_FILE", default_path)
+        self._data: Dict[str, Any] = self._load()
 
 @settings_bp.route("", methods=["GET"])
 def get_tenant_settings():

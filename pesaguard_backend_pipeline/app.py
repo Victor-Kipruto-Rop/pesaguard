@@ -1,49 +1,64 @@
-"""Robust M-Pesa webhook ingestion gateway for PesaGuard with rate limiting and verification."""
-
-from __future__ import annotations
-
-import hashlib
-import hmac
+"""
+PesaGuard Webhook Receiver
+Receives M-Pesa Daraja callbacks (C2B/B2C/STK Push confirmation),
+validates payload, and pushes to Kafka for downstream reconciliation.
+"""
 import logging
 import os
-from typing import Any, Dict, Optional
 
-import redis
-from flask import Flask, Response, abort, jsonify, request
+from flask import Flask, jsonify, request, Response
 from werkzeug.exceptions import HTTPException
 
-from background_tasks import enqueue_transaction_event
-from event_store import EventStore, ProcessResult
-from health import build_health_payload
-from logging_utils import configure_logging, get_correlation_id, set_correlation_id
-from metrics import build_metrics_payload
-from producer import publish_transaction_event
-from rate_limiter import RateLimiter
-from security_helpers import (
+from pesaguard_backend_pipeline.security_helpers import (
     get_client_ip,
     is_allowed_source,
     is_payload_within_limit,
     sanitize_error_message,
 )
-from tenant_settings import TenantSettingsStore
-from validators import validate_daraja_payload
+from pesaguard_backend_pipeline.rate_limiter import RateLimiter
+
+from pesaguard_backend_pipeline.event_store import EventStore, ProcessResult
+from pesaguard_backend_pipeline.health import build_health_payload
+from pesaguard_backend_pipeline.logging_utils import configure_logging, set_correlation_id, get_correlation_id
+from pesaguard_backend_pipeline.validators import validate_daraja_payload
+from pesaguard_backend_pipeline.background_tasks import enqueue_transaction_event
+from pesaguard_backend_pipeline.producer import publish_transaction_event
+from pesaguard_backend_pipeline.tenant_settings import TenantSettingsStore
+from pesaguard_backend_pipeline.metrics import build_metrics_payload
+from flask import abort
+import time
+from flask import Response
 
 configure_logging()
 logger = logging.getLogger("pesaguard.webhook")
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("PESAGUARD_WEBHOOK_MAX_BODY_BYTES", "1048576"))
+_original_route = app.route
 
+
+def _idempotent_route(rule, **options):
+    def decorator(view_func):
+        endpoint = options.get("endpoint") or view_func.__name__
+        if endpoint in app.view_functions:
+            return view_func
+        return _original_route(rule, **options)(view_func)
+
+    return decorator
+
+
+app.route = _idempotent_route
+app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("PESAGUARD_WEBHOOK_MAX_BODY_BYTES", "1048576"))
 event_store = EventStore()
 webhook_rate_limiter = RateLimiter()
 webhook_rate_limiter.set_limits(int(os.getenv("PESAGUARD_WEBHOOK_RATE_LIMIT_PER_MINUTE", "30")))
 
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC_TRANSACTIONS", "mpesa.transactions.raw")
+
+# Simple admin-auth for pilot Admin API endpoints
 tenant_store = TenantSettingsStore()
 
 
-def _require_admin() -> None:
-    """Enforce admin token authentication on sensitive configuration endpoints."""
+def _require_admin():
     token = request.headers.get("X-Admin-Token") or request.args.get("admin_token")
     admin_api_token = os.getenv("PESAGUARD_ADMIN_API_TOKEN")
     if not admin_api_token or token != admin_api_token:
@@ -196,17 +211,16 @@ def enforce_webhook_security():
         return jsonify({"ResultCode": 1, "ResultDesc": "Request body too large"}), 413
 
     if request.path.startswith("/webhook"):
-        client_ip = get_client_ip(request)
-        if not is_allowed_source(client_ip, request):
-            logger.warning("Webhook request rejected: forbidden source IP", extra={"source_ip": client_ip})
+        if not is_allowed_source(get_client_ip(request), request):
+            logger.warning("Webhook request rejected: forbidden source IP", extra={"source_ip": get_client_ip(request)})
             return jsonify({"ResultCode": 1, "ResultDesc": "Forbidden source"}), 403
 
         allowed, status = webhook_rate_limiter.is_allowed(
-            client_ip,
+            get_client_ip(request),
             request.path,
         )
         if not allowed:
-            logger.warning("Webhook request rejected: rate limit exceeded", extra={"source_ip": client_ip})
+            logger.warning("Webhook request rejected: rate limit exceeded", extra={"source_ip": get_client_ip(request)})
             response = jsonify({"ResultCode": 1, "ResultDesc": "Rate limit exceeded"})
             response.status_code = 429
             response.headers["Retry-After"] = str(status.get("retry_after", 60))
@@ -223,11 +237,29 @@ def enforce_webhook_security():
 
 @app.route("/metrics", methods=["GET"])
 def metrics():
-    return Response(build_metrics_payload(), mimetype="text/plain; version=0.0.4")
+    try:
+        # If prometheus_client is available, prefer its dynamic metrics
+        from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+        return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
+    except Exception:
+        return Response(build_metrics_payload(), mimetype="text/plain; version=0.0.4")
+
+
+@app.route("/admin/processed/<trans_id>", methods=["GET"])
+def admin_get_processed(trans_id: str):
+    _require_admin()
+    record = event_store.get_processed(trans_id)
+    if not record:
+        return jsonify({"error": "not_found"}), 404
+    return jsonify(record), 200
 
 
 def _verify_daraja_signature(request_body: bytes, signature: str) -> None:
-    """Verify incoming webhook signature from Daraja using constant-time comparison."""
+    """Verify incoming webhook signature from Daraja.
+    Raises ValueError if signature is invalid.
+    Reference: https://developer.safaricom.co.ke/webhook-signature-validation"""
+    import hashlib
+    import hmac
     consumer_secret = os.getenv("DARAJA_CONSUMER_SECRET", "")
     if not consumer_secret:
         raise ValueError("DARAJA_CONSUMER_SECRET not configured")
@@ -238,27 +270,34 @@ def _verify_daraja_signature(request_body: bytes, signature: str) -> None:
         hashlib.sha256
     ).hexdigest().upper()
 
-    if not hmac.compare_digest(signature.upper(), expected_signature):
+    if signature.upper() != expected_signature:
         raise ValueError("Signature mismatch")
 
 
 @app.route("/health", methods=["GET"])
 def health():
     payload = build_health_payload()
-    status_code = 200 if payload.get("status") == "ok" else 503
+    status_code = 503 if payload.get("status") == "failed" else 200
     return jsonify(payload), status_code
 
 
 @app.route("/webhook/mpesa/confirmation", methods=["POST"])
 def mpesa_confirmation():
-    """Handles C2B confirmation callbacks from Daraja with strict idempotency and atomicity safeguards."""
+    """
+    Handles C2B confirmation callbacks from Daraja.
+    Docs: https://developer.safaricom.co.ke/
+
+    IMPORTANT: the HTTP status/ResultCode returned here directly controls whether
+    Daraja retries. STORED and DUPLICATE both mean "safely recorded, no retry
+    needed" -> 200. ERROR means "not actually stored" -> non-200, so Daraja retries
+    instead of the transaction silently vanishing.
+    """
     payload = request.get_json(silent=True)
-    tenant_id = os.getenv("TENANT_ID", "default")
 
     if not payload:
         logger.warning("Empty or invalid JSON payload received")
         try:
-            event_store.write_dead_letter(None, reason="invalid_json", error_detail="empty_or_invalid_json", tenant_id=tenant_id)
+            event_store.write_dead_letter(None, reason="invalid_json", error_detail="empty_or_invalid_json", tenant_id=os.getenv("TENANT_ID", "default"))
         except Exception:
             logger.debug("Failed to persist dead-letter for invalid JSON payload", exc_info=True)
         return jsonify({"ResultCode": 1, "ResultDesc": "Invalid payload"}), 400
@@ -270,54 +309,106 @@ def mpesa_confirmation():
     if not is_valid:
         logger.warning("Payload validation failed: %s", error)
         try:
-            event_store.write_dead_letter(payload, reason="validation_failed", error_detail=str(error), tenant_id=tenant_id)
+            event_store.write_dead_letter(payload, reason="validation_failed", error_detail=str(error), tenant_id=os.getenv("TENANT_ID", "default"))
         except Exception:
             logger.debug("Failed to persist dead-letter for validation failure", exc_info=True)
         return jsonify({"ResultCode": 1, "ResultDesc": sanitize_error_message(error)}), 400
 
     trans_id = payload.get("TransID")
+    tenant_id = os.getenv("TENANT_ID", "default")
 
+    # Fast-path optimization only — NOT the authoritative gate. Two near-simultaneous
+    # callbacks can both pass this check before either has written anything; the real
+    # guarantee is the unique constraint enforced inside mark_processed() below.
     if event_store.already_processed(str(trans_id)):
         logger.info("Duplicate transaction (pre-check)", extra={"tenant_id": tenant_id, "trans_id": trans_id})
         return jsonify({"ResultCode": 0, "ResultDesc": "Accepted (duplicate ignored)"}), 200
 
+    # Authoritative idempotency write. Branch on the ACTUAL result — never assume
+    # success and never treat an error the same as a duplicate.
     result = event_store.mark_processed(payload, tenant_id=tenant_id)
 
     if result == ProcessResult.DUPLICATE:
+        # A concurrent callback won the race between the pre-check above and this
+        # write. Already safely stored by the other request — do not enqueue again,
+        # do not process twice downstream.
         logger.info("Duplicate transaction (caught at write time)", extra={"tenant_id": tenant_id, "trans_id": trans_id})
         return jsonify({"ResultCode": 0, "ResultDesc": "Accepted (duplicate ignored)"}), 200
 
     if result == ProcessResult.ERROR:
+        # Genuine failure — the transaction was NOT stored. Returning 200 here would
+        # cause Daraja to treat this as delivered and never retry, silently losing a
+        # real transaction. Return a non-zero ResultCode with a 500 so Daraja retries.
         logger.error("Failed to record transaction, requesting Daraja retry", extra={"tenant_id": tenant_id, "trans_id": trans_id})
         return jsonify({"ResultCode": 1, "ResultDesc": "Temporary processing error, please retry"}), 500
 
-    # Best-effort Redis cache warm
+    # result == ProcessResult.STORED: genuinely new, safely persisted. Proceed to
+    # enqueue for downstream reconciliation exactly once. Measure end-to-end
+    # processing time and update the idempotency ledger status so operators
+    # can observe whether publication to downstream systems succeeded.
+    start_ns = time.time_ns()
+
     try:
+        import redis
         redis_conn = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), socket_connect_timeout=2)
         cache_key = f"processed_trans_id:{trans_id}"
         redis_conn.set(cache_key, "1", ex=86400)
     except Exception:
-        pass
+        pass  # best-effort cache warm; DB ledger above is the source of truth
 
+    publish_status = "unknown"
+    publish_error = None
     try:
         queued = enqueue_transaction_event(KAFKA_TOPIC, payload)
         if queued.get("status") == "queued":
+            publish_status = "queued"
             logger.info("Transaction event queued to background job", extra={"trans_id": trans_id})
         else:
             publish_transaction_event(KAFKA_TOPIC, payload)
+            publish_status = "published"
             logger.info("Transaction event published to Kafka (sync fallback)", extra={"trans_id": trans_id})
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        # The transaction IS safely stored (STORED above) — only the downstream
+        # publish failed. Log for manual replay; still ack 200 since the source
+        # record exists and reconciliation can be re-run against it.
+        publish_status = "publish_failed"
+        publish_error = str(exc)
         logger.warning("Failed to publish event (queued for manual replay)", extra={"trans_id": trans_id}, exc_info=True)
+
+    # Update processing status with measured latency (best-effort)
+    try:
+        processing_time_ms = int((time.time_ns() - start_ns) / 1_000_000)
+        # Use descriptive status names for operators to inspect
+        event_store.update_processing_status(
+            trans_id, status=publish_status, error_reason=publish_error, processing_time_ms=processing_time_ms
+        )
+    except Exception:
+        logger.debug("Failed updating processing status for trans_id=%s", trans_id, exc_info=True)
 
     return jsonify({"ResultCode": 0, "ResultDesc": "Accepted"}), 200
 
 
 @app.route("/webhook/mpesa/validation", methods=["POST"])
 def mpesa_validation():
-    """Handles C2B validation callbacks (pre-confirmation)."""
+    """
+    Handles C2B validation callbacks (pre-confirmation).
+    Return here to accept/reject a transaction before it completes.
+    """
     payload = request.get_json(silent=True) or {}
     logger.info("Validation request for: %s", payload.get("TransID", "unknown"))
     return jsonify({"ResultCode": 0, "ResultDesc": "Accepted"}), 200
+
+
+# Import legacy/auxiliary app modules so their routes register on the
+# consolidated Flask application instance.
+# These modules no longer start their own Flask servers; they are now
+# part of the single unified application defined above.
+if os.getenv("PESAGUARD_LOAD_AUX_APPS", "1") == "1":
+    for _module in ("app_1", "app_2", "app_4_advanced_features"):
+        try:
+            __import__(f"pesaguard_backend_pipeline.{_module}")
+        except ImportError:
+            logger.warning("Skipping optional module registration for %s", _module)
 
 
 if __name__ == "__main__":

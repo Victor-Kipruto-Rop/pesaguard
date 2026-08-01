@@ -42,7 +42,7 @@ class Transaction(Base):
 ```
 - Atomic: database enforces uniqueness
 - Prevents duplicates even on concurrent writes
-- Migration: [20260722_add_transaction_constraints.py](alembic/versions/20260722_add_transaction_constraints.py)
+- Migration: [20260722_add_transaction_constraints.py](../pesaguard_backend_pipeline/alembic/versions/20260722_add_transaction_constraints.py)
 
 **Layer 2: Event Store Duplicate Check** (`event_store.py`)
 - `already_processed(trans_id)` queries DB before accepting webhook
@@ -69,7 +69,7 @@ curl -X POST http://localhost:5000/webhook/mpesa/confirmation -d '{"TransID": "t
 
 ### Migration
 ```bash
-alembic upgrade head
+alembic -c pesaguard_backend_pipeline/alembic.ini upgrade head
 # Creates unique constraint on transactions.trans_id
 ```
 
@@ -487,7 +487,7 @@ tail -1 /var/log/pesaguard/app.log | jq '.'
 python3 backup_postgres.py --backup
 
 # 2. Apply migrations
-alembic upgrade head
+alembic -c pesaguard_backend_pipeline/alembic.ini upgrade head
 # Migration 1: 20260719_add_deadletters_reports_audit
 # Migration 2: 20260722_add_transaction_constraints
 
@@ -500,8 +500,8 @@ psql -c "\d transactions" | grep uq_transaction_trans_id
 # Webhook receiver (app.py)
 python3 pesaguard_backend_pipeline/app.py
 
-# Dashboard API (app_2.py)
-python3 pesaguard_backend_pipeline/app_2.py
+# Dashboard API (app.py)
+python3 pesaguard_backend_pipeline/app.py
 
 # Reconciliation consumer (reconciliation_job.py)
 python3 pesaguard_backend_pipeline/reconciliation_job.py
@@ -544,7 +544,7 @@ sudo systemctl list-timers pesaguard-backup.timer
 1. [backup_postgres.py](pesaguard_backend_pipeline/backup_postgres.py) — Backup/restore script (240 lines)
 2. [infra/pesaguard-backup.service](infra/pesaguard-backup.service) — Systemd service
 3. [infra/pesaguard-backup.timer](infra/pesaguard-backup.timer) — Systemd timer
-4. [alembic/versions/20260722_add_transaction_constraints.py](alembic/versions/20260722_add_transaction_constraints.py) — Migration
+4. [pesaguard_backend_pipeline/alembic/versions/20260722_add_transaction_constraints.py](../pesaguard_backend_pipeline/alembic/versions/20260722_add_transaction_constraints.py) — Migration
 
 ### Modified Files
 1. [models.py](pesaguard_backend_pipeline/models.py) — Added unique constraint + indices
