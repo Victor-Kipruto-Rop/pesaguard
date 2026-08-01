@@ -1,6 +1,21 @@
-flask==3.0.3
-sqlalchemy==2.0.30
-psycopg2-binary==2.9.9
-gunicorn==22.0.0
-redis==5.0.0
-rq==1.2.0
+# Web Framework & WSGI Application Server
+Flask==3.1.0
+gunicorn==23.0.0
+
+# Database ORM & PostgreSQL Driver
+SQLAlchemy==2.0.38
+psycopg2-binary==2.9.10
+
+# Distributed Caching, Task Queue & Rate Limiting
+redis==5.2.1
+rq==2.1.0
+
+# Security, Networking & Utilities
+PyJWT==2.10.1
+requests==2.32.3
+python-dotenv==1.0.1
+python-dateutil==2.9.0.post0
+
+# Streaming & Telemetry (Recommended for PesaGuard)
+kafka-python-ng==2.2.3
+prometheus-client==0.21.1

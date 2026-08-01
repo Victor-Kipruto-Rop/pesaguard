@@ -1,10 +1,10 @@
 """
-Reconciliation engine for matching Daraja callbacks to internal ledger records.
+Reconciliation Engine for matching M-Pesa Daraja callbacks to internal ledger records.
 
-This module turns raw webhook events into auditable reconciliation outcomes so
-ops teams can distinguish between exact matches, partial matches, missing
-payments, and duplicate callbacks.
+Turns raw webhook events into auditable reconciliation outcomes so operational teams
+can distinguish between exact matches, partial matches, missing payments, and duplicate callbacks.
 """
+
 from __future__ import annotations
 
 import logging
@@ -25,10 +25,17 @@ def evaluate_transaction(
 ) -> Dict[str, Any]:
     """Evaluate one M-Pesa event against a set of internal records.
 
-    tenant_settings: optional dict from TenantSettingsStore to allow per-customer
-    reconciliation tuning (tolerance_percent, allow_partial, window_minutes override).
+    Args:
+        event: Daraja callback payload dict
+        internal_records: List of internal order/payment dicts
+        seen_trans_ids: Set of recently observed transaction IDs
+        window_minutes: Default matching time window in minutes
+        tenant_settings: Optional tenant-specific settings dict for custom rules
+
+    Returns:
+        Structured evaluation outcome dict
     """
-    trans_id = str(event.get("TransID", "unknown"))
+    trans_id = str(event.get("TransID") or event.get("trans_id") or "unknown").strip()
     duplicate = trans_id in seen_trans_ids
 
     anomalies: List[str] = []
@@ -41,9 +48,20 @@ def evaluate_transaction(
         if latency > 3600:
             anomalies.append("late_arriving_event")
 
-    amount = _coerce_amount(event.get("TransAmount"))
+    amount = _coerce_amount(event.get("TransAmount") or event.get("amount"))
     if amount is None or amount <= 0:
         anomalies.append("invalid_or_zero_amount")
+
+    # Resolve tenant config overrides
+    reconciliation_cfg = (tenant_settings or {}).get("reconciliation", {}) if tenant_settings else {}
+    tolerance_percent = float(reconciliation_cfg.get("tolerance_percent", 0.5))
+    allow_partial = bool(reconciliation_cfg.get("allow_partial", True))
+    
+    if reconciliation_cfg.get("window_minutes") is not None:
+        try:
+            window_minutes = int(reconciliation_cfg["window_minutes"])
+        except (TypeError, ValueError):
+            pass
 
     if not internal_records:
         return {
@@ -52,19 +70,17 @@ def evaluate_transaction(
             "severity": "critical",
             "duplicate": duplicate,
             "anomalies": anomalies,
-            "match": {"match_type": "none", "reason": "no_internal_record"},
+            "match": {"match_type": "none", "reason": "no_internal_records"},
         }
 
-    reconciliation_cfg = (tenant_settings or {}).get("reconciliation", {}) if tenant_settings is not None else {}
-    tolerance_percent = float(reconciliation_cfg.get("tolerance_percent", 0.5))
-    allow_partial = bool(reconciliation_cfg.get("allow_partial", True))
-    if reconciliation_cfg.get("window_minutes") is not None:
-        try:
-            window_minutes = int(reconciliation_cfg.get("window_minutes"))
-        except Exception:
-            pass
+    best_match = _find_best_match(
+        event,
+        internal_records,
+        window_minutes=window_minutes,
+        tolerance_percent=tolerance_percent,
+        allow_partial=allow_partial,
+    )
 
-    best_match = _find_best_match(event, internal_records, window_minutes=window_minutes, tolerance_percent=tolerance_percent, allow_partial=allow_partial)
     if best_match is None:
         return {
             "trans_id": trans_id,
@@ -102,34 +118,35 @@ def _find_best_match(
     tolerance_percent: float = 0.5,
     allow_partial: bool = True,
 ) -> Optional[Dict[str, Any]]:
-    amount = _coerce_amount(event.get("TransAmount"))
+    """Match callback event against candidate internal records."""
+    amount = _coerce_amount(event.get("TransAmount") or event.get("amount"))
     if amount is None or amount <= 0:
         return None
 
-    phone = str(event.get("MSISDN", ""))
+    phone = str(event.get("MSISDN") or event.get("phone_number") or "").strip()
     event_time = _parse_event_time(event.get("TransTime"))
     allowed_delta = max(0.01, abs(amount) * (float(tolerance_percent) / 100.0))
 
     candidates = []
     for record in internal_records:
-        record_time = _parse_record_time(record.get("timestamp"))
-        if record_time is None or event_time is None:
-            continue
+        record_time = _parse_record_time(record.get("timestamp") or record.get("synced_at") or record.get("created_at"))
+        
+        latency = 0
+        if record_time is not None and event_time is not None:
+            latency = int(abs((event_time - record_time).total_seconds()))
+            if latency > window_minutes * 60:
+                continue
 
-        latency = int(abs((event_time - record_time).total_seconds()))
-        if latency > window_minutes * 60:
-            continue
-
-        try:
-            record_amount = float(record.get("amount", 0))
-        except Exception:
+        record_amount = _coerce_amount(record.get("amount"))
+        if record_amount is None:
             continue
 
         amt_diff = abs(record_amount - amount)
         if amt_diff > allowed_delta:
             continue
 
-        phone_matches = str(record.get("phone_number", "")) == phone
+        record_phone = str(record.get("phone_number") or record.get("msisdn") or "").strip()
+        phone_matches = record_phone == phone and len(phone) > 0
 
         if phone_matches and amt_diff == 0:
             match_type = "exact"
@@ -152,25 +169,55 @@ def _find_best_match(
         return None
 
     priority = {"exact": 0, "fuzzy_exact": 1, "partial_fuzzy": 2, "partial": 3}
-    candidates.sort(key=lambda item: (priority.get(item["match_type"], 99), item["latency_seconds"], item.get("amount_diff", 0)))
+    candidates.sort(
+        key=lambda item: (
+            priority.get(item["match_type"], 99),
+            item["latency_seconds"],
+            item["amount_diff"],
+        )
+    )
     return candidates[0]
 
 
 def _coerce_amount(value: Any) -> Optional[float]:
+    """Safely cast raw values to float."""
+    if value is None:
+        return None
     try:
-        return float(value)
+        val = float(value)
+        return val if not math.isnan(val) else None
     except (TypeError, ValueError):
         return None
 
 
+import math
+
+
 def _parse_event_time(value: Any) -> Optional[datetime]:
-    if value is None:
+    """Parse M-Pesa 14-digit Daraja timestamp strings or ISO timestamps into UTC datetimes."""
+    if not value:
         return None
-    text = str(value)
+
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    text = str(value).strip()
     if len(text) == 14 and text.isdigit():
-        return datetime.strptime(text, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+        try:
+            return datetime.strptime(text, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     except ValueError:
         return None
 
@@ -182,34 +229,25 @@ def _parse_record_time(value: Any) -> Optional[datetime]:
 def reconcile_with_idempotency(
     event: Dict[str, Any],
     internal_records: Sequence[Dict[str, Any]],
-    event_store,
-    discrepancy_dao,
-    session,
-    tenant_id: str = None,
+    event_store: Any,
+    discrepancy_dao: Any,
+    session: Any,
+    tenant_id: Optional[str] = None,
     tenant_settings: Optional[Dict[str, Any]] = None,
     window_minutes: int = 15,
     source_ip: Optional[str] = None,
     signature_verified: bool = False,
 ) -> Dict[str, Any]:
-    """Atomically evaluate and record reconciliation within a SINGLE transaction.
+    """Atomically evaluate and record reconciliation outcomes inside a single database transaction.
 
-    Both the idempotency ledger write (ProcessedTransaction + Transaction) and the
-    reconciliation outcome write (Discrepancy, when applicable) happen on the same
-    `session` and commit together exactly once. If either fails, both roll back —
-    there is no window where one is persisted and the other is silently lost.
-
-    Returns a dict with at minimum: trans_id, status, severity, anomalies.
-    status == "duplicate_ignored" means no reconciliation write happened because
-    this trans_id was already processed (either seen before this call, or caught
-    by the unique constraint during this call).
+    Ensures that both the idempotency ledger write and the Discrepancy write commit
+    together or roll back entirely.
     """
-    trans_id = str(event.get("TransID", "unknown"))
+    trans_id = str(event.get("TransID") or event.get("trans_id") or "unknown").strip()
 
-    # Cheap pre-check outside the transaction — pure optimization to skip evaluation
-    # work for callbacks we already know about. NOT the safety guarantee; that's the
-    # flush + unique constraint inside mark_processed_in_session below.
-    if event_store.already_processed(trans_id):
-        logger.info("Idempotency: duplicate trans_id=%s detected before evaluation, skipping", trans_id)
+    # Pre-flight duplicate check optimization
+    if event_store and event_store.already_processed(trans_id):
+        logger.info("Idempotency: duplicate trans_id=%s detected prior to evaluation, skipping", trans_id)
         return {
             "trans_id": trans_id,
             "status": "duplicate_ignored",
@@ -219,28 +257,29 @@ def reconcile_with_idempotency(
 
     seen_trans_ids: Set[str] = set()
     evaluation = evaluate_transaction(
-        event, internal_records, seen_trans_ids, window_minutes=window_minutes, tenant_settings=tenant_settings,
+        event,
+        internal_records,
+        seen_trans_ids,
+        window_minutes=window_minutes,
+        tenant_settings=tenant_settings,
     )
-    evaluation["tenant_id"] = tenant_id
+    evaluation["tenant_id"] = tenant_id or "default"
     evaluation["event"] = event
 
     try:
-        # Step 1: attempt the idempotency ledger write on THIS session, not committed yet.
-        result = event_store.mark_processed_in_session(
-            session,
-            event,
-            tenant_id=tenant_id,
-            source_ip=source_ip,
-            signature_verified=signature_verified,
-        )
+        result = ProcessResult.STORED
+        if event_store:
+            result = event_store.mark_processed_in_session(
+                session,
+                event,
+                tenant_id=tenant_id,
+                source_ip=source_ip,
+                signature_verified=signature_verified,
+            )
 
         if result == ProcessResult.DUPLICATE:
-            # A concurrent callback for the same trans_id won the race. Roll back
-            # anything staged in this session and return a clean duplicate result —
-            # crucially, we do this BEFORE writing any Discrepancy record, so we never
-            # end up with a discrepancy for a transaction whose ledger write lost the race.
             session.rollback()
-            logger.info("Duplicate trans_id=%s caught during idempotency write, skipping reconciliation write", trans_id)
+            logger.info("Duplicate trans_id=%s caught during idempotency session flush, skipping", trans_id)
             return {
                 "trans_id": trans_id,
                 "status": "duplicate_ignored",
@@ -252,8 +291,7 @@ def reconcile_with_idempotency(
             session.rollback()
             raise RuntimeError(f"mark_processed_in_session failed validation for trans_id={trans_id}")
 
-        # Step 2: only now write the reconciliation outcome — same session, same
-        # not-yet-committed transaction as the ledger write above.
+        # Record discrepancy for non-matched or anomalous transactions
         if evaluation.get("status") in {"needs_review", "missing_payment"} or evaluation.get("anomalies"):
             if discrepancy_dao:
                 disc_id = f"{trans_id}-{evaluation.get('status', 'unknown')}"
@@ -267,13 +305,11 @@ def reconcile_with_idempotency(
                     details=evaluation,
                 )
 
-        # Step 3: single explicit commit. Ledger write + discrepancy write succeed together.
         session.commit()
         evaluation["duplicate"] = False
         return evaluation
 
-    except Exception:
-        logger.exception("Error during atomic reconciliation for trans_id=%s — rolling back both writes", trans_id)
+    except Exception as exc:
+        logger.exception("Error during atomic reconciliation for trans_id=%s — rolling back: %s", trans_id, exc)
         session.rollback()
         raise
-

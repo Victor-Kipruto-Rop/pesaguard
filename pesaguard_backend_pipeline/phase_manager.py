@@ -1,5 +1,17 @@
-from dataclasses import dataclass
-from typing import List, Optional
+"""
+PesaGuard Engineering Roadmap & Business Readiness Track Definition.
+
+Defines the 15-phase technical evolution and parallel business/compliance track
+for PesaGuard's M-Pesa automated reconciliation engine.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -10,6 +22,10 @@ class Phase:
     source_prompt: str
     description: str
     bullets: List[str]
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert Phase instance to a dictionary."""
+        return asdict(self)
 
 
 PHASES: List[Phase] = [
@@ -218,10 +234,10 @@ PHASES: List[Phase] = [
     ),
 ]
 
-BUSINESS_READINESS_TRACK = [
+BUSINESS_READINESS_TRACK: List[str] = [
     "Terms of Service & Privacy Policy",
     "Data Processing Agreement (DPA)",
-    "ODPC registration",
+    "ODPC registration (Office of the Data Protection Commissioner)",
     "E&O / liability insurance",
     "Pricing/packaging",
     "One-page pilot agreement",
@@ -230,6 +246,7 @@ BUSINESS_READINESS_TRACK = [
 
 
 def get_phase(number: int) -> Optional[Phase]:
+    """Retrieve Phase instance by phase number."""
     for phase in PHASES:
         if phase.number == number:
             return phase
@@ -237,23 +254,34 @@ def get_phase(number: int) -> Optional[Phase]:
 
 
 def list_phases() -> List[Phase]:
+    """Return a copy of all defined roadmap phases."""
     return PHASES.copy()
 
 
 def list_business_readiness_items() -> List[str]:
+    """Return a copy of all business and legal readiness track items."""
     return BUSINESS_READINESS_TRACK.copy()
 
 
+def phase_as_markdown(phase: Phase) -> str:
+    """Format a single Phase into Markdown representation."""
+    lines = [
+        f"## Phase {phase.number}: {phase.title}",
+        f"- **Timeline:** {phase.timeline}",
+        f"- **Source:** {phase.source_prompt}",
+        f"- **Description:** {phase.description}",
+        "- **Requirements:**",
+    ]
+    for bullet in phase.bullets:
+        lines.append(f"  - {bullet}")
+    return "\n".join(lines)
+
+
 def as_markdown() -> str:
+    """Format the complete roadmap into Markdown text."""
     lines = ["# PesaGuard Phased Roadmap\n"]
     for phase in PHASES:
-        lines.append(f"## Phase {phase.number}: {phase.title}")
-        lines.append(f"- Timeline: {phase.timeline}")
-        lines.append(f"- Source: {phase.source_prompt}")
-        lines.append(f"- Description: {phase.description}")
-        lines.append("- Requirements:")
-        for bullet in phase.bullets:
-            lines.append(f"  - {bullet}")
+        lines.append(phase_as_markdown(phase))
         lines.append("")
     lines.append("## Parallel Business & Operational Readiness Track")
     for item in BUSINESS_READINESS_TRACK:
@@ -262,22 +290,37 @@ def as_markdown() -> str:
 
 
 if __name__ == "__main__":
-    import argparse
-
     parser = argparse.ArgumentParser(description="Inspect the PesaGuard roadmap phases.")
-    parser.add_argument("--list", action="store_true", help="List all phases")
+    parser.add_argument("--list", action="store_true", help="List summary of all phases")
     parser.add_argument("--phase", type=int, help="Show details for a specific phase number")
     parser.add_argument("--business-track", action="store_true", help="List business readiness items")
+    parser.add_argument("--json", action="store_true", help="Output phase details as JSON")
     args = parser.parse_args()
 
     if args.phase is not None:
-        phase = get_phase(args.phase)
-        if not phase:
-            raise SystemExit(f"Phase {args.phase} not found")
-        print(as_markdown())
+        p = get_phase(args.phase)
+        if not p:
+            sys.exit(f"Error: Phase {args.phase} not found.")
+        if args.json:
+            print(json.dumps(p.to_dict(), indent=2))
+        else:
+            print(phase_as_markdown(p))
     elif args.business_track:
-        print("Parallel Business & Operational Readiness Track:\n")
-        for item in BUSINESS_READINESS_TRACK:
-            print(f"- {item}")
+        if args.json:
+            print(json.dumps(BUSINESS_READINESS_TRACK, indent=2))
+        else:
+            print("Parallel Business & Operational Readiness Track:\n")
+            for item in BUSINESS_READINESS_TRACK:
+                print(f"- {item}")
+    elif args.list:
+        for phase in PHASES:
+            print(f"Phase {phase.number:02d}: {phase.title} ({phase.timeline})")
     else:
-        print(as_markdown())
+        if args.json:
+            data = {
+                "phases": [p.to_dict() for p in PHASES],
+                "business_readiness_track": BUSINESS_READINESS_TRACK,
+            }
+            print(json.dumps(data, indent=2))
+        else:
+            print(as_markdown())

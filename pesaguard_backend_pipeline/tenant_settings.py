@@ -1,96 +1,126 @@
-"""Tenant-level settings and admin configuration helpers."""
+"""
+Flask REST API Blueprint for PesaGuard Tenant Settings & Alert Testing.
 
-import json
-import os
-from typing import Any, Dict, Optional
+Exposes management routes for retrieving tenant configuration parameters, patching
+notification thresholds and data residency preferences, and dispatching test alerts.
+"""
 
-from localization_utils import normalise_locale
+from __future__ import annotations
+
+import logging
+from typing import Any, Dict
+
+from flask import Blueprint, jsonify, request, g
+
+from alerting_service import AlertingService
+from rbac import PERM_MANAGE_SETTINGS, PERM_VIEW_SETTINGS, enforce_permission, has_permission
+from security_helpers import is_payload_within_limit, sanitize_error_message
+from tenant_settings_store import TenantSettingsStore
+
+logger = logging.getLogger("pesaguard.settings_api")
+
+settings_bp = Blueprint("settings_api", __name__, url_prefix="/api/v1/settings")
+settings_store = TenantSettingsStore()
 
 
-class TenantSettingsStore:
-    """Very small in-file settings store for pilot tenants."""
+def _get_current_context() -> tuple[str, str]:
+    """Helper to extract tenant_id and role from request context or fallback."""
+    user = getattr(g, "user", None)
+    tenant_id = getattr(g, "tenant_id", None) or request.headers.get("X-Tenant-ID") or "default"
+    role = getattr(user, "role", "viewer") if user else "admin"
+    return tenant_id, role
 
-    def __init__(self, path: Optional[str] = None):
-        self.path = path or os.getenv("TENANT_SETTINGS_FILE", "tenant_settings.json")
-        self._data: Dict[str, Any] = self._load()
 
-    def _load(self) -> Dict[str, Any]:
-        if not os.path.exists(self.path):
-            return {
-                "default": {
-                    "alert_channels": ["slack"],
-                    "thresholds": {"warning": 1000, "critical": 5000},
-                    "preferred_locale": "en",
-                    "deployment_region": "ke-1",
-                    "backup_region": "ke-1",
-                    "log_region": "ke-1",
-                    "cross_border_transfer_allowed": False,
-                }
-            }
-        with open(self.path, "r", encoding="utf-8") as handle:
-            return json.load(handle)
+@settings_bp.route("", methods=["GET"])
+def get_tenant_settings():
+    """Retrieve full merged settings configuration for the active tenant."""
+    tenant_id, role = _get_current_context()
 
-    def save(self) -> None:
-        with open(self.path, "w", encoding="utf-8") as handle:
-            json.dump(self._data, handle, indent=2)
+    if not has_permission(role, PERM_VIEW_SETTINGS):
+        return jsonify({"error": "forbidden", "message": "Insufficient permissions to view settings."}), 403
 
-    def _normalize_setting_value(self, key: str, value: Any) -> Any:
-        if key in {"preferred_locale", "default_locale"} and isinstance(value, str):
-            return normalise_locale(value)
-        if key == "user_locale_overrides" and isinstance(value, dict):
-            return {
-                user_id: (normalise_locale(str(locale)) if isinstance(locale, str) else locale)
-                for user_id, locale in value.items()
-            }
-        if isinstance(value, dict):
-            return {nested_key: self._normalize_setting_value(nested_key, nested_value) for nested_key, nested_value in value.items()}
-        return value
+    try:
+        cfg = settings_store.get(tenant_id)
+        residency = settings_store.get_residency_context(tenant_id)
+        
+        return jsonify({
+            "status": "success",
+            "tenant_id": tenant_id,
+            "settings": cfg,
+            "residency_compliance": residency,
+        }), 200
+    except Exception as exc:
+        logger.exception("Error retrieving settings for tenant_id=%s: %s", tenant_id, exc)
+        return jsonify({"error": "internal_error", "message": sanitize_error_message(exc)}), 500
 
-    def _normalize_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return {key: self._normalize_setting_value(key, value) for key, value in payload.items()}
 
-    def get(self, tenant_id: str) -> Dict[str, Any]:
-        default_settings = self._data.get("default", {})
-        tenant_settings = self._data.get(tenant_id, {})
-        merged = {**default_settings, **tenant_settings}
-        if isinstance(merged.get("preferred_locale"), str):
-            merged["preferred_locale"] = normalise_locale(merged["preferred_locale"])
-        if isinstance(merged.get("default_locale"), str):
-            merged["default_locale"] = normalise_locale(merged["default_locale"])
-        return merged
+@settings_bp.route("", methods=["PATCH"])
+def update_tenant_settings():
+    """Update settings parameters for the active tenant."""
+    if not is_payload_within_limit(request):
+        return jsonify({"error": "payload_too_large", "message": "Request payload exceeds size limit."}), 413
 
-    def resolve_locale(self, tenant_id: str, user_id: Optional[str] = None, fallback_locale: str = "en") -> str:
-        tenant_settings = self.get(tenant_id)
-        if user_id:
-            user_overrides = tenant_settings.get("user_locale_overrides") or {}
-            if isinstance(user_overrides, dict):
-                override = user_overrides.get(user_id) or user_overrides.get(str(user_id))
-                if override:
-                    return normalise_locale(str(override))
+    tenant_id, role = _get_current_context()
 
-        preferred_locale = tenant_settings.get("preferred_locale") or tenant_settings.get("default_locale")
-        return normalise_locale(str(preferred_locale or fallback_locale))
+    try:
+        enforce_permission(role, PERM_MANAGE_SETTINGS, tenant_id=tenant_id)
+    except PermissionError as exc:
+        return jsonify({"error": "forbidden", "message": str(exc)}), 403
 
-    def get_residency_context(self, tenant_id: str) -> Dict[str, Any]:
-        tenant_settings = self.get(tenant_id)
-        deployment_region = tenant_settings.get("deployment_region") or tenant_settings.get("region") or "ke-1"
-        return {
-            "deployment_region": deployment_region,
-            "backup_region": tenant_settings.get("backup_region") or deployment_region,
-            "log_region": tenant_settings.get("log_region") or deployment_region,
-            "cross_border_transfer_allowed": bool(tenant_settings.get("cross_border_transfer_allowed", False)),
-            "data_residency_note": tenant_settings.get("data_residency_note") or f"Primary data, backups, and logs should stay in {deployment_region}.",
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "invalid_json", "message": "Request body must be a valid JSON object."}), 400
+
+    try:
+        updated_cfg = settings_store.update(tenant_id, payload)
+        logger.info("Successfully updated settings for tenant_id=%s by role=%s", tenant_id, role)
+        
+        return jsonify({
+            "status": "success",
+            "message": "Tenant settings updated successfully.",
+            "tenant_id": tenant_id,
+            "settings": updated_cfg,
+        }), 200
+    except Exception as exc:
+        logger.exception("Error updating settings for tenant_id=%s: %s", tenant_id, exc)
+        return jsonify({"error": "update_failed", "message": sanitize_error_message(exc)}), 500
+
+
+@settings_bp.route("/test-alert", methods=["POST"])
+def trigger_test_alert():
+    """Send a test verification notification to tenant's configured alert channels."""
+    tenant_id, role = _get_current_context()
+
+    try:
+        enforce_permission(role, PERM_MANAGE_SETTINGS, tenant_id=tenant_id)
+    except PermissionError as exc:
+        return jsonify({"error": "forbidden", "message": str(exc)}), 403
+
+    payload = request.get_json(silent=True) or {}
+    target_channel = payload.get("channel")  # Optional override: 'slack', 'sms', 'email'
+
+    try:
+        tenant_cfg = settings_store.get(tenant_id)
+        alert_service = AlertingService(tenant_settings=tenant_cfg)
+
+        test_evaluation: Dict[str, Any] = {
+            "trans_id": "TEST-PING-001",
+            "tenant_id": tenant_id,
+            "status": "needs_review",
+            "severity": "warning",
+            "anomalies": ["test_alert_verification"],
+            "match": {"match_type": "none", "reason": "System verification test ping"},
         }
 
-    def update(self, tenant_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        existing = self._data.get(tenant_id, {})
-        merged = dict(existing)
-        normalized_payload = self._normalize_payload(payload)
-        for key, value in normalized_payload.items():
-            if isinstance(value, dict) and isinstance(existing.get(key), dict):
-                merged[key] = {**existing[key], **value}
-            else:
-                merged[key] = value
-        self._data[tenant_id] = merged
-        self.save()
-        return self.get(tenant_id)
+        dispatch_result = alert_service.handle_discrepancy(test_evaluation, override_channel=target_channel)
+
+        return jsonify({
+            "status": "success",
+            "message": "Test alert successfully dispatched.",
+            "tenant_id": tenant_id,
+            "result": dispatch_result,
+        }), 200
+
+    except Exception as exc:
+        logger.exception("Failed to dispatch test alert for tenant_id=%s: %s", tenant_id, exc)
+        return jsonify({"error": "alert_dispatch_failed", "message": sanitize_error_message(exc)}), 500
