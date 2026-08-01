@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Set
 
 from event_store import ProcessResult
+from reconciliation_scoring import score_match
 
 # Import normalization helpers (added in feat/phase1-reconciliation-systematic)
 from .reconciliation_utils import normalize_daraja_event, time_window_match
@@ -171,12 +172,15 @@ def _find_best_match(
         else:
             continue
 
+        candidate_score, candidate_reasons = score_match(event, record)
         candidates.append({
             "match_type": match_type,
             "internal_ref": record.get("internal_ref"),
             "record": record,
             "latency_seconds": latency,
             "amount_diff": amt_diff,
+            "score": candidate_score,
+            "reasons": candidate_reasons,
         })
 
     if not candidates:
@@ -185,6 +189,7 @@ def _find_best_match(
     priority = {"exact": 0, "fuzzy_exact": 1, "partial_fuzzy": 2, "partial": 3}
     candidates.sort(
         key=lambda item: (
+            -item.get("score", 0.0),
             priority.get(item["match_type"], 99),
             item["latency_seconds"],
             item["amount_diff"],

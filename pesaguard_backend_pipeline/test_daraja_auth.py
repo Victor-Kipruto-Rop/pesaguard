@@ -10,56 +10,65 @@ from shared.daraja.auth_client import DarajaAuthClient
 
 
 class DummyResponse:
-    def __init__(self, status_code=200, json_data=None):
+    def __init__(self, status_code=200, json_data=None, text=""):
         self.status_code = status_code
         self._json_data = json_data or {}
+        self.text = text
 
     def json(self):
         return self._json_data
 
 
-def test_token_is_cached_and_refreshed(monkeypatch):
-    calls = []
-
-    class DummyCache:
+def test_token_is_cached(monkeypatch):
+    class DummySession:
         def __init__(self):
-            self.store = {}
+            self.calls = 0
 
-        def get(self, key):
-            return self.store.get(key)
+        def get(self, url, auth=None, timeout=None):
+            self.calls += 1
+            return DummyResponse(status_code=200, json_data={"access_token": "token-1", "expires_in": 3600})
 
-        def set(self, key, value, ttl):
-            self.store[key] = {"value": value, "ttl": ttl}
-
-    def fake_fetch(*args, **kwargs):
-        client = args[1] if len(args) > 1 else None
-        if client is not None:
-            calls.append(client.tenant_id)
-        return {"access_token": "token-1", "expires_in": 3600}
-
-    client = DarajaAuthClient(tenant_id="tenant-a", credentials={"consumer_key": "k", "consumer_secret": "s"}, cache=DummyCache())
-    monkeypatch.setattr(client, "_fetch_access_token", fake_fetch)
+    session = DummySession()
+    client = DarajaAuthClient(
+        tenant_id="tenant-a",
+        credentials={"consumer_key": "k", "consumer_secret": "s", "base_url": "https://sandbox.safaricom.co.ke"},
+        session=session,
+    )
 
     first = client.get_access_token()
     second = client.get_access_token()
 
     assert first == "token-1"
     assert second == "token-1"
-    assert len(calls) == 1
+    assert session.calls == 1
 
 
 def test_401_triggers_refresh(monkeypatch):
-    responses = iter([
-        DummyResponse(status_code=401, json_data={"error": "expired"}),
-        DummyResponse(status_code=200, json_data={"access_token": "token-2", "expires_in": 3600}),
-    ])
-
     class DummySession:
-        def post(self, url, auth=None, timeout=None):
-            return next(responses)
+        def __init__(self):
+            self.oauth_calls = 0
+            self.request_calls = 0
 
-    client = DarajaAuthClient(tenant_id="tenant-b", credentials={"consumer_key": "k", "consumer_secret": "s"}, session=DummySession(), cache=SimpleNamespace(get=lambda key: None, set=lambda key, value, ttl: None))
+        def get(self, url, auth=None, timeout=None):
+            self.oauth_calls += 1
+            token = "token-1" if self.oauth_calls == 1 else "token-2"
+            return DummyResponse(status_code=200, json_data={"access_token": token, "expires_in": 3600})
 
-    token = client.get_access_token()
+        def request(self, method, url, headers=None, **kwargs):
+            self.request_calls += 1
+            if self.request_calls == 1:
+                return DummyResponse(status_code=401, json_data={"error": "expired"})
+            return DummyResponse(status_code=200, json_data={"ok": True})
 
-    assert token == "token-2"
+    session = DummySession()
+    client = DarajaAuthClient(
+        tenant_id="tenant-b",
+        credentials={"consumer_key": "k", "consumer_secret": "s", "base_url": "https://sandbox.safaricom.co.ke"},
+        session=session,
+    )
+
+    response = client.request("POST", "https://sandbox.safaricom.co.ke/mpesa/stkpush/v1/processrequest", json={"Amount": 10})
+
+    assert response.status_code == 200
+    assert session.oauth_calls >= 2
+    assert session.request_calls == 2

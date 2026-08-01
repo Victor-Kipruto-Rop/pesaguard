@@ -8,13 +8,12 @@ and authorized API request dispatching with multi-tenant credential isolation.
 from __future__ import annotations
 
 import logging
-import threading
-import time
 from typing import Any, Dict, Optional
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+
+from shared.daraja.oauth import DarajaOAuth
+from utils.retries import retry_with_backoff
 
 logger = logging.getLogger("pesaguard.daraja_auth")
 
@@ -33,147 +32,84 @@ class DarajaAuthClient:
         self.credentials = credentials or {}
         self.cache = cache
         self._token_cache_key = f"pesaguard:daraja:token:{self.tenant_id}"
-        self._last_token: Optional[str] = None
-        self._lock = threading.Lock()
+        self.session = session or requests.Session()
 
-        # Configure session with robust retry adapter for transient network/gateway errors
-        if session is not None:
-            self.session = session
-        else:
-            self.session = requests.Session()
-            retries = Retry(
-                total=3,
-                backoff_factor=0.5,
-                status_forcelist=[502, 503, 504],
-                raise_on_status=False,
-            )
-            adapter = HTTPAdapter(max_retries=retries)
-            self.session.mount("https://", adapter)
+        self.oauth = DarajaOAuth(
+            client_id=self.credentials.get("consumer_key", ""),
+            client_secret=self.credentials.get("consumer_secret", ""),
+            base_url=self.credentials.get("base_url", "https://sandbox.safaricom.co.ke"),
+            session=self.session,
+        )
 
     def get_access_token(self) -> str:
         """Retrieve a valid access token from cache or fetch a new one with thread safety."""
-        # 1. Try fast path read (no lock)
         cached = self._read_cache()
         if cached:
             return cached
 
-        # 2. Acquire lock to prevent cache stampedes / concurrent token fetches
-        with self._lock:
-            # Double-check cache inside lock
-            cached = self._read_cache()
-            if cached:
-                return cached
+        token = self.oauth.get_access_token()
+        self._write_cache(token, ttl=3300)
+        return token
 
-            payload = self._call_fetcher()
-            token = payload.get("access_token", "") if isinstance(payload, dict) else str(payload)
-            if not token:
-                logger.error("Daraja authentication payload missing 'access_token' for tenant=%s", self.tenant_id)
-                raise RuntimeError("Daraja authentication response missing 'access_token'")
-
-            # Cache with 3300s TTL (Daraja tokens expire in 3600s / 1 hour)
-            self._write_cache(token, ttl=3300)
-            logger.info("Successfully acquired and cached Daraja access token for tenant=%s", self.tenant_id)
-            return token
-
-    def _call_fetcher(self) -> Any:
-        """Robustly invoke the token fetcher method handling different signature variants."""
-        for call in (
-            lambda: self._fetch_access_token(self, self),
-            lambda: self._fetch_access_token(self),
-            lambda: self._fetch_access_token(),
-        ):
-            try:
-                return call()
-            except TypeError:
-                continue
-        raise RuntimeError("Daraja auth fetcher could not be successfully invoked due to signature mismatch.")
+    def force_refresh(self) -> str:
+        token = self.oauth.force_refresh()
+        self._write_cache(token, ttl=3300)
+        return token
 
     def _read_cache(self) -> Optional[str]:
-        """Read token from external cache backend or in-memory fallback."""
+        """Read token from external cache backend when available."""
         if self.cache is None:
-            return self._last_token
+            return None
         try:
             value = self.cache.get(self._token_cache_key)
             if not value:
                 return None
             if isinstance(value, dict):
                 return value.get("value")
+            if isinstance(value, bytes):
+                return value.decode("utf-8")
             return str(value)
         except Exception as exc:
             logger.warning("Failed to read token from cache for tenant=%s: %s", self.tenant_id, exc)
-            return self._last_token
+            return None
 
     def _write_cache(self, token: str, ttl: int) -> None:
-        """Write token to cache backend or in-memory fallback with TTL."""
-        self._last_token = token
         if self.cache is None:
             return
         try:
             if hasattr(self.cache, "setex"):
                 self.cache.setex(self._token_cache_key, ttl, token)
-            else:
-                self.cache.set(self._token_cache_key, {"value": token}, ex=ttl)
+            elif hasattr(self.cache, "set"):
+                self.cache.set(self._token_cache_key, {"value": token}, ttl)
         except Exception as exc:
-            logger.error("Failed to write token to cache for tenant=%s: %s", self.tenant_id, exc)
+            logger.warning("Failed to write token to cache for tenant=%s: %s", self.tenant_id, exc)
 
     def _fetch_access_token(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
-        """Call Safaricom Daraja OAuth endpoint to generate a new access token."""
-        base_url = self.credentials.get("base_url", "https://sandbox.safaricom.co.ke").rstrip("/")
-        auth_url = f"{base_url}/oauth/v1/generate?grant_type=client_credentials"
-        consumer_key = self.credentials.get("consumer_key", "")
-        consumer_secret = self.credentials.get("consumer_secret", "")
-
-        if not consumer_key or not consumer_secret:
-            raise ValueError(f"Missing Daraja consumer key or secret for tenant={self.tenant_id}")
-
-        response = self.session.post(
-            auth_url,
-            auth=(consumer_key, consumer_secret),
-            timeout=10,
-        )
-
-        if response.status_code == 401:
-            logger.warning("Daraja auth returned 401 for tenant=%s. Retrying once...", self.tenant_id)
-            time.sleep(0.5)
-            retry_response = self.session.post(
-                auth_url,
-                auth=(consumer_key, consumer_secret),
-                timeout=10,
-            )
-            if retry_response.status_code == 200:
-                return retry_response.json()
-            raise RuntimeError(f"Daraja authentication failed after retry with status {retry_response.status_code}: {retry_response.text}")
-
-        if response.status_code != 200:
-            raise RuntimeError(f"Daraja authentication failed with status {response.status_code}: {response.text}")
-
-        return response.json()
+        """Compatibility wrapper retained for existing tests/integration points."""
+        token = self.force_refresh()
+        return {"access_token": token, "expires_in": 3600}
 
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         """Execute an authenticated HTTP request against Daraja APIs, handling token expiration."""
-        token = self.get_access_token()
-        headers = kwargs.pop("headers", {})
-        headers.setdefault("Authorization", f"Bearer {token}")
+        headers = dict(kwargs.pop("headers", {}) or {})
 
-        response = self.session.request(method=method, url=url, headers=headers, **kwargs)
+        def _send_once() -> requests.Response:
+            token = self.get_access_token()
+            headers["Authorization"] = "Bearer " + token
+            response = self.session.request(method=method, url=url, headers=headers, **kwargs)
+            if response.status_code >= 500:
+                raise RuntimeError(f"daraja upstream temporary failure: {response.status_code}")
+            return response
+
+        response = retry_with_backoff(_send_once, retries=5, base=0.5, max_backoff=30, jitter="full")
 
         if response.status_code == 401:
-            logger.warning("Daraja API request returned 401 for tenant=%s. Forcing token refresh and retrying...", self.tenant_id)
-            with self._lock:
-                # Force invalidate cache / last token
-                if self.cache is not None:
-                    try:
-                        self.cache.delete(self._token_cache_key)
-                    except Exception:
-                        pass
-                self._last_token = None
-
-                refreshed_payload = self._fetch_access_token()
-                refreshed_token = refreshed_payload.get("access_token", "") if isinstance(refreshed_payload, dict) else str(refreshed_payload)
-                
-                if refreshed_token:
-                    self._write_cache(refreshed_token, ttl=3300)
-                    headers["Authorization"] = f"Bearer {refreshed_token}"
-                    response = self.session.request(method=method, url=url, headers=headers, **kwargs)
+            logger.warning(
+                "Daraja API request returned 401 for tenant=%s. Refreshing token and retrying once.",
+                self.tenant_id,
+            )
+            refreshed = self.force_refresh()
+            headers["Authorization"] = "Bearer " + refreshed
+            response = self.session.request(method=method, url=url, headers=headers, **kwargs)
 
         return response

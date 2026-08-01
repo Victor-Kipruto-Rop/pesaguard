@@ -18,6 +18,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
+from idempotency import derive_idempotency_key
 from models import Base, ProcessedTransaction, Transaction
 
 logger = logging.getLogger("pesaguard.event_store")
@@ -140,6 +141,7 @@ class EventStore:
             ProcessResult.ERROR     — genuine failure, caller should signal retry
         """
         trans_id = str(payload.get("TransID", "")).strip()
+        idempotency_key = derive_idempotency_key(payload)
         if not trans_id:
             logger.error("mark_processed() called with missing TransID in payload")
             return ProcessResult.ERROR
@@ -179,14 +181,19 @@ class EventStore:
                 return ProcessResult.STORED
 
         except IntegrityError:
-            logger.info("Duplicate webhook callback ignored for trans_id=%s (unique constraint)", trans_id)
+            logger.info(
+                "Duplicate webhook callback ignored for trans_id=%s idempotency_key=%s (unique constraint)",
+                trans_id,
+                idempotency_key,
+            )
             return ProcessResult.DUPLICATE
 
         except SQLAlchemyError:
             logger.exception(
-                "mark_processed() failed for trans_id=%s due to a DB error, not a "
+                "mark_processed() failed for trans_id=%s idempotency_key=%s due to a DB error, not a "
                 "duplicate — this transaction was NOT stored and needs retry/investigation.",
                 trans_id,
+                idempotency_key,
             )
             return ProcessResult.ERROR
 
@@ -208,6 +215,7 @@ class EventStore:
             ProcessResult.ERROR     — payload was invalid or unrecoverable error occurred
         """
         trans_id = str(payload.get("TransID", "")).strip()
+        idempotency_key = derive_idempotency_key(payload)
         if not trans_id:
             logger.error("mark_processed_in_session() called with missing TransID in payload")
             return ProcessResult.ERROR
@@ -252,13 +260,18 @@ class EventStore:
         except IntegrityError:
             savepoint.rollback()
             logger.info(
-                "Duplicate trans_id=%s caught at flush time (race window closed by unique constraint)",
+                "Duplicate trans_id=%s idempotency_key=%s caught at flush time (race window closed by unique constraint)",
                 trans_id,
+                idempotency_key,
             )
             return ProcessResult.DUPLICATE
         except SQLAlchemyError:
             savepoint.rollback()
-            logger.exception("mark_processed_in_session() encountered database error for trans_id=%s", trans_id)
+            logger.exception(
+                "mark_processed_in_session() encountered database error for trans_id=%s idempotency_key=%s",
+                trans_id,
+                idempotency_key,
+            )
             return ProcessResult.ERROR
 
     def update_processing_status(
