@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Set
 
 from event_store import ProcessResult
+from reconciliation_utils import normalize_daraja_event, time_window_match
 
 logger = logging.getLogger("pesaguard.reconciliation_engine")
 
@@ -35,20 +36,21 @@ def evaluate_transaction(
     Returns:
         Structured evaluation outcome dict
     """
-    trans_id = str(event.get("TransID") or event.get("trans_id") or "unknown").strip()
+    normalized_event = normalize_daraja_event(event)
+    trans_id = str(normalized_event.get("trans_id") or "unknown").strip()
     duplicate = trans_id in seen_trans_ids
 
     anomalies: List[str] = []
     if duplicate:
         anomalies.append("duplicate_transaction_id")
 
-    event_time = _parse_event_time(event.get("TransTime"))
+    event_time = normalized_event.get("timestamp")
     if event_time:
         latency = (datetime.now(timezone.utc) - event_time).total_seconds()
         if latency > 3600:
             anomalies.append("late_arriving_event")
 
-    amount = _coerce_amount(event.get("TransAmount") or event.get("amount"))
+    amount = normalized_event.get("amount")
     if amount is None or amount <= 0:
         anomalies.append("invalid_or_zero_amount")
 
@@ -74,7 +76,7 @@ def evaluate_transaction(
         }
 
     best_match = _find_best_match(
-        event,
+        normalized_event,
         internal_records,
         window_minutes=window_minutes,
         tolerance_percent=tolerance_percent,
@@ -119,111 +121,17 @@ def _find_best_match(
     allow_partial: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Match callback event against candidate internal records."""
-    amount = _coerce_amount(event.get("TransAmount") or event.get("amount"))
-    if amount is None or amount <= 0:
-        return None
+    normalized_event = event
+    if "amount" not in event or "phone_number" not in event:
+        normalized_event = normalize_daraja_event(event)
 
-    phone = str(event.get("MSISDN") or event.get("phone_number") or "").strip()
-    event_time = _parse_event_time(event.get("TransTime"))
-    allowed_delta = max(0.01, abs(amount) * (float(tolerance_percent) / 100.0))
-
-    candidates = []
-    for record in internal_records:
-        record_time = _parse_record_time(record.get("timestamp") or record.get("synced_at") or record.get("created_at"))
-        
-        latency = 0
-        if record_time is not None and event_time is not None:
-            latency = int(abs((event_time - record_time).total_seconds()))
-            if latency > window_minutes * 60:
-                continue
-
-        record_amount = _coerce_amount(record.get("amount"))
-        if record_amount is None:
-            continue
-
-        amt_diff = abs(record_amount - amount)
-        if amt_diff > allowed_delta:
-            continue
-
-        record_phone = str(record.get("phone_number") or record.get("msisdn") or "").strip()
-        phone_matches = record_phone == phone and len(phone) > 0
-
-        if phone_matches and amt_diff == 0:
-            match_type = "exact"
-        elif phone_matches and amt_diff <= allowed_delta:
-            match_type = "fuzzy_exact"
-        elif not phone_matches and allow_partial:
-            match_type = "partial_fuzzy" if amt_diff <= allowed_delta else "partial"
-        else:
-            continue
-
-        candidates.append({
-            "match_type": match_type,
-            "internal_ref": record.get("internal_ref"),
-            "record": record,
-            "latency_seconds": latency,
-            "amount_diff": amt_diff,
-        })
-
-    if not candidates:
-        return None
-
-    priority = {"exact": 0, "fuzzy_exact": 1, "partial_fuzzy": 2, "partial": 3}
-    candidates.sort(
-        key=lambda item: (
-            priority.get(item["match_type"], 99),
-            item["latency_seconds"],
-            item["amount_diff"],
-        )
+    return time_window_match(
+        normalized_event,
+        internal_records,
+        window_minutes=window_minutes,
+        tolerance_percent=tolerance_percent,
+        allow_partial=allow_partial,
     )
-    return candidates[0]
-
-
-def _coerce_amount(value: Any) -> Optional[float]:
-    """Safely cast raw values to float."""
-    if value is None:
-        return None
-    try:
-        val = float(value)
-        return val if not math.isnan(val) else None
-    except (TypeError, ValueError):
-        return None
-
-
-import math
-
-
-def _parse_event_time(value: Any) -> Optional[datetime]:
-    """Parse M-Pesa 14-digit Daraja timestamp strings or ISO timestamps into UTC datetimes."""
-    if not value:
-        return None
-
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
-
-    text = str(value).strip()
-    if len(text) == 14 and text.isdigit():
-        try:
-            return datetime.strptime(text, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
-        except ValueError:
-            return None
-
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-
-    try:
-        dt = datetime.fromisoformat(text)
-        if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    except ValueError:
-        return None
-
-
-def _parse_record_time(value: Any) -> Optional[datetime]:
-    return _parse_event_time(value)
 
 
 def reconcile_with_idempotency(
