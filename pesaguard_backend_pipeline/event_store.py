@@ -81,29 +81,31 @@ class EventStore:
             self.Session = sessionmaker(bind=self.engine)
             self._initialized = True
 
-        # Initialize Prometheus counters if available
-        if Counter is not None and not hasattr(self, "_metrics_initialized"):
+        # Initialize Prometheus metrics if available (module-level singletons).
+        if (Counter is not None or Histogram is not None) and not globals().get("_MARK_PROCESSED_METRICS_INITIALIZED"):
             try:
-                # module-level counters shared across EventStore instances
-                global MARK_PROCESSED_STORED, MARK_PROCESSED_DUPLICATE, MARK_PROCESSED_ERROR
-                MARK_PROCESSED_STORED = Counter(
-                    "pesaguard_mark_processed_stored_total", "Processed transactions stored"
-                )
-                MARK_PROCESSED_DUPLICATE = Counter(
-                    "pesaguard_mark_processed_duplicate_total", "Processed transactions duplicates"
-                )
-                MARK_PROCESSED_ERROR = Counter(
-                    "pesaguard_mark_processed_error_total", "Processed transactions errors"
-                )
-                # latency distribution (seconds)
-                MARK_PROCESSED_LATENCY = Histogram(
-                    "pesaguard_mark_processed_processing_seconds",
-                    "Processing latency for mark_processed",
-                    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
-                )
-                self._metrics_initialized = True
+                global MARK_PROCESSED_STORED, MARK_PROCESSED_DUPLICATE, MARK_PROCESSED_ERROR, MARK_PROCESSED_LATENCY
+                if Counter is not None:
+                    MARK_PROCESSED_STORED = Counter(
+                        "pesaguard_mark_processed_stored_total", "Processed transactions stored"
+                    )
+                    MARK_PROCESSED_DUPLICATE = Counter(
+                        "pesaguard_mark_processed_duplicate_total", "Processed transactions duplicates"
+                    )
+                    MARK_PROCESSED_ERROR = Counter(
+                        "pesaguard_mark_processed_error_total", "Processed transactions errors"
+                    )
+                if Histogram is not None:
+                    # latency distribution (seconds)
+                    MARK_PROCESSED_LATENCY = Histogram(
+                        "pesaguard_mark_processed_processing_seconds",
+                        "Processing latency for mark_processed",
+                        buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+                    )
             except Exception:
                 pass
+            finally:
+                globals()["_MARK_PROCESSED_METRICS_INITIALIZED"] = True
 
     def already_processed(self, trans_id: str, source_ip: str = None) -> bool:
         """Check if a webhook callback has already been processed (idempotency gate).
