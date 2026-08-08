@@ -506,6 +506,9 @@ python3 pesaguard_backend_pipeline/app.py
 # Reconciliation consumer (reconciliation_job.py)
 python3 pesaguard_backend_pipeline/reconciliation_job.py
 
+# Alerting consumer (alerting_consumer.py)
+python3 -m pesaguard_backend_pipeline.alerting_consumer
+
 # Scheduled reports (via systemd timer)
 sudo systemctl enable pesaguard-backup.timer
 ```

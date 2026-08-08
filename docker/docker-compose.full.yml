@@ -64,6 +64,18 @@ services:
       - postgres
       - kafka
 
+  alerting_consumer:
+    build: .
+    command: python -m pesaguard_backend_pipeline.alerting_consumer
+    environment:
+      DATABASE_URL: postgresql://pesaguard:pesaguard@postgres:5432/pesaguard
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      PESAGUARD_TOPIC_DISCREPANCIES: mpesa.discrepancies
+      PESAGUARD_ALERTING_GROUP_ID: pesaguard-alerting-v1
+    depends_on:
+      - kafka
+      - postgres
+
   dashboard:
     build: .
     command: python -m pesaguard_backend_pipeline.app

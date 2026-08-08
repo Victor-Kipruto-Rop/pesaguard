@@ -24,8 +24,9 @@
 ```bash
 docker-compose up -d postgres kafka
 python init_db.py
-python app.py
-python reconciliation_job.py
+python -m pesaguard_backend_pipeline.app
+python -m pesaguard_backend_pipeline.reconciliation_job
+python -m pesaguard_backend_pipeline.alerting_consumer
 ```
 
 ## Running tests
@@ -44,6 +45,7 @@ pytest -q
 ## Operational notes
 
 - The reconciliation engine treats duplicate callbacks and missing-payment cases as critical and records them in the discrepancy stream.
+- A dedicated alerting consumer (`pesaguard_backend_pipeline.alerting_consumer`) consumes `mpesa.discrepancies` and routes alerts to Slack, SMS, or email without embedding notification logic in the reconciliation job.
 - The connector layer is designed to be tenant-scoped so new customers can be onboarded by changing configuration rather than rewriting business logic.
 - If a Daraja callback shape changes, validate it against the sandbox and update the payload validator before production use.
 

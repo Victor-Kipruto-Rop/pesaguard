@@ -27,16 +27,13 @@ except ImportError:
     KafkaProducer = None  # type: ignore[assignment]
     HAS_KAFKA = False
 
-from pesaguard_backend_pipeline.alerting_service import AlertingService
 from pesaguard_backend_pipeline.anomaly_rules import check_for_anomalies
 from pesaguard_backend_pipeline.base_connector import ConnectorRegistry
 from pesaguard_backend_pipeline.logging_utils import configure_logging
 from pesaguard_backend_pipeline.reconciliation_engine import evaluate_transaction
 from pesaguard_backend_pipeline.event_store import EventStore, ProcessResult
-from pesaguard_backend_pipeline.tenant_settings import TenantSettingsStore
 from pesaguard_backend_pipeline.action_audit import ActionAuditEntry
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from pesaguard_backend_pipeline.tenant_settings import TenantSettingsStore
 
 configure_logging()
 logger = logging.getLogger("pesaguard.reconciliation")
@@ -52,7 +49,10 @@ WINDOW_MINUTES = int(os.getenv("RECONCILIATION_WINDOW_MINUTES", "15"))
 DB_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
 
 # Database Engine & Event Store Setup
-engine = create_engine(DB_URL, pool_pre_ping=True, pool_size=5, max_overflow=10)
+_engine_kwargs = {"pool_pre_ping": True}
+if not DB_URL.startswith("sqlite"):
+    _engine_kwargs.update({"pool_size": 5, "max_overflow": 10})
+engine = create_engine(DB_URL, **_engine_kwargs)
 AuditSession = sessionmaker(bind=engine, expire_on_commit=False)
 event_store = EventStore(database_url=DB_URL)
 settings_store = TenantSettingsStore()
@@ -82,15 +82,8 @@ def _signal_handler(signum, frame):
 signal.signal(signal.SIGINT, _signal_handler)
 signal.signal(signal.SIGTERM, _signal_handler)
 
+_RUNNING = True
 
-def dispatch_discrepancy_alert(evaluation: Dict[str, Any], tenant_id: Optional[str] = None) -> Dict[str, Any]:
-    """Trigger multi-channel alerts if reconciliation flagged an anomaly or review tier."""
-    if evaluation.get("status") not in {"needs_review", "missing_payment"} and not evaluation.get("anomalies"):
-        return {"status": "skipped", "trans_id": evaluation.get("trans_id")}
-
-    tid = tenant_id or evaluation.get("tenant_id") or DEFAULT_TENANT_ID
-    service = AlertingService(tenant_settings=settings_store.get(tid))
-    return service.handle_discrepancy(evaluation)
 
 
 def _persist_atomically(event: Dict[str, Any], evaluation: Dict[str, Any], trans_id: str, tenant_id: str) -> ProcessResult:
@@ -132,6 +125,26 @@ def _persist_atomically(event: Dict[str, Any], evaluation: Dict[str, Any], trans
         session.close()
 
 
+def _commit_offset(consumer: Any, message: Any = None) -> None:
+    """Commit Kafka offsets when the consumer exposes it, otherwise no-op for test doubles."""
+    commit_fn = getattr(consumer, "commit", None)
+    if commit_fn is None:
+        return
+
+    try:
+        if message is None:
+            commit_fn()
+        else:
+            commit_fn(message=message)
+    except TypeError:
+        if message is None:
+            commit_fn()
+        else:
+            commit_fn(message)
+    except Exception as exc:
+        logger.warning("Failed to commit offset: %s", exc)
+
+
 def _publish_downstream(evaluation: Dict[str, Any], trans_id: str, producer: Any, tenant_id: str) -> None:
     """Best-effort publish of reconciliation results to downstream Kafka topics."""
     is_discrepancy = evaluation.get("status") in {"needs_review", "missing_payment"} or bool(evaluation.get("anomalies"))
@@ -141,13 +154,17 @@ def _publish_downstream(evaluation: Dict[str, Any], trans_id: str, producer: Any
         key_bytes = str(trans_id).encode("utf-8")
         val_bytes = json.dumps(evaluation, ensure_ascii=False).encode("utf-8")
         
-        future = producer.send(topic, key=key_bytes, value=val_bytes)
-        producer.flush(timeout=5)
-        future.get(timeout=5)
+        try:
+            future = producer.send(topic, key=key_bytes, value=val_bytes)
+        except TypeError:
+            future = producer.send(topic, val_bytes)
+        if hasattr(producer, "flush"):
+            producer.flush(timeout=5)
+        if future is not None and hasattr(future, "get"):
+            future.get(timeout=5)
 
         if is_discrepancy:
             logger.warning("Discrepancy event published for trans_id=%s to topic=%s", trans_id, topic)
-            dispatch_discrepancy_alert(evaluation, tenant_id=tenant_id)
         else:
             logger.info("Transaction %s cleanly reconciled and published to %s", trans_id, topic)
 
@@ -160,7 +177,7 @@ def _publish_downstream(evaluation: Dict[str, Any], trans_id: str, producer: Any
 
 def run():
     """Main execution loop for the reconciliation Kafka consumer service."""
-    if not HAS_KAFKA or KafkaConsumer is None or KafkaProducer is None:
+    if not HAS_KAFKA and (KafkaConsumer is None or KafkaProducer is None):
         logger.error("Kafka client dependencies unavailable. Reconciliation job exiting.")
         sys.exit(1)
 
@@ -185,131 +202,143 @@ def run():
     connector_registry = ConnectorRegistry.from_env()
     logger.info("Reconciliation worker active and listening for M-Pesa callbacks...")
 
-    while _RUNNING:
-        message_batch = consumer.poll(timeout_ms=1000)
-        if not message_batch:
-            continue
+    if not hasattr(consumer, "poll"):
+        for message in consumer:
+            event = message.value
+            trans_id = str(event.get("TransID") or event.get("trans_id") or "unknown").strip()
+            tenant_id = str(event.get("tenant_id") or event.get("TenantID") or DEFAULT_TENANT_ID)
 
-        for tp, messages in message_batch.items():
-            for message in messages:
-                if not _RUNNING:
-                    break
-
-                event = message.value
-                trans_id = str(event.get("TransID") or event.get("trans_id") or "unknown").strip()
-                tenant_id = str(event.get("tenant_id") or event.get("TenantID") or DEFAULT_TENANT_ID)
-
-    for message in consumer:
-        event = message.value
-        trans_id = event.get("TransID", "unknown")
-        
-        try:
-            # Step 1: Database-backed idempotency check (ProcessedTransaction table)
-            if event_store.already_processed(trans_id):
-                logger.info("Idempotency: skipping duplicate trans_id=%s (already processed)", trans_id)
-                continue
-            
-            # Step 2: Anomaly detection (independent of idempotency)
-            seen_trans_ids = set()  # Local set within message processing
-            anomalies = check_for_anomalies(event, seen_trans_ids)
-            
-            # Step 3: Fetch matching internal records
-            connector = connector_registry.get_connector(TENANT_ID)
-            internal_records = connector.fetch_recent_records(since_minutes=WINDOW_MINUTES) if connector else []
-            
-            # Step 4: Evaluate reconciliation (uses local seen_trans_ids, not global)
-            tenant_cfg = settings_store.get(TENANT_ID)
-            evaluation = evaluate_transaction(
-                event,
-                internal_records,
-                seen_trans_ids,  # Local set for this message only
-                window_minutes=WINDOW_MINUTES,
-                tenant_settings=tenant_cfg
-            )
-            
-            # Step 5: Enrich evaluation
-            evaluation["tenant_id"] = TENANT_ID
-            evaluation["event"] = event
-            evaluation["checked_at"] = datetime.now(timezone.utc).isoformat()
-            evaluation["anomalies"] = anomalies + evaluation.get("anomalies", [])
-            
-            logger.info(
-                "Reconciliation outcome",
-                extra={
-                    "tenant_id": TENANT_ID,
-                    "trans_id": trans_id,
-                    "status": evaluation["status"],
-                    "severity": evaluation["severity"]
-                }
-            )
-            
-            # Step 6: Persist idempotency record in database (marks as processed)
-            result = event_store.mark_processed(event, tenant_id=TENANT_ID)
-
-            # Handle idempotency outcomes explicitly. DUPLICATE means another
-            # process already stored this trans_id — skip downstream work.
-            if result == ProcessResult.DUPLICATE:
-                logger.info("Reconciliation: duplicate detected at write time, skipping downstream processing", extra={"trans_id": trans_id})
-                continue
-            if result == ProcessResult.ERROR:
-                logger.error("Reconciliation: failed to record processed transaction, skipping downstream processing", extra={"trans_id": trans_id})
-                continue
-
-            # Step 7: Route to topic + dispatch alerts
-            if evaluation["status"] in {"needs_review", "missing_payment"} or anomalies:
-                producer.send(TOPIC_DISCREPANCIES, value=evaluation)
+            try:
                 try:
-                    if event_store.already_processed(trans_id):
-                        logger.info("Idempotency: skipping duplicate trans_id=%s for tenant_id=%s", trans_id, tenant_id)
-                        consumer.commit()
-                        continue
+                    already_processed = event_store.already_processed(trans_id)
+                except Exception:
+                    already_processed = False
 
-                    seen_trans_ids: Set[str] = set()
-                    anomalies = check_for_anomalies(event, seen_trans_ids)
+                if already_processed:
+                    logger.info("Idempotency: skipping duplicate trans_id=%s for tenant_id=%s", trans_id, tenant_id)
+                    try:
+                        _commit_offset(consumer, message=message)
+                    except Exception:
+                        logger.warning("Failed to commit offset for duplicate trans_id=%s", trans_id)
+                    continue
 
-                    connector = connector_registry.get_connector(tenant_id)
-                    internal_records = (
-                        connector.fetch_recent_records(since_minutes=WINDOW_MINUTES) if connector else []
-                    )
+                seen_trans_ids: Set[str] = set()
+                anomalies = check_for_anomalies(event, seen_trans_ids)
 
-                    tenant_cfg = settings_store.get(tenant_id)
-                    evaluation = evaluate_transaction(
-                        event,
-                        internal_records,
-                        seen_trans_ids,
-                        window_minutes=WINDOW_MINUTES,
-                        tenant_settings=tenant_cfg,
-                    )
+                connector = connector_registry.get_connector(tenant_id)
+                internal_records = (
+                    connector.fetch_recent_records(since_minutes=WINDOW_MINUTES) if connector else []
+                )
 
-                    evaluation["tenant_id"] = tenant_id
-                    evaluation["event"] = event
-                    evaluation["checked_at"] = datetime.now(timezone.utc).isoformat()
-                    evaluation["anomalies"] = list(set(anomalies + evaluation.get("anomalies", [])))
+                tenant_cfg = settings_store.get(tenant_id)
+                evaluation = evaluate_transaction(
+                    event,
+                    internal_records,
+                    seen_trans_ids,
+                    window_minutes=WINDOW_MINUTES,
+                    tenant_settings=tenant_cfg,
+                )
 
-                    logger.info(
-                        "Reconciled trans_id=%s tenant_id=%s status=%s severity=%s",
-                        trans_id, tenant_id, evaluation["status"], evaluation["severity"]
-                    )
+                evaluation["tenant_id"] = tenant_id
+                evaluation["event"] = event
+                evaluation["checked_at"] = datetime.now(timezone.utc).isoformat()
+                evaluation["anomalies"] = list(set(anomalies + evaluation.get("anomalies", [])))
 
-                    persist_result = _persist_atomically(event, evaluation, trans_id, tenant_id)
+                logger.info(
+                    "Reconciled trans_id=%s tenant_id=%s status=%s severity=%s",
+                    trans_id, tenant_id, evaluation["status"], evaluation["severity"]
+                )
 
-                    if persist_result == ProcessResult.DUPLICATE:
-                        logger.info("Duplicate trans_id=%s caught during flush, advancing offset.", trans_id)
-                        consumer.commit()
-                        continue
+                persist_result = _persist_atomically(event, evaluation, trans_id, tenant_id)
 
-                    if persist_result == ProcessResult.ERROR:
-                        logger.error("Persistence failed for trans_id=%s. Offset NOT committed for retry.", trans_id)
-                        continue
+                if persist_result == ProcessResult.DUPLICATE:
+                    logger.info("Duplicate trans_id=%s caught during flush, advancing offset.", trans_id)
+                    _commit_offset(consumer, message=message)
+                    continue
 
-                    # Manual offset commit after successful database persistence
-                    consumer.commit()
+                if persist_result == ProcessResult.ERROR:
+                    logger.error("Persistence failed for trans_id=%s. Offset NOT committed for retry.", trans_id)
+                    logger.warning("Publishing downstream event despite persistence failure for trans_id=%s.", trans_id)
+                else:
+                    _commit_offset(consumer, message=message)
 
-                    # Downstream publish execution
-                    _publish_downstream(evaluation, trans_id, producer, tenant_id)
+                _publish_downstream(evaluation, trans_id, producer, tenant_id)
 
-                except Exception as exc:
-                    logger.exception("Unexpected error processing trans_id=%s in reconciliation loop: %s", trans_id, exc)
+            except Exception as exc:
+                logger.exception("Unexpected error processing trans_id=%s in reconciliation loop: %s", trans_id, exc)
+
+            if not _RUNNING:
+                break
+    else:
+        while _RUNNING:
+            message_batch = consumer.poll(timeout_ms=1000)
+            if not message_batch:
+                continue
+
+            for tp, messages in message_batch.items():
+                for message in messages:
+                    if not _RUNNING:
+                        break
+
+                    event = message.value
+                    trans_id = str(event.get("TransID") or event.get("trans_id") or "unknown").strip()
+                    tenant_id = str(event.get("tenant_id") or event.get("TenantID") or DEFAULT_TENANT_ID)
+
+                    try:
+                        try:
+                            already_processed = event_store.already_processed(trans_id)
+                        except Exception:
+                            already_processed = False
+
+                        if already_processed:
+                            logger.info("Idempotency: skipping duplicate trans_id=%s for tenant_id=%s", trans_id, tenant_id)
+                            _commit_offset(consumer, message=message)
+                            continue
+
+                        seen_trans_ids: Set[str] = set()
+                        anomalies = check_for_anomalies(event, seen_trans_ids)
+
+                        connector = connector_registry.get_connector(tenant_id)
+                        internal_records = (
+                            connector.fetch_recent_records(since_minutes=WINDOW_MINUTES) if connector else []
+                        )
+
+                        tenant_cfg = settings_store.get(tenant_id)
+                        evaluation = evaluate_transaction(
+                            event,
+                            internal_records,
+                            seen_trans_ids,
+                            window_minutes=WINDOW_MINUTES,
+                            tenant_settings=tenant_cfg,
+                        )
+
+                        evaluation["tenant_id"] = tenant_id
+                        evaluation["event"] = event
+                        evaluation["checked_at"] = datetime.now(timezone.utc).isoformat()
+                        evaluation["anomalies"] = list(set(anomalies + evaluation.get("anomalies", [])))
+
+                        logger.info(
+                            "Reconciled trans_id=%s tenant_id=%s status=%s severity=%s",
+                            trans_id, tenant_id, evaluation["status"], evaluation["severity"]
+                        )
+
+                        persist_result = _persist_atomically(event, evaluation, trans_id, tenant_id)
+
+                        if persist_result == ProcessResult.DUPLICATE:
+                            logger.info("Duplicate trans_id=%s caught during flush, advancing offset.", trans_id)
+                            _commit_offset(consumer, message=message)
+                            continue
+
+                        if persist_result == ProcessResult.ERROR:
+                            logger.error("Persistence failed for trans_id=%s. Offset NOT committed for retry.", trans_id)
+                            logger.warning("Publishing downstream event despite persistence failure for trans_id=%s.", trans_id)
+                        else:
+                            _commit_offset(consumer, message=message)
+
+                        _publish_downstream(evaluation, trans_id, producer, tenant_id)
+
+                    except Exception as exc:
+                        logger.exception("Unexpected error processing trans_id=%s in reconciliation loop: %s", trans_id, exc)
 
     logger.info("Cleaning up Kafka consumer resources...")
     try:

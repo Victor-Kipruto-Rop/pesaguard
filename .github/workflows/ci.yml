@@ -92,6 +92,8 @@ jobs:
         run: |
           docker compose -f docker/docker-compose.yml config >/dev/null
           docker compose -f docker/docker-compose.full.yml config >/dev/null
+          docker compose -f docker/docker-compose.yml config --services | grep -qx alerting_consumer
+          docker compose -f docker/docker-compose.full.yml config --services | grep -qx alerting_consumer
 
   migration-dry-run:
     name: Migration Dry Run

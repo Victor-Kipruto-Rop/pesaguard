@@ -6,7 +6,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -19,8 +19,14 @@ logger = logging.getLogger("pesaguard.alerting.service")
 class AlertingService:
     """Manages multi-channel discrepancy alert routing, severity filters, deduplication, and persistence."""
 
-    def __init__(self, session: Optional[Session] = None, tenant_settings: Optional[Dict[str, Any]] = None):
+    def __init__(
+        self,
+        session: Optional[Session] = None,
+        session_factory: Optional[Callable[[], Session]] = None,
+        tenant_settings: Optional[Dict[str, Any]] = None,
+    ):
         self.session = session
+        self.session_factory = session_factory
         self.tenant_settings = tenant_settings or {}
         # In-memory deduplication cache. For horizontal scaling across multiple containers,
         # this should be backed by Redis or a database constraint; kept thread-safe or local here.
@@ -34,14 +40,14 @@ class AlertingService:
 
         alert_id = str(discrepancy.get("id") or discrepancy.get("trans_id") or uuid.uuid4())
         
-        # Deduplication check
-        if alert_id in self._alert_ids:
-            logger.info("Duplicate alert suppressed via in-memory deduplication cache: alert_id=%s", alert_id)
+        # Deduplication check against in-memory cache and persisted delivery logs
+        if alert_id in self._alert_ids or self._has_existing_delivery_log(alert_id):
+            logger.info("Duplicate alert suppressed via deduplication: alert_id=%s", alert_id)
             return {"status": "deduped", "alert_id": alert_id, "deliveries": [], "delivery_mode": "deduped"}
 
         self._alert_ids.add(alert_id)
         
-        severity = str(discrepancy.get("severity") or "warning").lower()
+        severity = self._resolve_severity(discrepancy)
         channels = self._resolve_channels(severity)
         locale = self._resolve_locale(discrepancy)
         delivery_mode = self._resolve_delivery_mode(severity, channels)
@@ -74,7 +80,27 @@ class AlertingService:
                 deliveries.append({"channel": channel, "status": "failed", "error": str(exc)})
 
         self._store_delivery_log(alert_id, discrepancy, deliveries)
-        return {"status": "dispatched", "alert_id": alert_id, "deliveries": deliveries, "delivery_mode": delivery_mode}
+        return {"status": "queued", "alert_id": alert_id, "deliveries": deliveries, "delivery_mode": delivery_mode}
+
+    def _resolve_severity(self, discrepancy: Dict[str, Any]) -> str:
+        """Derive a severity label from explicit severity plus risk signals."""
+        base_severity = str(discrepancy.get("severity") or "warning").lower()
+        risk_score = discrepancy.get("risk_score")
+        try:
+            risk_score = float(risk_score)
+        except (TypeError, ValueError):
+            risk_score = None
+
+        if risk_score is not None:
+            if risk_score >= 0.8:
+                return "critical"
+            if risk_score >= 0.55:
+                return "warning"
+            if base_severity in {"critical", "warning"}:
+                return base_severity
+            return "info"
+
+        return base_severity
 
     def _resolve_channels(self, severity: str) -> List[str]:
         """Determine valid notification channels based on severity level and tenant settings."""
@@ -83,11 +109,11 @@ class AlertingService:
             configured = ["slack"]
 
         if severity == "critical":
-            return [channel for channel in configured if channel in {"slack", "sms", "email"}]
+            return [channel for channel in configured if channel in {"slack", "sms"}]
         if severity == "warning":
-            return [channel for channel in configured if channel in {"slack", "email"}]
-        if severity == "info":
             return [channel for channel in configured if channel == "slack"]
+        if severity == "info":
+            return []
         return []
 
     def _resolve_delivery_mode(self, severity: str, channels: List[str]) -> str:
@@ -127,9 +153,38 @@ class AlertingService:
 
         return "en"
 
+    def _has_existing_delivery_log(self, alert_id: str) -> bool:
+        """Check whether an alert has already been persisted.
+
+        This prevents duplicate deliveries across retries and consumer restarts.
+        """
+        session = self.session
+        close_session = False
+        if session is None and self.session_factory is not None:
+            session = self.session_factory()
+            close_session = True
+
+        if session is None:
+            return False
+
+        try:
+            existing = session.query(Discrepancy).filter(Discrepancy.id == f"alert-{alert_id}").first()
+            return existing is not None
+        except Exception:
+            return False
+        finally:
+            if close_session and session is not None:
+                session.close()
+
     def _store_delivery_log(self, alert_id: str, discrepancy: Dict[str, Any], deliveries: List[Dict[str, Any]]) -> None:
         """Persist alert delivery metrics and event records to the database safely."""
-        if self.session is None:
+        session = self.session
+        close_session = False
+        if session is None and self.session_factory is not None:
+            session = self.session_factory()
+            close_session = True
+
+        if session is None:
             return
 
         try:
@@ -153,10 +208,13 @@ class AlertingService:
                 }),
                 resolved=False,
             )
-            self.session.add(log_entry)
-            self.session.commit()
+            session.add(log_entry)
+            session.commit()
             logger.info("Successfully stored delivery audit log for alert_id=%s", alert_id)
         except Exception as exc:
             logger.exception("Failed to store delivery log for alert_id=%s: %s", alert_id, exc)
-            if self.session:
-                self.session.rollback()
+            if session:
+                session.rollback()
+        finally:
+            if close_session and session is not None:
+                session.close()
