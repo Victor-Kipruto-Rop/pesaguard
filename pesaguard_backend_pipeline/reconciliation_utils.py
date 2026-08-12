@@ -94,7 +94,7 @@ def exact_match(normalized_event: Dict[str, Any], normalized_record: Dict[str, A
     if not phone or phone != record_phone:
         return False
 
-    allowed_delta = max(0.01, abs(float(event_amount)) * (float(tolerance_percent) / 100.0))
+    allowed_delta = max(0.01, abs(float(event_amount)) * (float(tolerance_percent) / 100.0)) if float(tolerance_percent) > 0 else 0.0
     return abs(float(record_amount) - float(event_amount)) <= allowed_delta
 
 
