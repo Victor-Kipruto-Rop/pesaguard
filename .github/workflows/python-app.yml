@@ -32,5 +32,7 @@ jobs:
       - name: Test with pytest
         env:
           PYTHONPATH: .
+          USE_IN_MEMORY_TEST_DB: "true"
+          DARAJA_SHARED_SECRET: test_ci_secret_key_12345
           JWT_SECRET_KEY: test_ci_jwt_secret_key_12345
-        run: pytest -q pesaguard_backend_pipeline/test_reconciliation.py
+        run: pytest -q
