@@ -179,7 +179,7 @@ def time_window_match(
         elif phone_matches:
             match_type = "fuzzy_exact"
         elif allow_partial:
-            match_type = "partial_fuzzy" if amt_diff <= allowed_delta else "partial"
+            match_type = "partial_fuzzy"
         else:
             continue
 
