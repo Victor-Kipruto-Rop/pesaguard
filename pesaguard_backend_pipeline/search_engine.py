@@ -248,10 +248,38 @@ class AdvancedSearchEngine:
             Discrepancy.tenant_id == (tenant_id or "default")
         )
 
-        severities = {r[0] for r in base_query.select_from(Discrepancy).distinct(Discrepancy.severity).values(Discrepancy.severity) if r[0]}
-        statuses = {r[0] for r in base_query.select_from(Discrepancy).distinct(Discrepancy.status).values(Discrepancy.status) if r[0]}
-        anomaly_types = {r[0] for r in base_query.select_from(Discrepancy).distinct(Discrepancy.anomaly_type).values(Discrepancy.anomaly_type) if r[0]}
-        assignees = {r[0] for r in base_query.select_from(Discrepancy).distinct(Discrepancy.assignee).values(Discrepancy.assignee) if r[0]}
+        severities = {
+            row[0]
+            for row in self.session.query(Discrepancy.severity)
+            .filter(Discrepancy.tenant_id == (tenant_id or "default"))
+            .distinct()
+            .all()
+            if row[0]
+        }
+        statuses = {
+            row[0]
+            for row in self.session.query(Discrepancy.status)
+            .filter(Discrepancy.tenant_id == (tenant_id or "default"))
+            .distinct()
+            .all()
+            if row[0]
+        }
+        anomaly_types = {
+            row[0]
+            for row in self.session.query(Discrepancy.anomaly_type)
+            .filter(Discrepancy.tenant_id == (tenant_id or "default"))
+            .distinct()
+            .all()
+            if row[0]
+        }
+        assignees = {
+            row[0]
+            for row in self.session.query(Discrepancy.assignee)
+            .filter(Discrepancy.tenant_id == (tenant_id or "default"))
+            .distinct()
+            .all()
+            if row[0]
+        }
 
         return {
             "severities": sorted(list(severities)),

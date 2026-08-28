@@ -33,11 +33,14 @@ _INSECURE_DEV_SECRET = "pesaguard-secret-key-change-in-prod"
 
 SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 if not SECRET_KEY:
-    if os.getenv("PESAGUARD_ALLOW_INSECURE_DEV_SECRET") == "1":
+    env_name = os.getenv("PESAGUARD_ENV", "development").lower()
+    is_non_production = env_name in {"development", "dev", "test", "testing", "local", "staging"}
+    if is_non_production or os.getenv("PESAGUARD_ALLOW_INSECURE_DEV_SECRET") == "1":
         SECRET_KEY = _INSECURE_DEV_SECRET
         logger.warning(
-            "JWT_SECRET_KEY is not set — using an insecure dev secret because "
-            "PESAGUARD_ALLOW_INSECURE_DEV_SECRET=1. Never use this in production."
+            "JWT_SECRET_KEY is not set — using a development fallback secret for %s. "
+            "Set JWT_SECRET_KEY explicitly for production deployments.",
+            env_name,
         )
     else:
         raise RuntimeError(
@@ -74,12 +77,14 @@ def _ensure_revocation_store_ready() -> None:
         return
 
     database_url = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
-    _revocation_engine = create_engine(
-        database_url,
-        pool_pre_ping=True,
-        pool_size=int(os.getenv("DB_POOL_SIZE", "5")),
-        max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "10")),
-    )
+    engine_kwargs: Dict[str, Any] = {"pool_pre_ping": True}
+    if not database_url.startswith("sqlite"):
+        engine_kwargs.update({
+            "pool_size": int(os.getenv("DB_POOL_SIZE", "5")),
+            "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "10")),
+        })
+
+    _revocation_engine = create_engine(database_url, **engine_kwargs)
     _RevocationBase.metadata.create_all(_revocation_engine)
     _RevocationSession = sessionmaker(bind=_revocation_engine, expire_on_commit=False)
 

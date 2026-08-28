@@ -310,13 +310,13 @@ class EmailService:
 
     def _build_escalation_html(self, incident_data: Dict[str, Any], locale: str) -> str:
         if locale == "sw":
-            title = "Kipindi Kilichopandishwa"
+            title = "Kipindi kilichopandishwa"
             anomaly_label = "Aina ya Usumbufu"
             severity_label = "Ukali"
             amount_label = "Kiasi"
             trans_label = "Kitambulisho cha Muamala"
             detected_label = "Iligunduliwa Saa"
-            action_text = "Tafadhali kagua na uchukue hatua inayofaa."
+            action_text = "Msaada wa utendaji"
         else:
             title = "Incident Escalated"
             anomaly_label = "Anomaly Type"

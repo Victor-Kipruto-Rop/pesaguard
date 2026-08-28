@@ -38,6 +38,11 @@ class AfricasTalkingClient:
         Normalizes phone numbers to E.164 format (specifically handling Kenyan numbers
         defaulting to +254 if starting with 0 or 7).
         """
+        if phone is None:
+            return ""
+        if not isinstance(phone, str):
+            phone = str(phone)
+
         cleaned = re.sub(r"\s+", "", phone)
         if cleaned.startswith("+"):
             return cleaned

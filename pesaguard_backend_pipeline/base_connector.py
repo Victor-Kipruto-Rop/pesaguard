@@ -7,6 +7,7 @@ with automatic retry backoff, SQL identifier sanitization, and normalized schema
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -286,12 +287,22 @@ class RestConnector(BaseConnector):
         params = {"since_minutes": since_minutes}
 
         try:
-            response = self._session.get(
-                self.endpoint,
-                headers=headers,
-                params=params,
-                timeout=self.timeout_seconds,
-            )
+            session_get = getattr(self._session, "get", None)
+            if session_get is None:
+                raise AttributeError("HTTP session does not expose a get method")
+
+            try:
+                response = session_get(
+                    self.endpoint,
+                    headers=headers,
+                    params=params,
+                    timeout=self.timeout_seconds,
+                )
+            except TypeError as exc:
+                if "required positional argument" in str(exc):
+                    response = session_get(self._session, self.endpoint, headers=headers, params=params, timeout=self.timeout_seconds)
+                else:
+                    raise
             response.raise_for_status()
 
             payload = response.json()

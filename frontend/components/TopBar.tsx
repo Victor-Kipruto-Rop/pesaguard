@@ -3,9 +3,24 @@
 import ThemeToggle from './ThemeToggle';
 import LocaleSwitcher from './LocaleSwitcher';
 import { useLocale } from '../lib/i18n';
+import { useRouter } from 'next/navigation';
+import { clearTokens } from '../lib/fetchAuth';
+import apiProxy from '../lib/apiProxy';
 
 export default function TopBar() {
   const { t } = useLocale();
+  const router = useRouter();
+
+  async function handleLogout() {
+    try {
+      // server-side logout clears cookies
+      await apiProxy('/api/auth/logout', { method: 'POST' });
+    } catch (e) {
+      // ignore
+    }
+    clearTokens();
+    router.replace('/auth/login');
+  }
 
   return (
     <div className="topbar">
@@ -26,6 +41,9 @@ export default function TopBar() {
         <div className="statusPill">● {t('topbar.liveOps')}</div>
         <LocaleSwitcher />
         <ThemeToggle />
+        <button className="btn btn-ghost" onClick={handleLogout} aria-label="Logout">
+          {t('nav.logout') ?? 'Logout'}
+        </button>
       </div>
     </div>
   );

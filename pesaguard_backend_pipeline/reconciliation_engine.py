@@ -70,7 +70,8 @@ def evaluate_transaction(
             "severity": "critical",
             "duplicate": duplicate,
             "anomalies": anomalies,
-            "match": {"match_type": "none", "reason": "no_internal_records"},
+            "risk_score": 0.98,
+            "match": {"match_type": "none", "reason": "no_internal_records", "confidence": 0.0},
         }
 
     best_match = _find_best_match(
@@ -88,8 +89,12 @@ def evaluate_transaction(
             "severity": "critical",
             "duplicate": duplicate,
             "anomalies": anomalies,
-            "match": {"match_type": "none", "reason": "no_matching_record"},
+            "risk_score": 0.95,
+            "match": {"match_type": "none", "reason": "no_matching_record", "confidence": 0.0},
         }
+
+    match_metrics = _score_match(best_match, anomalies, duplicate)
+    best_match.update(match_metrics)
 
     if best_match["match_type"] in {"exact", "fuzzy_exact"}:
         return {
@@ -98,6 +103,7 @@ def evaluate_transaction(
             "severity": "info",
             "duplicate": duplicate,
             "anomalies": anomalies,
+            "risk_score": match_metrics["risk_score"],
             "match": best_match,
         }
 
@@ -107,6 +113,7 @@ def evaluate_transaction(
         "severity": "warning",
         "duplicate": duplicate,
         "anomalies": anomalies,
+        "risk_score": match_metrics["risk_score"],
         "match": best_match,
     }
 
@@ -188,6 +195,43 @@ def _coerce_amount(value: Any) -> Optional[float]:
         return val if not math.isnan(val) else None
     except (TypeError, ValueError):
         return None
+
+
+def _score_match(best_match: Dict[str, Any], anomalies: Sequence[str], duplicate: bool) -> Dict[str, Any]:
+    """Assign a confidence score and risk score to an evaluated match."""
+    match_type = best_match.get("match_type", "none")
+    quality_scores = {
+        "exact": 0.95,
+        "fuzzy_exact": 0.78,
+        "partial_fuzzy": 0.60,
+        "partial": 0.45,
+        "none": 0.0,
+    }
+    confidence = quality_scores.get(match_type, 0.0)
+
+    if duplicate:
+        confidence -= 0.08
+    if "invalid_or_zero_amount" in anomalies:
+        confidence -= 0.15
+    if "duplicate_transaction_id" in anomalies:
+        confidence -= 0.05
+
+    amount_diff = float(best_match.get("amount_diff", 0.0) or 0.0)
+    if amount_diff > 0:
+        confidence -= min(0.15, amount_diff / 1000.0)
+
+    confidence = max(0.0, min(1.0, confidence))
+
+    risk_score = 1.0 - confidence
+    if "duplicate_transaction_id" in anomalies:
+        risk_score += 0.08
+    if "invalid_or_zero_amount" in anomalies:
+        risk_score += 0.12
+    if match_type in {"partial", "partial_fuzzy"}:
+        risk_score += 0.10
+
+    risk_score = max(0.0, min(1.0, risk_score))
+    return {"confidence": round(confidence, 3), "risk_score": round(risk_score, 3)}
 
 
 import math

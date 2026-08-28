@@ -2,7 +2,7 @@
 Scheduled Reconciliation Reports Engine for PesaGuard.
 
 Generates daily, weekly, or ad-hoc reconciliation performance summaries, calculating
-discrepancy volumes, resolution rates, anomaly categories, and financial impact metrics.
+historical discrepancy volumes, resolution rates, anomaly categories, and financial impact metrics.
 """
 
 from __future__ import annotations
@@ -13,9 +13,9 @@ import logging
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from sqlalchemy import create_engine, distinct, func
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from pesaguard_backend_pipeline.models import Base, Discrepancy, Report
@@ -34,44 +34,53 @@ Base.metadata.create_all(engine)
 Base.metadata.create_all(reports_engine)
 
 
+def get_all_active_tenants() -> List[str]:
+    """Return the distinct tenant IDs that currently have discrepancy records."""
+    with Session() as session:
+        tenant_ids = (
+            session.query(Discrepancy.tenant_id)
+            .filter(Discrepancy.tenant_id.isnot(None))
+            .distinct()
+            .all()
+        )
+    return sorted([tenant_id[0] for tenant_id in tenant_ids if tenant_id[0]])
+
+
 def generate_report_for_tenant(tenant_id: str, days: int = 1, report_type: str = "daily") -> dict:
-    session = Session()
-    reports_session = ReportsSession()
-    try:
-        now = datetime.now(timezone.utc)
-        period_end = now
-        period_start = now - timedelta(days=days)
-
-    Args:
-        tenant_id: Target tenant identifier
-        days: Lookback period window in days
-        report_type: Report cadence type ('daily', 'weekly', 'monthly')
-
-    Returns:
-        Summary execution dict containing status and report_id
-    """
+    """Generate a reconciliation summary report for a tenant over a recent lookback window."""
     now = datetime.now(timezone.utc)
     period_end = now
     period_start = now - timedelta(days=days)
 
     with Session() as session:
-        try:
-            # Query discrepancies detected within the window
-            discrepancies = (
-                session.query(Discrepancy)
-                .filter(
-                    Discrepancy.tenant_id == tenant_id,
-                    Discrepancy.detected_at >= period_start,
-                    Discrepancy.detected_at <= period_end,
-                )
-                .all()
+        discrepancies = (
+            session.query(Discrepancy)
+            .filter(
+                Discrepancy.tenant_id == tenant_id,
+                Discrepancy.detected_at >= period_start,
+                Discrepancy.detected_at <= period_end,
             )
+            .all()
+        )
 
-            total_incidents = len(discrepancies)
-            resolved_count = sum(1 for d in discrepancies if d.resolved)
-            open_count = total_incidents - resolved_count
-            resolution_rate = (resolved_count / total_incidents * 100.0) if total_incidents > 0 else 100.0
+        total_incidents = len(discrepancies)
+        resolved_count = sum(1 for discrepancy in discrepancies if discrepancy.resolved)
+        open_count = total_incidents - resolved_count
+        resolution_rate = (resolved_count / total_incidents * 100.0) if total_incidents > 0 else 100.0
+        anomaly_types = sorted({discrepancy.anomaly_type for discrepancy in discrepancies if discrepancy.anomaly_type})
+        content: Dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "report_type": report_type,
+            "period_start": period_start.isoformat(),
+            "period_end": period_end.isoformat(),
+            "total_incidents": total_incidents,
+            "resolved_count": resolved_count,
+            "open_count": open_count,
+            "resolution_rate": round(resolution_rate, 2),
+            "anomaly_types": anomaly_types,
+        }
 
+    with ReportsSession() as reports_session:
         report = Report(
             id=f"r_{uuid.uuid4().hex[:12]}",
             tenant_id=tenant_id,
@@ -83,14 +92,9 @@ def generate_report_for_tenant(tenant_id: str, days: int = 1, report_type: str =
         )
         reports_session.add(report)
         reports_session.commit()
-        logger.info("Generated %s report for %s: %s", report_type, tenant_id, report.id)
-        return {"status": "ok", "report_id": report.id, "tenant_id": tenant_id}
-    except Exception:
-        logger.exception("Failed to generate report for tenant %s", tenant_id)
-        return {"status": "error", "tenant_id": tenant_id}
-    finally:
-        session.close()
-        reports_session.close()
+
+    logger.info("Generated %s report for %s: %s", report_type, tenant_id, report.id)
+    return {"status": "ok", "report_id": report.id, "tenant_id": tenant_id}
 
 
 if __name__ == "__main__":

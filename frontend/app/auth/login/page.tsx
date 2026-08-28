@@ -1,55 +1,97 @@
-'use client';
+"use client";
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
-import PulseLine from '../../../components/PulseLine';
-import { useLocale } from '../../../lib/i18n';
+import React, { useState } from 'react';
+import { ArrowRight, LockKeyhole, Mail } from 'lucide-react';
+import AuthPageShell from '../../../components/AuthPageShell';
+// Using cookie-based auth; server sets HttpOnly cookies on /api/auth/login
 
-export default function LoginPage() {
-  const router = useRouter();
-  const { t } = useLocale();
-  const [email, setEmail] = useState('ops@pesaguard.io');
-  const [password, setPassword] = useState('demo123');
-  const [error, setError] = useState('');
+export default function AuthLoginPage() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const submit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    if (email && password) {
-      localStorage.setItem('pesaguard.auth', 'true');
-      router.push('/');
-      return;
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+        cache: 'no-store',
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      // server sets HttpOnly cookies; optionally returns tokens for local convenience
+      window.location.href = '/notifications';
+    } catch (err: any) {
+      setError(err?.message ?? 'Login failed');
+    } finally {
+      setLoading(false);
     }
-    setError(t('loginPage.invalidCredentials'));
-  };
+  }
 
   return (
-    <main className="authPage">
-      <div className="authCard">
-        <PulseLine height={32} />
-        <p className="eyebrow">{t('loginPage.badge')}</p>
-        <h1>{t('loginPage.title')}</h1>
-        <p className="muted">{t('loginPage.summary')}</p>
-
-        <form className="formGrid" onSubmit={submit}>
-          <div className="formRow">
-            <label htmlFor="email">{t('loginPage.email')}</label>
-            <input id="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder={t('loginPage.emailPlaceholder')} />
-          </div>
-          <div className="formRow">
-            <label htmlFor="password">{t('loginPage.password')}</label>
-            <input id="password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t('loginPage.passwordPlaceholder')} />
-          </div>
-          {error ? <div className="pill danger">{error}</div> : null}
-          <button className="primaryBtn" type="submit">{t('loginPage.signIn')}</button>
-        </form>
-
-        <div className="authLinks">
-          <a href="/auth/forgot-password">{t('auth.forgotPassword')}</a>
-          <a href="/auth/signup">{t('auth.requestAccess')}</a>
+    <AuthPageShell
+      eyebrow="Secure access"
+      title="Welcome back"
+      subtitle="Access your operational workspace and keep every critical workflow protected."
+      footer={
+        <p className="authPrompt">
+          New to PesaGuard? <a href="/auth/register">Create account</a>
+        </p>
+      }
+    >
+      <form className="authForm" onSubmit={onSubmit}>
+        <div className="authFormHeader">
+          <h3>Sign in</h3>
+          <p>Use your organization credentials to continue securely.</p>
         </div>
 
-        <p className="muted small">{t('loginPage.demoHint')} <span className="mono">ops@pesaguard.io / demo123</span></p>
-      </div>
-    </main>
+        <div className="authInputGroup">
+          <label htmlFor="login-email">Email address</label>
+          <input
+            id="login-email"
+            className="authInput"
+            type="email"
+            placeholder="name@company.com"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+        </div>
+
+        <div className="authInputGroup">
+          <label htmlFor="login-password">Password</label>
+          <input
+            id="login-password"
+            className="authInput"
+            type="password"
+            placeholder="Enter your password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </div>
+
+        <div className="checkboxRow">
+          <label className="authCheckbox">
+            <input type="checkbox" defaultChecked />
+            <span>Remember me</span>
+          </label>
+          <a href="/auth/forgot-password" className="authLink">Forgot password?</a>
+        </div>
+
+        {error ? <div className="error">{error}</div> : null}
+
+        <button type="submit" className="authButton primary" disabled={loading}>
+          <Mail size={18} /> {loading ? 'Signing in…' : 'Sign in'}
+          <ArrowRight size={18} />
+        </button>
+
+        <button type="button" className="authButton secondary">
+          <LockKeyhole size={18} /> Use SSO
+        </button>
+      </form>
+    </AuthPageShell>
   );
 }

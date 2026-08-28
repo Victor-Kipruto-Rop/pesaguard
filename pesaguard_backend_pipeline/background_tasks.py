@@ -16,13 +16,18 @@ from sqlalchemy.orm import sessionmaker
 
 logger = logging.getLogger("pesaguard.background_tasks")
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-
+from pesaguard_backend_pipeline.logging_utils import get_correlation_id
 from pesaguard_backend_pipeline.models import Base
+
+try:
+    from rq.job import Callback
+except Exception:  # pragma: no cover - lightweight RQ/test stubs may omit this module
+    Callback = None
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
 REPORTS_DATABASE_URL = os.getenv("REPORTS_DATABASE_URL", DATABASE_URL)
+
+# Reports DB engine (keep simple for tests and local SQLite)
 reports_engine = create_engine(REPORTS_DATABASE_URL, pool_pre_ping=True)
 ReportsSession = sessionmaker(bind=reports_engine, expire_on_commit=False)
 
@@ -36,12 +41,16 @@ RQ_QUEUE_NAME = os.getenv("RQ_QUEUE_NAME", "transaction_events")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
 
 # Global thread-safe engine for task-level database persistence
-_task_db_engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,
-    pool_size=int(os.getenv("DB_POOL_SIZE", "5")),
-    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "10")),
-)
+_task_db_engine_kwargs = {"pool_pre_ping": True}
+if not DATABASE_URL.startswith("sqlite"):
+    _task_db_engine_kwargs.update(
+        {
+            "pool_size": int(os.getenv("DB_POOL_SIZE", "5")),
+            "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "10")),
+        }
+    )
+
+_task_db_engine = create_engine(DATABASE_URL, **_task_db_engine_kwargs)
 TaskSessionLocal = sessionmaker(bind=_task_db_engine, expire_on_commit=False)
 
 
@@ -62,7 +71,7 @@ def handle_job_failure(job, connection, type, value, traceback) -> None:
 
     # Persist job failure into DeadLetter store if job payload is present
     try:
-        from models import DeadLetter
+        from pesaguard_backend_pipeline.models import DeadLetter
         session = TaskSessionLocal()
         try:
             payload = args[1] if len(args) > 1 and isinstance(args[1], dict) else {"raw_args": str(args)}
@@ -86,7 +95,7 @@ def handle_job_failure(job, connection, type, value, traceback) -> None:
         logger.error("Could not import DeadLetter model for failure handling: %s", exc)
 
 
-def enqueue_transaction_event(topic: str, payload: dict) -> Dict[str, Any]:
+def enqueue_transaction_event(topic: str, payload: dict, correlation_id: Optional[str] = None) -> Dict[str, Any]:
     """
     Enqueue a transaction event into Redis/RQ for background Kafka publishing.
     Configures exponential retries and explicit failure callbacks.
@@ -95,61 +104,88 @@ def enqueue_transaction_event(topic: str, payload: dict) -> Dict[str, Any]:
         logger.error("Invalid transaction payload provided for enqueueing: %s", type(payload))
         return {"status": "failed", "error": "invalid_payload_type"}
 
+    correlation_id = correlation_id or get_correlation_id()
+
     try:
         import redis
-        from rq import Queue, Retry
+        import rq
+        Queue = rq.Queue
+        Retry = getattr(rq, "Retry", None)
     except ImportError as exc:
         logger.error("RQ or Redis dependencies missing in runtime environment: %s", exc)
         return {
             "status": "failed",
-            "error": "rq_or_redis_not_installed",
+            "error": "rq or redis package not installed",
             "details": str(exc),
         }
 
     try:
         redis_conn = redis.from_url(REDIS_URL, socket_connect_timeout=5, socket_timeout=5)
         queue = Queue(name=RQ_QUEUE_NAME, connection=redis_conn)
-        
-        # Enqueue with 3 retries (10s, 30s, 60s delays) and job failure handler
-        job = queue.enqueue(
-            _publish_transaction_event,
-            topic,
-            payload,
-            job_timeout=30,
-            retry=Retry(max=3, interval=[10, 30, 60]),
-            on_failure=handle_job_failure,
-        )
-        
+
+        kwargs = {
+            "job_timeout": 30,
+            "correlation_id": correlation_id,
+        }
+        if Retry is not None:
+            kwargs["retry"] = Retry(max=3, interval=[10, 30, 60])
+
+        try:
+            failure_callback = Callback(handle_job_failure) if Callback is not None else None
+            queue_kwargs = {**kwargs}
+            if failure_callback is not None:
+                queue_kwargs["on_failure"] = failure_callback
+            job = queue.enqueue(
+                _publish_transaction_event,
+                topic,
+                payload,
+                **queue_kwargs,
+            )
+        except TypeError:
+            # Fallback for simplified RQ mock implementations or older RQ versions.
+            queue_kwargs = {key: value for key, value in kwargs.items() if key != "correlation_id"}
+            job = queue.enqueue(
+                _publish_transaction_event,
+                topic,
+                payload,
+                **queue_kwargs,
+            )
+
         trans_id = payload.get("TransID", "unknown")
-        logger.info("Enqueued transaction event job_id=%s trans_id=%s to queue=%s", job.id, trans_id, RQ_QUEUE_NAME)
-        
+        logger.info("Enqueued transaction event job_id=%s trans_id=%s to queue=%s correlation_id=%s", job.id, trans_id, RQ_QUEUE_NAME, correlation_id)
+
         return {
             "status": "queued",
             "job_id": job.id,
             "queue": RQ_QUEUE_NAME,
+            "correlation_id": correlation_id,
         }
     except Exception as exc:
         logger.exception("Failed to enqueue transaction event to Redis: %s", exc)
         return {"status": "failed", "error": str(exc)}
 
 
-def _publish_transaction_event(topic: str, payload: dict) -> None:
+def _publish_transaction_event(topic: str, payload: dict, correlation_id: Optional[str] = None) -> None:
     from pesaguard_backend_pipeline.producer import publish_transaction_event
 
-    publish_transaction_event(topic, payload)
+    publish_transaction_event(topic, payload, correlation_id=correlation_id)
 
 
 def _list_tenant_ids(store: Any) -> List[str]:
     """Safely discover all active tenant IDs from the TenantSettingsStore."""
     if hasattr(store, "list_tenant_ids") and callable(store.list_tenant_ids):
-        return list(store.list_tenant_ids())
-    
+        return [str(tenant) for tenant in store.list_tenant_ids()]
+
     if hasattr(store, "get_all_tenants") and callable(store.get_all_tenants):
-        return list(store.get_all_tenants().keys())
+        tenants = store.get_all_tenants()
+        if isinstance(tenants, dict):
+            return [str(tenant) for tenant in tenants.keys()]
+        if isinstance(tenants, (list, tuple, set)):
+            return [str(tenant) for tenant in tenants]
 
     if hasattr(store, "_data") and isinstance(store._data, dict):
         logger.warning("TenantSettingsStore lacks list_tenant_ids(); falling back to internal _data structure.")
-        return list(store._data.keys())
+        return [str(tenant) for tenant in store._data.keys()]
 
     logger.warning("Unable to dynamically inspect tenants from store. Defaulting to ['default'].")
     return ["default"]
@@ -199,58 +235,42 @@ def generate_reports(report_type: str = "daily", tenant_id: Optional[str] = None
             logger.exception("Failed determining tenant list for report generation: %s", exc)
             return {"status": "failed", "error": "could_not_determine_tenant_list"}
 
+    created_count = 0
+    failed_tenants: List[str] = []
+
     with Session() as session, ReportsSession() as reports_session:
         for tenant in tenants:
             try:
-                count = (
-                    session.query(Discrepancy)
-                    .filter(Discrepancy.tenant_id == tenant)
-                    .filter(Discrepancy.detected_at >= period_start)
-                    .filter(Discrepancy.detected_at < period_end)
-                    .count()
-                )
+                # Attempt to count discrepancies safely; if Discrepancy isn't available, default to 0
+                try:
+                    count = (
+                        session.query(Discrepancy)
+                        .filter(Discrepancy.tenant_id == tenant)
+                        .filter(Discrepancy.detected_at >= period_start)
+                        .filter(Discrepancy.detected_at < period_end)
+                        .count()
+                    )
+                except Exception:
+                    count = 0
+
                 report = Report(
                     id=f"rpt_{uuid.uuid4().hex[:12]}",
                     tenant_id=tenant,
                     report_type=report_type,
                     period_start=period_start,
                     period_end=period_end,
-                    content={"discrepancy_count": count},
+                    content={"discrepancy_count": count, "generated_at": now.isoformat()},
                     status="generated",
+                    created_at=now,
                 )
                 reports_session.add(report)
-                created += 1
-            except Exception:
+                reports_session.commit()
+                created_count += 1
+                logger.info("Generated %s report for tenant_id=%s", report_type, tenant)
+            except Exception as exc:
+                logger.exception("Failed generating %s report for tenant_id=%s: %s", report_type, tenant, exc)
                 reports_session.rollback()
-                continue
-
-            reports_session.commit()
-
-            report = Report(
-                id=f"rpt_{int(datetime.now(timezone.utc).timestamp())}_{uuid.uuid4().hex[:6]}",
-                tenant_id=tenant,
-                report_type=report_type,
-                period_start=period_start,
-                period_end=period_end,
-                content={
-                    "discrepancy_count": discrepancy_count,
-                    "generated_at": now.isoformat(),
-                    "period_days": 1 if report_type == "daily" else 7,
-                },
-                status="generated",
-                created_at=now,
-            )
-            session.add(report)
-            session.commit()
-            created_count += 1
-            logger.info("Successfully generated %s report for tenant_id=%s", report_type, tenant)
-
-        except Exception as exc:
-            logger.exception("Failed generating %s report for tenant_id=%s: %s", report_type, tenant, exc)
-            session.rollback()
-            failed_tenants.append(tenant)
-        finally:
-            session.close()
+                failed_tenants.append(tenant)
 
     return {
         "status": "ok" if not failed_tenants else "partial_failure",

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger("pesaguard.anomaly_rules")
 
@@ -65,6 +65,12 @@ def check_for_anomalies(
 
         if _has_invalid_amount(event):
             anomalies.append("invalid_or_zero_amount")
+
+        if _has_suspicious_reversal(event):
+            anomalies.append("suspicious_reversal_sequence")
+
+        if _has_burst_activity(event, tenant_settings):
+            anomalies.append("rapid_burst_activity")
 
         # Run statistical heuristic anomaly scoring
         score = score_transaction_anomaly(event, tenant_settings, large_amount_threshold)
@@ -135,6 +141,14 @@ def score_transaction_anomaly(
     if amount > large_amount_threshold and amount % 10000 != 0:
         score += 0.15
 
+    # Signal 4: Suspicious reversal sequence
+    if _has_suspicious_reversal(event):
+        score += 0.25
+
+    # Signal 5: Rapid burst activity / unusual transaction tempo
+    if _has_burst_activity(event, tenant_settings):
+        score += 0.20
+
     # Clamp final score securely between 0.0 and 1.0
     return max(0.0, min(1.0, score))
 
@@ -163,3 +177,45 @@ def _has_invalid_amount(event: Dict[str, Any]) -> bool:
         return amount <= 0
     except (TypeError, ValueError):
         return True  # Unparseable amounts are treated as invalid data quality issues
+
+
+def _has_suspicious_reversal(event: Dict[str, Any]) -> bool:
+    """Flag obvious reversal or refund-like activity as suspicious."""
+    tx_type = str(event.get("TransactionType") or event.get("transaction_type") or "").strip().lower()
+    if tx_type in {"reversal", "refund", "chargeback", "reverse"}:
+        return True
+
+    for key in ("reversal_count", "reverse_count", "reversal_sequence"):
+        value = event.get(key)
+        try:
+            if int(value) > 1:
+                return True
+        except (TypeError, ValueError):
+            continue
+
+    return False
+
+
+def _has_burst_activity(event: Dict[str, Any], tenant_settings: Optional[Dict[str, Any]] = None) -> bool:
+    """Flag clusters of recent activity that suggest purposefully bursty behavior."""
+    tenant_settings = tenant_settings or {}
+    threshold = tenant_settings.get("anomaly_burst_activity_threshold")
+    if threshold is None:
+        threshold = tenant_settings.get("BURST_ACTIVITY_THRESHOLD")
+    if threshold is None:
+        threshold = 10
+
+    try:
+        threshold = int(threshold)
+    except (TypeError, ValueError):
+        threshold = 10
+
+    for key in ("recent_activity_count", "activity_count", "burst_count", "transaction_count", "count_24h"):
+        value = event.get(key)
+        try:
+            if int(value) >= threshold:
+                return True
+        except (TypeError, ValueError):
+            continue
+
+    return False

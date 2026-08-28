@@ -54,6 +54,29 @@ def _safe_in(field: Any, value: Any) -> bool:
     return False
 
 
+def route_escalation(tenant_id: str, severity: str, service: str = "reconciliation") -> Dict[str, Any]:
+    """Select escalation policy and channel routing for a given tenant and severity."""
+    normalized = str(severity).lower()
+    if normalized in {"critical", "urgent"}:
+        channels = ["slack", "sms", "email"]
+        escalation_level = "p1"
+    elif normalized == "warning":
+        channels = ["slack", "email"]
+        escalation_level = "p2"
+    else:
+        channels = ["email"]
+        escalation_level = "p3"
+
+    return {
+        "tenant_id": tenant_id,
+        "service": service,
+        "severity": normalized,
+        "escalation_level": escalation_level,
+        "channels": channels,
+        "cooldown_seconds": 300 if normalized in {"critical", "urgent"} else 900,
+    }
+
+
 class EscalationEngine:
     """Manages custom escalation rules and executes automated escalations."""
 
@@ -233,7 +256,10 @@ class EscalationEngine:
         if self.email_service is None:
             self.email_service = EmailService()
 
-        locale = self.settings_store.resolve_locale(incident.tenant_id)
+        tenant_settings = self.settings_store.get(incident.tenant_id or "default")
+        locale = tenant_settings.get("preferred_locale") or tenant_settings.get("locale") or "en"
+        if not locale:
+            locale = "en"
         detected_iso = incident.detected_at.isoformat() if incident.detected_at else None
 
         self.email_service.send_escalation_notification(
@@ -287,7 +313,7 @@ class EscalationEngine:
         }
 
         try:
-            response = requests.post(webhook_url, data=body_bytes, headers=headers, timeout=10)
+            response = requests.post(webhook_url, json=payload, headers=headers, timeout=10)
             return {
                 "status": "webhook_triggered",
                 "url": webhook_url,

@@ -51,19 +51,19 @@ const MORE_NAV: NavItem[] = [
   { href: '/insights', labelKey: 'sidebar.insights', icon: 'M4 19V9 M10 19V5 M16 19v-7 M22 19H2' },
   { href: '/tools', labelKey: 'sidebar.tools', icon: 'M14 4l6 6 M8 20l-4-4 8-8 4 4Z' },
   { href: '/status', labelKey: 'sidebar.status', icon: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z M9 12l2 2 4-4' },
-  { href: '/admin/monitoring', labelKey: 'sidebar.monitoring', icon: 'M2 12h4l2-7 4 14 2-7h8' },
+  { href: '/super-admin/monitoring', labelKey: 'sidebar.monitoring', icon: 'M2 12h4l2-7 4 14 2-7h8' },
   { href: '/support', labelKey: 'sidebar.support', icon: 'M12 20a8 8 0 1 0-8-8v1.5a1.5 1.5 0 0 0 3 0V8a5 5 0 1 1 5 5 M12 22v-2' },
   { href: '/docs', labelKey: 'sidebar.docs', icon: 'M7 3h8l4 4v14H7z M15 3v5h5' },
   { href: '/settings', labelKey: 'sidebar.settings', icon: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z' },
 ];
 
 const ADMIN_NAV: NavItem[] = [
-  { href: '/admin', labelKey: 'sidebar.admin', icon: 'M4 19h16 M7 15v-4 M12 15V7 M17 15v-2' },
-  { href: '/admin/customers', labelKey: 'sidebar.customers', icon: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M9 7a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z M22 21v-2a4 4 0 0 0-3-3.87 M16 3.13a4 4 0 0 1 0 7.75' },
-  { href: '/admin/monitoring', labelKey: 'sidebar.monitoring', icon: 'M2 12h4l2-7 4 14 2-7h8' },
-  { href: '/admin/feature-flags', labelKey: 'sidebar.featureFlags', icon: 'M4 7h16 M4 12h10 M4 17h6' },
-  { href: '/admin/audit-log', labelKey: 'sidebar.internalAudit', icon: 'M7 3h8l4 4v14H7z M15 3v5h5' },
-  { href: '/admin/support', labelKey: 'sidebar.adminSupport', icon: 'M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z' },
+  { href: '/super-admin', labelKey: 'sidebar.admin', icon: 'M4 19h16 M7 15v-4 M12 15V7 M17 15v-2' },
+  { href: '/super-admin/customers', labelKey: 'sidebar.customers', icon: 'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2 M9 7a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z M22 21v-2a4 4 0 0 0-3-3.87 M16 3.13a4 4 0 0 1 0 7.75' },
+  { href: '/super-admin/monitoring', labelKey: 'sidebar.monitoring', icon: 'M2 12h4l2-7 4 14 2-7h8' },
+  { href: '/super-admin/feature-flags', labelKey: 'sidebar.featureFlags', icon: 'M4 7h16 M4 12h10 M4 17h6' },
+  { href: '/super-admin/audit-log', labelKey: 'sidebar.internalAudit', icon: 'M7 3h8l4 4v14H7z M15 3v5h5' },
+  { href: '/super-admin/support', labelKey: 'sidebar.adminSupport', icon: 'M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z' },
   { href: '/pilot/status', labelKey: 'sidebar.pilotStatus', icon: 'M12 8v4l3 3 M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z' },
 ];
 

@@ -75,32 +75,61 @@ def cleanup_retention() -> dict:
     oldest_discrepancy = datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS_DISCREPANCIES)
     oldest_audit = datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS_AUDIT)
 
-    SessionLocal = get_session_local()
-    ReportsSessionLocal = get_reports_session_local()
-    AuditSessionLocal = get_audit_session_local()
-    session = SessionLocal()
-    reports_session = ReportsSessionLocal()
-    audit_session = AuditSessionLocal()
-    try:
-        deleted_transactions = session.execute(
-            delete(Transaction).where(Transaction.created_at < oldest_transaction)
-        ).rowcount
-        deleted_discrepancies = session.execute(
-            delete(Discrepancy).where(Discrepancy.detected_at < oldest_discrepancy)
-        ).rowcount
-        deleted_reports = reports_session.execute(
-            delete(Report).where(Report.created_at < oldest_discrepancy)
-        ).rowcount
-        deleted_audit = audit_session.execute(
-            delete(ActionAuditEntry).where(ActionAuditEntry.created_at < oldest_audit)
-        ).rowcount
-        session.commit()
-        reports_session.commit()
-        audit_session.commit()
-    finally:
-        session.close()
-        reports_session.close()
-        audit_session.close()
+    main_url = get_database_url()
+    reports_url = get_reports_database_url()
+    audit_url = get_audit_database_url()
+
+    if main_url == reports_url == audit_url:
+        engine = create_engine(
+            main_url,
+            pool_pre_ping=True,
+            connect_args={"check_same_thread": False} if main_url.startswith("sqlite") else {},
+        )
+        SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+        session = SessionLocal()
+        try:
+            deleted_transactions = session.execute(
+                delete(Transaction).where(Transaction.created_at < oldest_transaction)
+            ).rowcount
+            deleted_discrepancies = session.execute(
+                delete(Discrepancy).where(Discrepancy.detected_at < oldest_discrepancy)
+            ).rowcount
+            deleted_reports = session.execute(
+                delete(Report).where(Report.created_at < oldest_discrepancy)
+            ).rowcount
+            deleted_audit = session.execute(
+                delete(ActionAuditEntry).where(ActionAuditEntry.created_at < oldest_audit)
+            ).rowcount
+            session.commit()
+        finally:
+            session.close()
+    else:
+        SessionLocal = get_session_local()
+        ReportsSessionLocal = get_reports_session_local()
+        AuditSessionLocal = get_audit_session_local()
+        session = SessionLocal()
+        reports_session = ReportsSessionLocal()
+        audit_session = AuditSessionLocal()
+        try:
+            deleted_transactions = session.execute(
+                delete(Transaction).where(Transaction.created_at < oldest_transaction)
+            ).rowcount
+            deleted_discrepancies = session.execute(
+                delete(Discrepancy).where(Discrepancy.detected_at < oldest_discrepancy)
+            ).rowcount
+            deleted_reports = reports_session.execute(
+                delete(Report).where(Report.created_at < oldest_discrepancy)
+            ).rowcount
+            deleted_audit = audit_session.execute(
+                delete(ActionAuditEntry).where(ActionAuditEntry.created_at < oldest_audit)
+            ).rowcount
+            session.commit()
+            reports_session.commit()
+            audit_session.commit()
+        finally:
+            session.close()
+            reports_session.close()
+            audit_session.close()
 
     return {
         "deleted_transactions": deleted_transactions,

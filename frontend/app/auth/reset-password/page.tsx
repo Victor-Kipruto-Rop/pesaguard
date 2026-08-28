@@ -1,46 +1,39 @@
-'use client';
+import { ArrowRight, Lock } from 'lucide-react';
+import AuthPageShell from '../../../components/AuthPageShell';
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
-import PulseLine from '../../../components/PulseLine';
-import { useLocale } from '../../../lib/i18n';
-
-export default function ResetPasswordPage() {
-  const router = useRouter();
-  const { t } = useLocale();
-  const [password, setPassword] = useState('');
-  const [confirm, setConfirm] = useState('');
-  const [error, setError] = useState('');
-
-  const submit = (event: React.FormEvent) => {
-    event.preventDefault();
-    if (password !== confirm) {
-      setError(t('auth.passwordMismatch'));
-      return;
-    }
-    router.push('/auth/login');
-  };
-
+export default function AuthResetPasswordPage() {
   return (
-    <main className="authPage">
-      <div className="authCard">
-        <PulseLine height={32} />
-        <p className="eyebrow">{t('auth.resetEyebrow')}</p>
-        <h1>{t('auth.resetTitle')}</h1>
-        <p className="muted">{t('auth.resetSummary')}</p>
-        <form className="formGrid" onSubmit={submit}>
-          <div className="formRow">
-            <label htmlFor="password">{t('auth.newPassword')}</label>
-            <input id="password" type="password" required value={password} onChange={(e) => setPassword(e.target.value)} />
-          </div>
-          <div className="formRow">
-            <label htmlFor="confirm">{t('auth.confirmPassword')}</label>
-            <input id="confirm" type="password" required value={confirm} onChange={(e) => setConfirm(e.target.value)} />
-          </div>
-          {error ? <div className="pill danger">{error}</div> : null}
-          <button className="primaryBtn" type="submit">{t('auth.updatePassword')}</button>
-        </form>
-      </div>
-    </main>
+    <AuthPageShell
+      eyebrow="Secure reset"
+      title="Choose a new password"
+      subtitle="Create a strong password that protects your account and all linked operational access."
+      footer={
+        <p className="authPrompt">
+          Need help? <a href="/auth/forgot-password">Request another reset</a>
+        </p>
+      }
+    >
+      <form className="authForm">
+        <div className="authFormHeader">
+          <h3>New password</h3>
+          <p>Use at least 12 characters with a mix of letters, numbers, and symbols.</p>
+        </div>
+
+        <div className="authInputGroup">
+          <label htmlFor="new-password">New password</label>
+          <input id="new-password" className="authInput" type="password" placeholder="Enter a new password" />
+        </div>
+
+        <div className="authInputGroup">
+          <label htmlFor="confirm-new-password">Confirm password</label>
+          <input id="confirm-new-password" className="authInput" type="password" placeholder="Repeat the password" />
+        </div>
+
+        <button type="submit" className="authButton primary">
+          <Lock size={18} /> Update password
+          <ArrowRight size={18} />
+        </button>
+      </form>
+    </AuthPageShell>
   );
 }

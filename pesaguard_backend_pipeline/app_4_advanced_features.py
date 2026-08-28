@@ -63,6 +63,22 @@ engine = create_db_engine(DATABASE_URL)
 reports_engine = create_db_engine(REPORTS_DATABASE_URL)
 audit_engine = create_db_engine(AUDIT_DATABASE_URL)
 
+SessionFactory = sessionmaker(bind=engine, expire_on_commit=False)
+ReportsSessionFactory = sessionmaker(bind=reports_engine, expire_on_commit=False)
+AuditSessionFactory = sessionmaker(bind=audit_engine, expire_on_commit=False)
+
+# Initialize the shared schema on the primary engine early so SQLite-backed tests
+# and lightweight local runs can persist webhook and audit records without a manual setup step.
+# In non-test environments with a reachable Postgres instance this will succeed. When the
+# database is unavailable or credentials are wrong, we degrade gracefully so app import
+# and request handling continue to work for the rest of the stack.
+try:
+    Base.metadata.create_all(engine)
+    Base.metadata.create_all(reports_engine)
+    Base.metadata.create_all(audit_engine)
+except Exception as exc:
+    logger.warning("Advanced features database initialization skipped: %s", exc)
+
 
 def _reports_url() -> str:
     return os.getenv("REPORTS_DATABASE_URL") or os.getenv("DATABASE_URL") or DATABASE_URL
@@ -75,15 +91,15 @@ def _audit_url() -> str:
 def SessionLocal(read_only: bool | None = None):
     """Create a session. Respects read_only parameter for compatibility with read replicas."""
     # app_4_advanced_features doesn't use replica engines, so read_only is ignored
-    return sessionmaker(bind=engine, expire_on_commit=False)()
+    return SessionFactory()
 
 
 def ReportsSessionLocal():
-    return sessionmaker(bind=create_db_engine(_reports_url()), expire_on_commit=False)()
+    return ReportsSessionFactory()
 
 
 def AuditSessionLocal():
-    return sessionmaker(bind=create_db_engine(_audit_url()), expire_on_commit=False)()
+    return AuditSessionFactory()
 
 email_service = EmailService(
     smtp_server=os.getenv("SMTP_SERVER", "localhost"),
@@ -91,6 +107,52 @@ email_service = EmailService(
     from_email=os.getenv("SMTP_FROM_EMAIL", "noreply@pesaguard.local"),
 )
 settings_store = TenantSettingsStore()
+
+ERROR_CODE_TAXONOMY = {
+    "missing_credentials": {"status_code": 400, "description": "Request is missing username or password."},
+    "invalid_credentials": {"status_code": 401, "description": "Authentication failed for the supplied credentials."},
+    "not_authenticated": {"status_code": 401, "description": "Authentication token is missing or expired."},
+    "missing_token": {"status_code": 400, "description": "A token value is required for this action."},
+    "invalid_request": {"status_code": 400, "description": "Request payload is malformed or missing required fields."},
+    "tenant_access_denied": {"status_code": 403, "description": "The caller does not have access to the requested tenant."},
+    "resource_not_found": {"status_code": 404, "description": "The requested resource does not exist."},
+    "rate_limit_exceeded": {"status_code": 429, "description": "The client exceeded the allowed request rate."},
+    "internal_server_error": {"status_code": 500, "description": "The server encountered an unexpected error."},
+}
+
+
+def _request_id_value() -> str:
+    return request.headers.get("X-Request-ID") or request.headers.get("X-Correlation-ID") or str(uuid.uuid4())
+
+
+def _api_success(payload: Any, status_code: int = 200, meta: Optional[Dict[str, Any]] = None):
+    body = {
+        "status": "success",
+        "data": payload,
+        "request_id": _request_id_value(),
+        "tenant_id": request.headers.get("X-Tenant-ID") or os.getenv("TENANT_ID", "default"),
+    }
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if key not in body and key not in {"status", "error", "data", "request_id", "tenant_id", "meta", "ResultCode", "ResultDesc"}:
+                body[key] = value
+    if meta is not None:
+        body["meta"] = meta
+    return jsonify(body), status_code
+
+
+def _api_error(code: str, message: str, status_code: int = 400, details: Optional[Dict[str, Any]] = None):
+    body = {
+        "status": "error",
+        "error": {"code": code, "message": message},
+        "request_id": _request_id_value(),
+        "tenant_id": request.headers.get("X-Tenant-ID") or os.getenv("TENANT_ID", "default"),
+        "ResultCode": 1,
+        "ResultDesc": message,
+    }
+    if details:
+        body["error"]["details"] = details
+    return jsonify(body), status_code
 
 
 def resolve_email_locale(tenant_id: str | None, user_id: str | None = None, settings_path=None) -> str:
@@ -101,7 +163,29 @@ def resolve_email_locale(tenant_id: str | None, user_id: str | None = None, sett
         store = TenantSettingsStore(str(settings_path))
     else:
         store = settings_store
-    return store.resolve_locale(str(tenant_id), user_id=user_id, fallback_locale="en")
+
+    tenant_settings = store.get(str(tenant_id))
+    if not isinstance(tenant_settings, dict):
+        return "en"
+
+    if user_id:
+        user_overrides = tenant_settings.get("user_locale_overrides") or {}
+        if isinstance(user_overrides, dict):
+            override = user_overrides.get(str(user_id)) or user_overrides.get(user_id)
+            if override:
+                return str(override)
+
+        user_locales = tenant_settings.get("user_locales") or {}
+        if isinstance(user_locales, dict):
+            override = user_locales.get(str(user_id)) or user_locales.get(user_id)
+            if override:
+                return str(override)
+
+    locale = tenant_settings.get("preferred_locale") or tenant_settings.get("locale")
+    if locale:
+        return str(locale)
+
+    return "en"
 
 
 def _record_action_audit(session, tenant_id: str, actor: str, action: str, details: dict | None = None) -> None:
@@ -164,12 +248,230 @@ def _ensure_tables():
         pass
 
 
+@app.before_request
+def _set_request_contract_context():
+    request_id = (
+        request.headers.get("X-Trace-Id")
+        or request.headers.get("X-Request-ID")
+        or request.headers.get("X-Correlation-ID")
+        or str(uuid.uuid4())
+    )
+    request.environ["pesaguard.request_id"] = request_id
+    request.environ["pesaguard.correlation_id"] = request_id
+
+
 @app.after_request
 def _after_request(response):
+    request_id = request.environ.get("pesaguard.request_id") or request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    tenant_id = request.headers.get("X-Tenant-ID") or os.getenv("TENANT_ID", "default")
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Correlation-ID"] = request_id
+    response.headers["X-Trace-Id"] = request_id
+    response.headers["X-Tenant-ID"] = tenant_id
     return response
+
+
+@app.route("/status", methods=["GET"])
+def advanced_status():
+    """Standard status payload for advanced service health and operations."""
+    from pesaguard_backend_pipeline.health import build_health_payload
+    payload = build_health_payload()
+    payload["service"] = "pesaguard-advanced"
+    payload["request_id"] = request.environ.get("pesaguard.request_id") or request.headers.get("X-Request-ID") or request.headers.get("X-Trace-Id") or _request_id_value()
+    payload["tenant_id"] = request.headers.get("X-Tenant-ID") or os.getenv("TENANT_ID", "default")
+    payload["trace_id"] = payload["request_id"]
+    payload["generated_at"] = datetime.now(timezone.utc).isoformat()
+    payload["ux"] = {
+        "theme": "premium",
+        "status_label": {
+            "ok": "Healthy",
+            "degraded": "Degraded",
+            "failed": "Critical",
+        }.get(payload.get("status", "unknown"), "Unknown"),
+        "tone": {
+            "ok": "success",
+            "degraded": "warning",
+            "failed": "danger",
+        }.get(payload.get("status", "unknown"), "neutral"),
+    }
+    status_code = 503 if payload.get("status") == "failed" else 200
+    return jsonify(payload), status_code
+
+
+@app.route("/openapi.json", methods=["GET"])
+def advanced_openapi_spec():
+    spec = {
+        "openapi": "3.0.3",
+        "info": {
+            "title": "PesaGuard Advanced Features API",
+            "version": "1.0.0",
+            "description": "Advanced tenant, webhooks, notifications, and escalation API.",
+        },
+        "components": {
+            "schemas": {
+                "ApiSuccess": {
+                    "type": "object",
+                    "example": {
+                        "status": "success",
+                        "data": {"tenant_id": "tenant-a", "webhooks": []},
+                        "request_id": "req_123",
+                        "tenant_id": "tenant-a",
+                    },
+                    "properties": {
+                        "status": {"type": "string", "example": "success"},
+                        "data": {"type": "object"},
+                        "request_id": {"type": "string"},
+                        "tenant_id": {"type": "string"},
+                        "meta": {"type": "object", "nullable": True},
+                    },
+                },
+                "ApiError": {
+                    "type": "object",
+                    "example": {
+                        "status": "error",
+                        "error": {"code": "invalid_credentials", "message": "Authentication failed."},
+                        "request_id": "req_123",
+                        "tenant_id": "tenant-a",
+                        "ResultCode": 1,
+                        "ResultDesc": "Authentication failed.",
+                    },
+                    "properties": {
+                        "status": {"type": "string", "example": "error"},
+                        "error": {
+                            "type": "object",
+                            "properties": {
+                                "code": {"type": "string", "enum": list(ERROR_CODE_TAXONOMY.keys())},
+                                "message": {"type": "string"},
+                                "details": {"type": "object", "nullable": True},
+                            },
+                        },
+                        "request_id": {"type": "string"},
+                        "tenant_id": {"type": "string"},
+                        "ResultCode": {"type": "integer", "example": 1},
+                        "ResultDesc": {"type": "string"},
+                    },
+                },
+            }
+        },
+        "paths": {
+            "/status": {
+                "get": {
+                    "summary": "Status summary",
+                    "responses": {
+                        "200": {
+                            "description": "Status output",
+                            "content": {
+                                "application/json": {
+                                    "example": {
+                                        "status": "ok",
+                                        "service": "pesaguard-advanced",
+                                        "dependencies": {"database": "healthy"},
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+            },
+            "/auth/login": {
+                "post": {
+                    "summary": "Login and issue JWT token",
+                    "responses": {
+                        "200": {
+                            "description": "Token response",
+                            "content": {
+                                "application/json": {
+                                    "example": {
+                                        "status": "success",
+                                        "data": {"token": "jwt_token", "tenant_id": "tenant-a"},
+                                        "request_id": "req_123",
+                                        "tenant_id": "tenant-a",
+                                    }
+                                }
+                            },
+                        },
+                        "401": {
+                            "description": "Authentication failed",
+                            "content": {
+                                "application/json": {
+                                    "example": {
+                                        "status": "error",
+                                        "error": {"code": "invalid_credentials", "message": "Authentication failed."},
+                                        "request_id": "req_123",
+                                        "tenant_id": "tenant-a",
+                                    }
+                                }
+                            },
+                        },
+                    },
+                }
+            },
+            "/webhooks": {
+                "post": {
+                    "summary": "Register webhook endpoint",
+                    "responses": {
+                        "201": {
+                            "description": "Webhook created",
+                            "content": {
+                                "application/json": {
+                                    "example": {
+                                        "status": "success",
+                                        "data": {"tenant_id": "tenant-a", "id": "wh_123", "url": "https://example.com/webhook"},
+                                        "request_id": "req_123",
+                                        "tenant_id": "tenant-a",
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+            },
+            "/escalation-rules": {
+                "get": {
+                    "summary": "List escalation rules",
+                    "responses": {
+                        "200": {
+                            "description": "Rules",
+                            "content": {
+                                "application/json": {
+                                    "example": {
+                                        "status": "success",
+                                        "data": {"tenant_id": "tenant-a", "rules": []},
+                                        "request_id": "req_123",
+                                        "tenant_id": "tenant-a",
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+            },
+            "/on-call/rotations": {
+                "get": {
+                    "summary": "List on-call rotations",
+                    "responses": {
+                        "200": {
+                            "description": "Rotations",
+                            "content": {
+                                "application/json": {
+                                    "example": {
+                                        "status": "success",
+                                        "data": {"tenant_id": "tenant-a", "active_rotations": []},
+                                        "request_id": "req_123",
+                                        "tenant_id": "tenant-a",
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+            },
+        },
+    }
+    return jsonify(spec), 200
 
 
 # ============================================================================
@@ -266,14 +568,12 @@ def login():
     password = data.get("password")
 
     if not username or not password:
-        return jsonify({"error": "missing_credentials"}), 400
+        return _api_error("missing_credentials", "Username and password are required.", 400)
 
     user = _verify_credentials(username, password)
     if not user:
-        # Deliberately generic error — do not reveal whether the username
-        # exists, only that the login attempt failed.
         logger.warning("Failed login attempt for username=%s", username)
-        return jsonify({"error": "invalid_credentials"}), 401
+        return _api_error("invalid_credentials", "Authentication failed.", 401)
 
     token = AuthRBAC.generate_token(
         user_id=f"user_{username}",
@@ -282,14 +582,14 @@ def login():
         roles=user.get("roles", ["operator"]),
     )
 
-    return jsonify({
+    return _api_success({
         "token": token,
         "user_id": f"user_{username}",
         "username": username,
         "tenant_id": user["tenant_id"],
         "roles": user.get("roles", ["operator"]),
         "expires_in": 86400,
-    }), 200
+    }, 200)
 
 
 @app.route("/auth/verify", methods=["GET"])
@@ -298,15 +598,15 @@ def verify_token():
     """Verify current authentication token."""
     user = get_current_user()
     if not user:
-        return jsonify({"error": "not_authenticated"}), 401
+        return _api_error("not_authenticated", "Authentication token is missing or invalid.", 401)
 
-    return jsonify({
+    return _api_success({
         "user_id": user.user_id,
         "username": user.username,
         "tenant_id": user.tenant_id,
         "roles": user.roles,
         "permissions": user.permissions,
-    }), 200
+    }, 200)
 
 
 @app.route("/auth/revoke", methods=["POST"])
@@ -316,10 +616,10 @@ def revoke_token():
     payload = request.json or {}
     token = payload.get("token")
     if not token:
-        return jsonify({"error": "missing_token"}), 400
+        return _api_error("missing_token", "A token value is required to revoke a session.", 400)
 
     AuthRBAC.revoke_token(token)
-    return jsonify({"status": "revoked"}), 200
+    return _api_success({"status": "revoked"}, 200)
 
 
 # ============================================================================
@@ -351,7 +651,7 @@ def create_webhook():
             action="create_webhook",
             details={"webhook_id": result.get("id"), "url": data.get("url"), "event_types": result.get("event_types")},
         )
-        return jsonify(result), 201
+        return _api_success(result, 201, meta={"operation": "create_webhook"})
     finally:
         session.close()
 
@@ -367,7 +667,7 @@ def list_webhooks():
     try:
         webhook_mgr = WebhookManager(session)
         webhooks = webhook_mgr.get_webhooks(tenant_id)
-        return jsonify({
+        return _api_success({
             "tenant_id": tenant_id,
             "webhooks": [
                 {
@@ -379,7 +679,7 @@ def list_webhooks():
                 }
                 for w in webhooks
             ],
-        }), 200
+        }, 200, meta={"count": len(webhooks)})
     finally:
         session.close()
 
@@ -401,7 +701,7 @@ def update_webhook(webhook_id):
             action="update_webhook",
             details={"webhook_id": webhook_id, **data},
         )
-        return jsonify(result), 200
+        return _api_success(result, 200, meta={"operation": "update_webhook"})
     finally:
         session.close()
 
@@ -416,10 +716,10 @@ def get_webhook_deliveries(webhook_id):
     try:
         webhook_mgr = WebhookManager(session)
         deliveries = webhook_mgr.get_delivery_history(webhook_id, limit=limit)
-        return jsonify({
+        return _api_success({
             "webhook_id": webhook_id,
             "deliveries": deliveries,
-        }), 200
+        }, 200, meta={"limit": limit})
     finally:
         session.close()
 
@@ -458,7 +758,7 @@ def create_escalation_rule():
             action="create_escalation_rule",
             details={"rule_id": result.get("id"), "name": data.get("name")},
         )
-        return jsonify(result), 201
+        return _api_success(result, 201, meta={"operation": "create_escalation_rule"})
     finally:
         session.close()
 
@@ -474,10 +774,10 @@ def list_escalation_rules():
     try:
         engine = EscalationEngine(session)
         rules = engine.get_rules(tenant_id)
-        return jsonify({
+        return _api_success({
             "tenant_id": tenant_id,
             "rules": rules,
-        }), 200
+        }, 200, meta={"count": len(rules)})
     finally:
         session.close()
 
@@ -492,7 +792,7 @@ def update_escalation_rule(rule_id):
     try:
         engine = EscalationEngine(session)
         result = engine.update_rule(rule_id, **data)
-        return jsonify(result), 200
+        return _api_success(result, 200, meta={"operation": "update_escalation_rule"})
     finally:
         session.close()
 
@@ -532,7 +832,7 @@ def create_on_call_rotation():
             action="create_on_call_rotation",
             details={"operator_id": data.get("operator_id"), "shift_start": shift_start.isoformat(), "shift_end": shift_end.isoformat()},
         )
-        return jsonify(result), 201
+        return _api_success(result, 201, meta={"operation": "create_on_call_rotation"})
     finally:
         session.close()
 
@@ -550,11 +850,11 @@ def get_active_on_call():
         rotations = service.get_active_rotations(tenant_id)
         coverage = service.get_coverage_status(tenant_id)
 
-        return jsonify({
+        return _api_success({
             "tenant_id": tenant_id,
             "coverage": coverage,
             "active_rotations": rotations,
-        }), 200
+        }, 200, meta={"count": len(rotations)})
     finally:
         session.close()
 
@@ -570,12 +870,12 @@ def get_operator_schedule(operator_id):
     try:
         service = OnCallService(session)
         schedule = service.get_operator_schedule(tenant_id, operator_id, days)
-        return jsonify({
+        return _api_success({
             "operator_id": operator_id,
             "tenant_id": tenant_id,
             "days": days,
             "schedule": schedule,
-        }), 200
+        }, 200, meta={"days": days})
     finally:
         session.close()
 
@@ -600,7 +900,7 @@ def bulk_create_on_call():
             action="bulk_create_on_call_rotations",
             details={"created": result.get("created", 0)},
         )
-        return jsonify(result), 201
+        return _api_success(result, 201, meta={"operation": "bulk_create_on_call_rotations"})
     finally:
         session.close()
 
@@ -636,7 +936,7 @@ def send_reconciliation_email():
             action="send_reconciliation_email",
             details={"recipient": recipient, "report_data": report_data},
         )
-        return jsonify(result), 200
+        return _api_success(result, 200, meta={"operation": "send_reconciliation_email"})
     finally:
         session.close()
 
@@ -668,7 +968,7 @@ def send_escalation_email():
             action="send_escalation_email",
             details={"recipient": recipient, "incident": incident},
         )
-        return jsonify(result), 200
+        return _api_success(result, 200, meta={"operation": "send_escalation_email"})
     finally:
         session.close()
 
@@ -684,10 +984,10 @@ def get_email_history():
 
     try:
         history = email_service.get_email_history(session, tenant_id, limit)
-        return jsonify({
+        return _api_success({
             "tenant_id": tenant_id,
             "emails": history,
-        }), 200
+        }, 200, meta={"count": len(history)})
     finally:
         session.close()
 
@@ -710,7 +1010,7 @@ def advanced_search():
     try:
         search = AdvancedSearchEngine(session)
         result = search.search(tenant_id, query, limit=limit, offset=offset)
-        return jsonify(result), 200
+        return _api_success(result, 200, meta={"query": query, "limit": limit, "offset": offset})
     finally:
         session.close()
 
@@ -726,10 +1026,10 @@ def search_filters():
     try:
         search = AdvancedSearchEngine(session)
         filters = search.suggest_filters(tenant_id)
-        return jsonify({
+        return _api_success({
             "tenant_id": tenant_id,
             "available_filters": filters,
-        }), 200
+        }, 200, meta={"tenant_id": tenant_id})
     finally:
         session.close()
 
@@ -755,7 +1055,14 @@ def structured_search():
             limit=request.args.get("limit", 50, type=int),
             offset=request.args.get("offset", 0, type=int),
         )
-        return jsonify(result), 200
+        return _api_success(result, 200, meta={"filters": {
+            "severity": request.args.get("severity"),
+            "status": request.args.get("status"),
+            "anomaly_type": request.args.get("anomaly_type"),
+            "resolved": request.args.get("resolved"),
+            "assignee": request.args.get("assignee"),
+            "days_back": request.args.get("days_back", 30, type=int),
+        }})
     finally:
         session.close()
 
@@ -779,7 +1086,7 @@ def public_get_reconciliations(tenant_id: str):
             .offset(offset)
         )
         rows = q.all()
-        return jsonify({
+        return _api_success({
             "tenant_id": tenant_id,
             "count": len(rows),
             "reconciliations": [
@@ -795,7 +1102,7 @@ def public_get_reconciliations(tenant_id: str):
                 }
                 for r in rows
             ],
-        }), 200
+        }, 200, meta={"limit": limit, "offset": offset})
     finally:
         session.close()
 
@@ -818,7 +1125,7 @@ def public_get_reports(tenant_id: str):
             .offset(offset)
         )
         rows = q.all()
-        return jsonify({
+        return _api_success({
             "tenant_id": tenant_id,
             "count": len(rows),
             "reports": [
@@ -833,7 +1140,7 @@ def public_get_reports(tenant_id: str):
                 }
                 for r in rows
             ],
-        }), 200
+        }, 200, meta={"limit": limit, "offset": offset})
     finally:
         session.close()
 
@@ -877,11 +1184,11 @@ def bulk_assign_incidents():
             action="bulk_assign_incidents",
             details={"updated": updated, "skipped_ids": skipped_ids, "assignee": assignee},
         )
-        return jsonify({
+        return _api_success({
             "updated": updated,
             "skipped_ids": skipped_ids,
             "rate_limit": get_rate_limit_status(),
-        }), 200
+        }, 200, meta={"operation": "bulk_assign_incidents"})
     finally:
         session.close()
 
@@ -920,12 +1227,12 @@ def bulk_escalate_incidents():
             action="bulk_escalate_incidents",
             details={"escalated_count": len(escalated), "skipped_ids": skipped_ids},
         )
-        return jsonify({
+        return _api_success({
             "escalated": len(escalated),
             "details": escalated,
             "skipped_ids": skipped_ids,
             "rate_limit": get_rate_limit_status(),
-        }), 200
+        }, 200, meta={"operation": "bulk_escalate_incidents"})
     finally:
         session.close()
 

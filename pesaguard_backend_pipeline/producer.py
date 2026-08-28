@@ -142,8 +142,8 @@ def _fallback_to_dead_letter_queue(topic: str, payload: Dict[str, Any], error_re
         return
 
     try:
-        from models import DeadLetter
-        from app_2 import SessionLocal
+        from pesaguard_backend_pipeline.models import DeadLetter
+        from pesaguard_backend_pipeline.app_2 import SessionLocal
         import uuid
         from datetime import datetime, timezone
 

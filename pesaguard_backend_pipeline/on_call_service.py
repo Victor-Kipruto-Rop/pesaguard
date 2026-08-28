@@ -233,7 +233,6 @@ class OnCallService:
         errors = []
 
         for data in rotations_data:
-            savepoint = self.session.begin_nested()
             try:
                 result = self.create_rotation(
                     tenant_id=tenant_id,
@@ -245,10 +244,8 @@ class OnCallService:
                     shift_end=data["shift_end"],
                     escalation_level=data.get("escalation_level", 1),
                 )
-                savepoint.commit()
                 created.append(result)
             except Exception as exc:
-                savepoint.rollback()
                 logger.error("Failed creating bulk rotation entry: %s", exc)
                 errors.append({"data": data, "error": str(exc)})
 

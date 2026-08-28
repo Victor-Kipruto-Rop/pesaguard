@@ -97,7 +97,11 @@ class DarajaAuthClient:
             if not value:
                 return None
             if isinstance(value, dict):
-                return value.get("value")
+                if "value" in value:
+                    return str(value.get("value"))
+                if "token" in value:
+                    return str(value.get("token"))
+                return None
             return str(value)
         except Exception as exc:
             logger.warning("Failed to read token from cache for tenant=%s: %s", self.tenant_id, exc)
@@ -111,8 +115,14 @@ class DarajaAuthClient:
         try:
             if hasattr(self.cache, "setex"):
                 self.cache.setex(self._token_cache_key, ttl, token)
-            else:
-                self.cache.set(self._token_cache_key, {"value": token}, ex=ttl)
+                return
+
+            if hasattr(self.cache, "set"):
+                try:
+                    self.cache.set(self._token_cache_key, token, ttl)
+                except TypeError:
+                    self.cache.set(self._token_cache_key, {"value": token}, ttl)
+                return
         except Exception as exc:
             logger.error("Failed to write token to cache for tenant=%s: %s", self.tenant_id, exc)
 

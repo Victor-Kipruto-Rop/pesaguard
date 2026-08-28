@@ -63,8 +63,9 @@ class TestAuthentication:
         })
         assert response.status_code == 200
         data = response.get_json()
-        assert "token" in data
-        assert data["username"] == "testuser"
+        assert data["status"] == "success"
+        assert "token" in data["data"]
+        assert data["data"]["username"] == "testuser"
 
     def test_verify_token_valid(self, client, admin_token):
         """Test token verification with valid token."""
@@ -74,7 +75,8 @@ class TestAuthentication:
         )
         assert response.status_code == 200
         data = response.get_json()
-        assert data["username"] == "admin"
+        assert data["status"] == "success"
+        assert data["data"]["username"] == "admin"
 
     def test_verify_token_missing(self, client):
         """Test token verification without token."""
@@ -109,8 +111,9 @@ class TestWebhooks:
         )
         assert response.status_code == 201
         data = response.get_json()
-        assert "id" in data
-        assert data["url"] == "https://example.com/webhooks"
+        assert data["status"] == "success"
+        assert "id" in data["data"]
+        assert data["data"]["url"] == "https://example.com/webhooks"
 
     def test_list_webhooks(self, client, admin_token):
         """Test listing webhooks."""
@@ -132,7 +135,8 @@ class TestWebhooks:
         )
         assert response.status_code == 200
         data = response.get_json()
-        assert "webhooks" in data
+        assert data["status"] == "success"
+        assert "webhooks" in data["data"]
 
 
 class TestEscalationRules:
@@ -157,7 +161,8 @@ class TestEscalationRules:
         )
         assert response.status_code == 201
         data = response.get_json()
-        assert data["name"] == "Critical Severity Escalation"
+        assert data["status"] == "success"
+        assert data["data"]["name"] == "Critical Severity Escalation"
 
     def test_list_escalation_rules(self, client, admin_token):
         """Test listing escalation rules."""
@@ -182,7 +187,8 @@ class TestEscalationRules:
         )
         assert response.status_code == 200
         data = response.get_json()
-        assert "rules" in data
+        assert data["status"] == "success"
+        assert "rules" in data["data"]
 
 
 class TestOnCallRotations:
@@ -210,7 +216,8 @@ class TestOnCallRotations:
         )
         assert response.status_code == 201
         data = response.get_json()
-        assert data["operator_id"] == "op_001"
+        assert data["status"] == "success"
+        assert data["data"]["operator_id"] == "op_001"
 
     def test_get_active_on_call(self, client, admin_token):
         """Test getting active on-call operators."""
@@ -239,8 +246,9 @@ class TestOnCallRotations:
         )
         assert response.status_code == 200
         data = response.get_json()
-        assert "coverage" in data
-        assert "active_rotations" in data
+        assert data["status"] == "success"
+        assert "coverage" in data["data"]
+        assert "active_rotations" in data["data"]
 
     def test_bulk_create_on_call(self, client, admin_token):
         """Test bulk creating on-call rotations."""
@@ -276,7 +284,8 @@ class TestOnCallRotations:
         )
         assert response.status_code == 201
         data = response.get_json()
-        assert data["created"] == 2
+        assert data["status"] == "success"
+        assert data["data"]["created"] == 2
 
 
 class TestEmailNotifications:
@@ -301,7 +310,8 @@ class TestEmailNotifications:
         )
         assert response.status_code == 200
         data = response.get_json()
-        assert data["status"] in ["sent", "pending", "failed"]
+        assert data["status"] == "success"
+        assert data["data"]["status"] in ["sent", "pending", "failed"]
 
     def test_send_escalation_email(self, client, operator_token):
         """Test sending escalation notification."""
@@ -322,7 +332,8 @@ class TestEmailNotifications:
         )
         assert response.status_code == 200
         data = response.get_json()
-        assert "id" in data
+        assert data["status"] == "success"
+        assert "id" in data["data"]
 
 
 class TestAdvancedSearch:
@@ -336,8 +347,9 @@ class TestAdvancedSearch:
         )
         assert response.status_code == 200
         data = response.get_json()
-        assert "results" in data
-        assert "parsed" in data
+        assert data["status"] == "success"
+        assert "results" in data["data"]
+        assert "parsed" in data["data"]
 
     def test_structured_search(self, client, operator_token):
         """Test structured search with filters."""
@@ -347,8 +359,9 @@ class TestAdvancedSearch:
         )
         assert response.status_code == 200
         data = response.get_json()
-        assert "results" in data
-        assert "filters" in data
+        assert data["status"] == "success"
+        assert "results" in data["data"]
+        assert "filters" in data["data"]
 
     def test_get_search_filters(self, client, operator_token):
         """Test getting available search filters."""
@@ -358,7 +371,8 @@ class TestAdvancedSearch:
         )
         assert response.status_code == 200
         data = response.get_json()
-        assert "available_filters" in data
+        assert data["status"] == "success"
+        assert "available_filters" in data["data"]
 
 
 class TestRateLimiting:
@@ -378,9 +392,9 @@ class TestRateLimiting:
         )
         assert response1.status_code == 200
 
-        # Verify rate limit status
         data = response1.get_json()
-        assert "rate_limit" in data
+        assert data["status"] == "success"
+        assert "rate_limit" in data["data"]
 
     def test_bulk_escalate_rate_limit(self, client, admin_token):
         """Test rate limiting on bulk escalate."""
@@ -394,7 +408,8 @@ class TestRateLimiting:
         )
         assert response.status_code == 200
         data = response.get_json()
-        assert "rate_limit" in data
+        assert data["status"] == "success"
+        assert "rate_limit" in data["data"]
 
 
 if __name__ == "__main__":

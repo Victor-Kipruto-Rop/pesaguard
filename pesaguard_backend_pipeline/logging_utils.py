@@ -112,3 +112,42 @@ def correlation_context(correlation_id: Optional[str] = None) -> Generator[str, 
         yield cid
     finally:
         _correlation_id.reset(token)
+
+
+def init_observability() -> Dict[str, Any]:
+    """Initialise optional Sentry and OpenTelemetry integrations when configured."""
+    status: Dict[str, Any] = {"sentry": "disabled", "opentelemetry": "disabled"}
+
+    sentry_dsn = os.getenv("SENTRY_DSN")
+    if sentry_dsn:
+        try:
+            import sentry_sdk
+            sentry_sdk.init(
+                dsn=sentry_dsn,
+                environment=os.getenv("PESAGUARD_ENV", "development"),
+                traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.2")),
+                send_default_pii=False,
+            )
+            status["sentry"] = "enabled"
+        except Exception as exc:  # pragma: no cover - optional dependency
+            status["sentry"] = f"error:{exc}"
+
+    otel_enabled = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT") or os.getenv("OTEL_SERVICE_NAME")
+    if otel_enabled:
+        try:
+            from opentelemetry import trace
+            from opentelemetry.sdk.resources import Resource
+            from opentelemetry.sdk.trace import TracerProvider
+            from opentelemetry.sdk.trace.export import BatchSpanProcessor
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+
+            resource = Resource.create({"service.name": os.getenv("OTEL_SERVICE_NAME", "pesaguard-backend")})
+            provider = TracerProvider(resource=resource)
+            otlp_exporter = OTLPSpanExporter(endpoint=os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+            provider.add_span_processor(BatchSpanProcessor(otlp_exporter))
+            trace.set_tracer_provider(provider)
+            status["opentelemetry"] = "enabled"
+        except Exception as exc:  # pragma: no cover - optional dependency
+            status["opentelemetry"] = f"error:{exc}"
+
+    return status

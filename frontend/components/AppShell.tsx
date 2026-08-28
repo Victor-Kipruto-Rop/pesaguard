@@ -7,6 +7,7 @@ import OfflineBanner from './OfflineBanner';
 import PublicNav from './PublicNav';
 
 const PUBLIC_PREFIXES = [
+  '/public',
   '/landing',
   '/pricing',
   '/about',

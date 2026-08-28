@@ -20,3 +20,16 @@ def test_anomaly_scoring_highly_anomalous():
     assert score >= 0.8
     anomalies = check_for_anomalies(event, set())
     assert any("high_anomaly_score" in a for a in anomalies)
+
+
+def test_reversal_and_burst_signals_are_detected():
+    event = {
+        "TransID": "A3",
+        "TransAmount": "50000",
+        "TransTime": "20260715010000",
+        "TransactionType": "Reversal",
+        "recent_activity_count": 14,
+    }
+    anomalies = check_for_anomalies(event, set(), {"anomaly_burst_activity_threshold": 10})
+    assert any("suspicious_reversal_sequence" in a for a in anomalies)
+    assert any("rapid_burst_activity" in a for a in anomalies)

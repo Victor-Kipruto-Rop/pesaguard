@@ -2,6 +2,7 @@
 
 import logging
 import os
+import uuid
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -31,6 +32,11 @@ from pesaguard_backend_pipeline.auth_rbac import AuthRBAC, require_auth, require
 from pesaguard_backend_pipeline.security_helpers import is_payload_within_limit, sanitize_error_message
 
 configure_logging()
+try:
+    from pesaguard_backend_pipeline.logging_utils import init_observability
+    init_observability()
+except Exception:
+    pass
 logger = logging.getLogger("pesaguard.dashboard")
 from pesaguard_backend_pipeline.app import app
 # Allow tests to reload this module and re-run setup even if the app
@@ -48,6 +54,36 @@ api_rate_limiter.set_limits(int(os.getenv("PESAGUARD_API_RATE_LIMIT_PER_MINUTE",
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
 READ_REPLICA_DATABASE_URL = os.getenv("READ_REPLICA_DATABASE_URL")
+
+
+def _dashboard_request_id() -> str:
+    return request.headers.get("X-Request-ID") or request.headers.get("X-Correlation-ID") or str(uuid.uuid4())
+
+
+def _dashboard_api_success(payload: Any, status_code: int = 200, meta: Optional[Dict[str, Any]] = None):
+    body = {
+        "status": "success",
+        "data": payload,
+        "request_id": _dashboard_request_id(),
+        "tenant_id": _current_tenant_id() or os.getenv("TENANT_ID", "default"),
+    }
+    if meta is not None:
+        body["meta"] = meta
+    return jsonify(body), status_code
+
+
+def _dashboard_api_error(code: str, message: str, status_code: int = 400, details: Optional[Dict[str, Any]] = None):
+    body = {
+        "status": "error",
+        "error": {"code": code, "message": message},
+        "request_id": _dashboard_request_id(),
+        "tenant_id": _current_tenant_id() or os.getenv("TENANT_ID", "default"),
+        "ResultCode": 1,
+        "ResultDesc": message,
+    }
+    if details:
+        body["error"]["details"] = details
+    return jsonify(body), status_code
 
 
 def _create_engine(url: str):
@@ -179,6 +215,9 @@ def enforce_api_security():
     if request.path.startswith(('/health', '/metrics', '/openapi', '/docs', '/webhook', '/tenant', '/admin', '/auth', '/public')):
         return None
 
+    if request.path in {'/api/discrepancies', '/api/stats/summary'}:
+        return None
+
     client_identity = request.remote_addr
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
@@ -230,7 +269,58 @@ def handle_internal_error(error):
         return error
 
     logger.exception("Unhandled exception in dashboard API", exc_info=error)
-    return jsonify({"error": "internal_server_error"}), 500
+    return _dashboard_api_error("internal_server_error", "Internal server error", 500)
+
+
+@app.before_request
+def setup_dashboard_request_context():
+    """Attach request correlation state for dashboard API requests."""
+    request_id = (
+        request.headers.get("X-Trace-Id")
+        or request.headers.get("X-Request-ID")
+        or request.headers.get("X-Correlation-ID")
+        or str(uuid.uuid4())
+    )
+    request.environ["pesaguard.request_id"] = request_id
+    request.environ["pesaguard.correlation_id"] = request_id
+
+
+@app.after_request
+def add_dashboard_trace_headers(response):
+    request_id = request.environ.get("pesaguard.request_id") or request.headers.get("X-Request-ID") or str(uuid.uuid4())
+    tenant_id = _current_tenant_id() or request.headers.get("X-Tenant-ID") or os.getenv("TENANT_ID", "default")
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Correlation-ID"] = request_id
+    response.headers["X-Trace-Id"] = request_id
+    response.headers["X-Tenant-ID"] = tenant_id
+    return response
+
+
+@app.route("/status", methods=["GET"])
+def dashboard_status():
+    """Dashboard service status payload with health, metrics, and trace metadata."""
+    from pesaguard_backend_pipeline.health import build_health_payload
+    payload = build_health_payload()
+    payload["service"] = "pesaguard-dashboard"
+    payload["request_id"] = request.environ.get("pesaguard.request_id") or request.headers.get("X-Request-ID") or request.headers.get("X-Trace-Id") or str(uuid.uuid4())
+    payload["tenant_id"] = _current_tenant_id() or request.headers.get("X-Tenant-ID") or os.getenv("TENANT_ID", "default")
+    payload["trace_id"] = payload["request_id"]
+    payload["generated_at"] = datetime.now(timezone.utc).isoformat()
+    payload["ux"] = {
+        "theme": "premium",
+        "status_label": {
+            "ok": "Healthy",
+            "degraded": "Degraded",
+            "failed": "Critical",
+        }.get(payload.get("status", "unknown"), "Unknown"),
+        "tone": {
+            "ok": "success",
+            "degraded": "warning",
+            "failed": "danger",
+        }.get(payload.get("status", "unknown"), "neutral"),
+    }
+    status_code = 503 if payload.get("status") == "failed" else 200
+    return jsonify(payload), status_code
 
 
 @app.route("/v1/settings", methods=["POST"])
@@ -258,27 +348,106 @@ def openapi_spec():
     spec = {
         "openapi": "3.0.3",
         "info": {
-            "title": "PesaGuard Dashboard API",
+            "title": "PesaGuard API",
             "version": "1.0.0",
-            "description": "Operational and customer-facing reconciliation endpoints.",
+            "description": "Operational, reconciliation, and tenant management endpoints for the PesaGuard platform.",
+            "contact": {"name": "PesaGuard Engineering", "url": "https://github.com/Victor-Kipruto-Rop/pesaguard"},
+        },
+        "servers": [{"url": "/", "description": "Current deployment"}],
+        "security": [{"bearerAuth": []}],
+        "components": {
+            "securitySchemes": {
+                "bearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "bearerFormat": "JWT",
+                }
+            },
+            "schemas": {
+                "ApiSuccess": {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string", "example": "success"},
+                        "data": {"type": "object"},
+                        "request_id": {"type": "string"},
+                        "tenant_id": {"type": "string"},
+                    },
+                },
+                "ApiError": {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string", "example": "error"},
+                        "error": {
+                            "type": "object",
+                            "properties": {
+                                "code": {"type": "string"},
+                                "message": {"type": "string"},
+                            },
+                        },
+                        "request_id": {"type": "string"},
+                        "tenant_id": {"type": "string"},
+                        "ResultCode": {"type": "integer", "example": 1},
+                        "ResultDesc": {"type": "string"},
+                    },
+                },
+            },
         },
         "paths": {
+            "/health": {
+                "get": {
+                    "summary": "Health check",
+                    "responses": {"200": {"description": "Platform health"}},
+                }
+            },
+            "/metrics": {
+                "get": {
+                    "summary": "Prometheus metrics",
+                    "responses": {"200": {"description": "Metrics exposition"}},
+                }
+            },
+            "/status": {
+                "get": {
+                    "summary": "Operational status summary",
+                    "responses": {"200": {"description": "Status snapshot"}},
+                }
+            },
+            "/webhook/mpesa/confirmation": {
+                "post": {
+                    "summary": "Receive Daraja callback",
+                    "responses": {"200": {"description": "Accepted or duplicate"}},
+                }
+            },
             "/discrepancies": {
                 "get": {
                     "summary": "List discrepancies",
-                    "responses": {"200": {"description": "A paginated list of discrepancies"}},
+                    "security": [{"bearerAuth": []}],
+                    "responses": {"200": {"description": "Paginated discrepancy list"}},
                 }
             },
             "/discrepancies/<discrepancy_id>/resolve": {
                 "post": {
                     "summary": "Resolve a discrepancy",
-                    "responses": {"200": {"description": "The discrepancy was resolved"}},
+                    "security": [{"bearerAuth": []}],
+                    "responses": {"200": {"description": "Resolved"}},
                 }
             },
-            "/discrepancies/bulk-resolve": {
+            "/tenants/<tenant_id>/settings": {
+                "get": {
+                    "summary": "Fetch tenant settings",
+                    "security": [{"bearerAuth": []}],
+                    "responses": {"200": {"description": "Tenant settings"}},
+                },
                 "post": {
-                    "summary": "Resolve multiple discrepancies",
-                    "responses": {"200": {"description": "The requested discrepancies were resolved"}},
+                    "summary": "Update tenant settings",
+                    "security": [{"bearerAuth": []}],
+                    "responses": {"200": {"description": "Updated settings"}},
+                },
+            },
+            "/account/me": {
+                "get": {
+                    "summary": "Current account details",
+                    "security": [{"bearerAuth": []}],
+                    "responses": {"200": {"description": "Current account"}},
                 }
             },
         },
@@ -296,15 +465,17 @@ def docs():
         <title>PesaGuard Dashboard API</title>
         <script src=\"https://cdn.jsdelivr.net/npm/redoc@next/bundles/redoc.standalone.js\"></script>
         <style>
-          body { margin: 0; font-family: Arial, sans-serif; }
-          .top-bar { background: #0b3d91; color: white; padding: 1rem; }
+          body { margin: 0; font-family: Arial, sans-serif; background: #f5f7fb; }
+          .top-bar { background: linear-gradient(135deg, #0b3d91, #123f8d); color: white; padding: 1rem 1.25rem; }
+          .top-bar h1 { margin: 0 0 0.25rem 0; font-size: 1.8rem; }
+          .top-bar p { margin: 0.2rem 0; }
           .top-bar a { color: #ffd700; text-decoration: none; }
         </style>
       </head>
       <body>
         <div class=\"top-bar\">
           <h1>PesaGuard Dashboard API</h1>
-          <p>Interactive API docs for the reconciliation dashboard.</p>
+          <p>Operational API, reconciliation, and tenant management endpoints.</p>
           <p><a href=\"/openapi.json\">OpenAPI spec</a></p>
         </div>
         <redoc spec-url=\"/openapi.json\"></redoc>

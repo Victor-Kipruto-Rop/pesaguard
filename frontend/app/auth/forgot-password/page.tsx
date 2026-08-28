@@ -1,39 +1,34 @@
-'use client';
+import { ArrowRight, Mail } from 'lucide-react';
+import AuthPageShell from '../../../components/AuthPageShell';
 
-import { useState } from 'react';
-import PulseLine from '../../../components/PulseLine';
-import { useLocale } from '../../../lib/i18n';
-
-export default function ForgotPasswordPage() {
-  const { t } = useLocale();
-  const [email, setEmail] = useState('');
-  const [sent, setSent] = useState(false);
-
-  const submit = (event: React.FormEvent) => {
-    event.preventDefault();
-    setSent(true);
-  };
-
+export default function AuthForgotPasswordPage() {
   return (
-    <main className="authPage">
-      <div className="authCard">
-        <PulseLine height={32} />
-        <p className="eyebrow">{t('auth.forgotEyebrow')}</p>
-        <h1>{t('auth.forgotTitle')}</h1>
-        <p className="muted">{t('auth.forgotSummary')}</p>
-        {sent ? (
-          <p className="muted">{t('auth.forgotSent')}</p>
-        ) : (
-          <form className="formGrid" onSubmit={submit}>
-            <div className="formRow">
-              <label htmlFor="email">{t('loginPage.email')}</label>
-              <input id="email" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
-            </div>
-            <button className="primaryBtn" type="submit">{t('auth.sendReset')}</button>
-          </form>
-        )}
-        <a href="/auth/login" className="muted">{t('auth.backToLogin')}</a>
-      </div>
-    </main>
+    <AuthPageShell
+      eyebrow="Recovery"
+      title="Reset your password"
+      subtitle="We’ll send a secure reset link to the email on your profile so you can regain access quickly."
+      footer={
+        <p className="authPrompt">
+          Remembered your password? <a href="/auth/login">Back to sign in</a>
+        </p>
+      }
+    >
+      <form className="authForm">
+        <div className="authFormHeader">
+          <h3>Forgot password</h3>
+          <p>Enter the email address associated with your account.</p>
+        </div>
+
+        <div className="authInputGroup">
+          <label htmlFor="reset-email">Email address</label>
+          <input id="reset-email" className="authInput" type="email" placeholder="name@company.com" />
+        </div>
+
+        <button type="submit" className="authButton primary">
+          <Mail size={18} /> Send reset link
+          <ArrowRight size={18} />
+        </button>
+      </form>
+    </AuthPageShell>
   );
 }

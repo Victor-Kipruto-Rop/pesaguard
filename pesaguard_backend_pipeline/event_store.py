@@ -111,10 +111,9 @@ class EventStore:
         """Check if a webhook callback has already been processed (idempotency gate).
 
         This is an optimization only — the real guarantee is the unique constraint
-        enforced in mark_processed(). Conservative: returns True on DB errors, so a
-        transient read failure doesn't cause reprocessing (mark_processed's own
-        unique constraint would catch a true duplicate anyway; returning True here
-        just avoids the extra work and logs the situation for visibility).
+        enforced in mark_processed(). When the backing store is unavailable, this
+        method falls back to False so the processing path can continue and rely on
+        the unique constraint to reject true duplicates later.
 
         Args:
             trans_id: Daraja M-Pesa TransID
@@ -135,12 +134,12 @@ class EventStore:
                 return existing is not None
         except SQLAlchemyError:
             logger.exception(
-                "already_processed() check failed for trans_id=%s — assuming processed "
-                "(conservative fallback); mark_processed's unique constraint remains the "
+                "already_processed() check failed for trans_id=%s — proceeding without an "
+                "idempotency short-circuit; mark_processed's unique constraint remains the "
                 "real safety net.",
                 trans_id,
             )
-            return True
+            return False
 
     def get_processed(self, trans_id: str) -> Optional[dict]:
         """Return a dict representation of the ProcessedTransaction for `trans_id` or None."""

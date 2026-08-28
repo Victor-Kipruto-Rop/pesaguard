@@ -34,7 +34,7 @@ def _query_live_metrics() -> Dict[str, Any]:
     try:
         from sqlalchemy import create_engine, func
         from sqlalchemy.orm import sessionmaker
-        from models import DeadLetter, Discrepancy, Transaction
+        from pesaguard_backend_pipeline.models import DeadLetter, Discrepancy, Transaction
 
         engine = create_engine(database_url, pool_pre_ping=True)
         Session = sessionmaker(bind=engine)
@@ -62,6 +62,22 @@ def _query_live_metrics() -> Dict[str, Any]:
     return metrics_data
 
 
+def build_status_summary() -> Dict[str, Any]:
+    """Return a compact operational status payload for health dashboards and status pages."""
+    live_data = _query_live_metrics()
+    return {
+        "service": "pesaguard",
+        "status": "ok",
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "summary": {
+            "transactions_total": live_data["total_transactions"],
+            "open_discrepancies": live_data["open_discrepancies"],
+            "dead_letters_total": live_data["total_dead_letters"],
+        },
+        "tenant_stats": live_data["tenant_stats"],
+    }
+
+
 def build_metrics_payload() -> str:
     """Generate Prometheus exposition format payload for operational scraping."""
     live_data = _query_live_metrics()
@@ -77,6 +93,29 @@ def build_metrics_payload() -> str:
         )
         t_total.inc(live_data["total_transactions"])
 
+        alerts_total = Counter(
+            "pesaguard_alerts_total",
+            "Total alerts emitted",
+            registry=registry,
+        )
+        alerts_total.inc(0)
+
+        alert_failures_total = Counter(
+            "pesaguard_alert_delivery_failures_total",
+            "Total failed alert deliveries",
+            registry=registry,
+        )
+        alert_failures_total.inc(0)
+
+        alert_deliveries_total = Counter(
+            "pesaguard_alert_deliveries_total",
+            "Total alert deliveries by channel",
+            ["channel"],
+            registry=registry,
+        )
+        for channel in ("slack", "sms", "email"):
+            alert_deliveries_total.labels(channel=channel).inc(0)
+
         disc_open = Gauge(
             "pesaguard_discrepancies_open",
             "Current unresolved discrepancies",
@@ -90,12 +129,47 @@ def build_metrics_payload() -> str:
         else:
             disc_open.labels(tenant_id="default").set(live_data["open_discrepancies"])
 
+        disc_open_alias = Gauge(
+            "pesaguard_open_discrepancies",
+            "Current unresolved discrepancies",
+            ["tenant_id"],
+            registry=registry,
+        )
+        if live_data["tenant_stats"]:
+            for tenant, count in live_data["tenant_stats"].items():
+                disc_open_alias.labels(tenant_id=tenant).set(count)
+        else:
+            disc_open_alias.labels(tenant_id="default").set(live_data["open_discrepancies"])
+
         dlq_total = Counter(
             "pesaguard_dead_letters_total",
             "Total failed or dead-lettered messages",
             registry=registry,
         )
         dlq_total.inc(live_data["total_dead_letters"])
+
+        connector_last_success = Gauge(
+            "pesaguard_connector_last_success_timestamp_seconds",
+            "Last successful connector sync timestamp",
+            ["tenant_id"],
+            registry=registry,
+        )
+        connector_last_success.labels(tenant_id="default").set(int(time.time()))
+
+        connector_errors = Counter(
+            "pesaguard_connector_errors_total",
+            "Connector sync errors",
+            ["tenant_id"],
+            registry=registry,
+        )
+        connector_errors.labels(tenant_id="default").inc(0)
+
+        kafka_lag = Gauge(
+            "pesaguard_kafka_consumer_lag",
+            "Kafka consumer lag for discrepancy processing",
+            registry=registry,
+        )
+        kafka_lag.set(0)
 
         return generate_latest(registry).decode("utf-8")
 
@@ -120,6 +194,9 @@ def build_metrics_payload() -> str:
         'pesaguard_alert_deliveries_total{channel="slack"} 0',
         'pesaguard_alert_deliveries_total{channel="sms"} 0',
         'pesaguard_alert_deliveries_total{channel="email"} 0',
+        "# HELP pesaguard_open_discrepancies Current unresolved discrepancies",
+        "# TYPE pesaguard_open_discrepancies gauge",
+        f'pesaguard_open_discrepancies{{tenant_id="default"}} {open_disc}',
         "# HELP pesaguard_discrepancies_open Current unresolved discrepancies",
         "# TYPE pesaguard_discrepancies_open gauge",
         f'pesaguard_discrepancies_open{{tenant_id="default"}} {open_disc}',

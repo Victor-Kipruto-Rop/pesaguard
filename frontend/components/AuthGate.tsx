@@ -1,9 +1,11 @@
 'use client';
 
 import { usePathname, useRouter } from 'next/navigation';
+import type { Route } from 'next';
 import { useEffect, useState } from 'react';
 
 const PUBLIC_PREFIXES = [
+  '/public',
   '/landing',
   '/pricing',
   '/about',
@@ -36,12 +38,12 @@ export default function AuthGate({ children }: { children: React.ReactNode }) {
     const authenticated = typeof window !== 'undefined' && window.localStorage.getItem('pesaguard.auth') === 'true';
 
     if (!authenticated && !publicRoute && !authRoute) {
-      router.replace('/auth/login');
+      router.replace('/auth/login' as Route);
       return;
     }
 
     if (authenticated && authRoute) {
-      router.replace('/');
+      router.replace('/' as Route);
       return;
     }
 

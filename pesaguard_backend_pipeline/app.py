@@ -5,6 +5,10 @@ validates payload, and pushes to Kafka for downstream reconciliation.
 """
 import logging
 import os
+import hashlib
+import secrets
+import uuid
+from datetime import datetime, timezone
 
 from flask import Flask, jsonify, request, Response
 from werkzeug.exceptions import HTTPException
@@ -25,11 +29,18 @@ from pesaguard_backend_pipeline.background_tasks import enqueue_transaction_even
 from pesaguard_backend_pipeline.producer import publish_transaction_event
 from pesaguard_backend_pipeline.tenant_settings import TenantSettingsStore
 from pesaguard_backend_pipeline.metrics import build_metrics_payload
+from pesaguard_backend_pipeline.auth_rbac import get_current_user, require_auth
 from flask import abort
 import time
 from flask import Response
 
 configure_logging()
+init_observability = None
+try:
+    from pesaguard_backend_pipeline.logging_utils import configure_logging, set_correlation_id, get_correlation_id, init_observability
+    init_observability()
+except Exception:
+    pass
 logger = logging.getLogger("pesaguard.webhook")
 
 app = Flask(__name__)
@@ -54,8 +65,172 @@ webhook_rate_limiter.set_limits(int(os.getenv("PESAGUARD_WEBHOOK_RATE_LIMIT_PER_
 
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC_TRANSACTIONS", "mpesa.transactions.raw")
 
+
+def _request_id_value() -> str:
+    return (
+        request.headers.get("X-Request-ID")
+        or request.headers.get("X-Correlation-ID")
+        or str(uuid.uuid4())
+    )
+
+
+def _standard_response(payload: dict, status: int = 200, meta: dict | None = None):
+    body = {
+        "status": "success" if 200 <= status < 400 else "error",
+        "data": payload,
+        "request_id": _request_id_value(),
+        "tenant_id": os.getenv("TENANT_ID", "default"),
+    }
+    if meta:
+        body["meta"] = meta
+    return jsonify(body), status
+
+
+def _standard_error(code: str, message: str, status_code: int = 400, details: dict | None = None):
+    body = {
+        "status": "error",
+        "error": {"code": code, "message": message},
+        "request_id": _request_id_value(),
+        "tenant_id": os.getenv("TENANT_ID", "default"),
+        "ResultCode": 1,
+        "ResultDesc": message,
+    }
+    if details:
+        body["error"]["details"] = details
+    return jsonify(body), status_code
+
 # Simple admin-auth for pilot Admin API endpoints
 tenant_store = TenantSettingsStore()
+
+
+def _account_context():
+    """Return the authenticated principal and tenant-scoped account record."""
+    user = get_current_user()
+    # The fallback only exists when API authentication is deliberately disabled
+    # for local development and tests. Production always requires a JWT.
+    if user is None:
+        user_id = request.headers.get("X-PesaGuard-User-ID", "local-user")
+        username = request.headers.get("X-PesaGuard-Username", user_id)
+        tenant_id = os.getenv("TENANT_ID", "default")
+    else:
+        user_id, username, tenant_id = user.user_id, user.username, user.tenant_id
+
+    settings = tenant_store.get(tenant_id)
+    accounts = dict(settings.get("accounts") or {})
+    account = dict(accounts.get(str(user_id)) or {})
+    account.setdefault("display_name", username)
+    account.setdefault("email", username if "@" in username else "")
+    account.setdefault("job_title", "")
+    account.setdefault("phone", "")
+    account.setdefault("avatar_url", "")
+    account.setdefault("timezone", "Africa/Nairobi")
+    account.setdefault("language", tenant_store.resolve_locale(tenant_id, str(user_id)))
+    account.setdefault("appearance", "system")
+    account.setdefault("privacy", {"mask_sensitive_data": True, "share_profile": False, "security_alerts": True})
+    account.setdefault("notifications", {"email_alerts": True, "product_updates": False, "weekly_digest": True})
+    account.setdefault("api_tokens", [])
+    return tenant_id, str(user_id), username, accounts, account
+
+
+def _public_account(account, user_id, username):
+    """Return account data without token secrets or internal hashes."""
+    tokens = [
+        {key: value for key, value in token.items() if key not in {"secret_hash"}}
+        for token in account.get("api_tokens", [])
+    ]
+    return {
+        "user_id": user_id,
+        "username": username,
+        **{key: value for key, value in account.items() if key != "api_tokens"},
+        "api_tokens": tokens,
+    }
+
+
+def _save_account(tenant_id, user_id, accounts, account):
+    accounts[str(user_id)] = account
+    tenant_store.update(tenant_id, {"accounts": accounts})
+
+
+@app.route("/account/me", methods=["GET"])
+@require_auth()
+def get_account_me():
+    tenant_id, user_id, username, _accounts, account = _account_context()
+    return jsonify({"tenant_id": tenant_id, "account": _public_account(account, user_id, username)}), 200
+
+
+@app.route("/account/me", methods=["PATCH"])
+@require_auth()
+def update_account_me():
+    payload = request.get_json(silent=True) or {}
+    tenant_id, user_id, username, accounts, account = _account_context()
+    allowed_text = {"display_name", "job_title", "phone", "avatar_url", "timezone", "appearance", "language"}
+    for key in allowed_text:
+        if key in payload:
+            value = payload[key]
+            if not isinstance(value, str) or len(value.strip()) > 160:
+                return jsonify({"error": f"invalid_{key}"}), 400
+            account[key] = value.strip()
+    for key in {"privacy", "notifications"}:
+        if key in payload:
+            value = payload[key]
+            if not isinstance(value, dict) or not all(isinstance(item, bool) for item in value.values()):
+                return jsonify({"error": f"invalid_{key}"}), 400
+            account[key] = {**account.get(key, {}), **value}
+    _save_account(tenant_id, user_id, accounts, account)
+    return jsonify({"account": _public_account(account, user_id, username)}), 200
+
+
+@app.route("/account/me/api-tokens", methods=["POST"])
+@require_auth()
+def create_account_api_token():
+    payload = request.get_json(silent=True) or {}
+    label = str(payload.get("label", "")).strip()
+    scopes = payload.get("scopes", ["read:discrepancies"])
+    if not label or len(label) > 80 or not isinstance(scopes, list) or not all(isinstance(scope, str) for scope in scopes):
+        return jsonify({"error": "invalid_token_request"}), 400
+    tenant_id, user_id, username, accounts, account = _account_context()
+    secret = f"pg_{secrets.token_urlsafe(30)}"
+    token = {
+        "id": secrets.token_hex(8), "label": label, "scopes": scopes[:12],
+        "prefix": secret[:11], "created_at": datetime.now(timezone.utc).isoformat(),
+        "last_used_at": None, "secret_hash": hashlib.sha256(secret.encode("utf-8")).hexdigest(),
+    }
+    account["api_tokens"] = [*account.get("api_tokens", []), token]
+    _save_account(tenant_id, user_id, accounts, account)
+    return jsonify({"token": {key: value for key, value in token.items() if key != "secret_hash"}, "secret": secret}), 201
+
+
+@app.route("/account/me/api-tokens/<token_id>", methods=["DELETE"])
+@require_auth()
+def revoke_account_api_token(token_id: str):
+    tenant_id, user_id, username, accounts, account = _account_context()
+    tokens = account.get("api_tokens", [])
+    remaining = [token for token in tokens if token.get("id") != token_id]
+    if len(remaining) == len(tokens):
+        return jsonify({"error": "token_not_found"}), 404
+    account["api_tokens"] = remaining
+    _save_account(tenant_id, user_id, accounts, account)
+    return jsonify({"account": _public_account(account, user_id, username)}), 200
+
+
+@app.route("/account/me/credential-requests", methods=["POST"])
+@require_auth()
+def create_credential_request():
+    """Record a verified email/password change request for the identity provider."""
+    payload = request.get_json(silent=True) or {}
+    request_type = payload.get("type")
+    if request_type not in {"email_change", "password_change", "account_deletion"}:
+        return jsonify({"error": "invalid_request_type"}), 400
+    if request_type == "email_change":
+        email = str(payload.get("email", "")).strip().lower()
+        if "@" not in email or len(email) > 160:
+            return jsonify({"error": "invalid_email"}), 400
+    tenant_id, user_id, username, accounts, account = _account_context()
+    requests = list(account.get("credential_requests", []))
+    requests.append({"type": request_type, "created_at": datetime.now(timezone.utc).isoformat(), "status": "pending"})
+    account["credential_requests"] = requests[-20:]
+    _save_account(tenant_id, user_id, accounts, account)
+    return jsonify({"status": "pending", "message": "Your identity change request has been recorded for verification."}), 202
 
 
 def _require_admin():
@@ -170,12 +345,12 @@ def public_set_user_locale():
 
 @app.errorhandler(413)
 def handle_request_too_large(_error):
-    return jsonify({"ResultCode": 1, "ResultDesc": "Request body too large"}), 413
+    return _standard_error("request_too_large", "Request body too large", 413)
 
 
 @app.errorhandler(400)
 def handle_bad_request(_error):
-    return jsonify({"ResultCode": 1, "ResultDesc": "Invalid request"}), 400
+    return _standard_error("invalid_request", "Invalid request", 400)
 
 
 @app.errorhandler(Exception)
@@ -184,22 +359,61 @@ def handle_internal_error(error):
         return error
 
     logger.exception("Unhandled exception in webhook receiver", exc_info=error)
-    return jsonify({"ResultCode": 1, "ResultDesc": "Internal server error"}), 500
+    return _standard_error("internal_server_error", "Internal server error", 500)
 
 
 @app.before_request
 def setup_request_context():
     """Set up per-request context including correlation ID for tracing."""
-    correlation_id = request.headers.get("X-Correlation-ID") or get_correlation_id()
+    correlation_id = (
+        request.headers.get("X-Trace-Id")
+        or request.headers.get("X-Correlation-ID")
+        or request.headers.get("X-Request-ID")
+        or get_correlation_id()
+    )
+    request.environ["pesaguard.request_id"] = correlation_id
+    request.environ["pesaguard.correlation_id"] = correlation_id
     set_correlation_id(correlation_id)
 
 
 @app.after_request
 def add_correlation_id_header(response):
-    """Add correlation ID to response headers for client tracing."""
-    correlation_id = get_correlation_id()
+    """Add correlation and trace headers to response headers for client tracing."""
+    correlation_id = request.environ.get("pesaguard.correlation_id") or get_correlation_id() or _request_id_value()
+    request_id = request.environ.get("pesaguard.request_id") or request.headers.get("X-Request-ID") or correlation_id
+    tenant_id = request.headers.get("X-Tenant-ID") or os.getenv("TENANT_ID", "default")
     response.headers["X-Correlation-ID"] = correlation_id
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Trace-Id"] = request_id
+    response.headers["X-Tenant-ID"] = tenant_id
     return response
+
+
+@app.route("/status", methods=["GET"])
+def status_summary():
+    """Public deployment status summary with health and trace metadata."""
+    request_id = request.headers.get("X-Request-ID") or request.headers.get("X-Correlation-ID") or request.headers.get("X-Trace-Id") or get_correlation_id()
+    payload = build_health_payload()
+    payload["service"] = "pesaguard"
+    payload["request_id"] = request_id
+    payload["tenant_id"] = request.headers.get("X-Tenant-ID") or os.getenv("TENANT_ID", "default")
+    payload["trace_id"] = request_id
+    payload["generated_at"] = datetime.now(timezone.utc).isoformat()
+    payload["ux"] = {
+        "theme": "premium",
+        "status_label": {
+            "ok": "Healthy",
+            "degraded": "Degraded",
+            "failed": "Critical",
+        }.get(payload.get("status", "unknown"), "Unknown"),
+        "tone": {
+            "ok": "success",
+            "degraded": "warning",
+            "failed": "danger",
+        }.get(payload.get("status", "unknown"), "neutral"),
+    }
+    status_code = 503 if payload.get("status") == "failed" else 200
+    return jsonify(payload), status_code
 
 
 @app.before_request
@@ -210,17 +424,19 @@ def enforce_webhook_security():
     if not is_payload_within_limit(request):
         return jsonify({"ResultCode": 1, "ResultDesc": "Request body too large"}), 413
 
-    if request.path.startswith("/webhook"):
-        if not is_allowed_source(get_client_ip(request), request):
-            logger.warning("Webhook request rejected: forbidden source IP", extra={"source_ip": get_client_ip(request)})
+    if request.path == "/webhook" or request.path.startswith("/webhook/"):
+        source_ip = get_client_ip(request)
+
+        if not is_allowed_source(source_ip, request):
+            logger.warning("Webhook request rejected: forbidden source IP", extra={"source_ip": source_ip})
             return jsonify({"ResultCode": 1, "ResultDesc": "Forbidden source"}), 403
 
         allowed, status = webhook_rate_limiter.is_allowed(
-            get_client_ip(request),
+            source_ip,
             request.path,
         )
         if not allowed:
-            logger.warning("Webhook request rejected: rate limit exceeded", extra={"source_ip": get_client_ip(request)})
+            logger.warning("Webhook request rejected: rate limit exceeded", extra={"source_ip": source_ip})
             response = jsonify({"ResultCode": 1, "ResultDesc": "Rate limit exceeded"})
             response.status_code = 429
             response.headers["Retry-After"] = str(status.get("retry_after", 60))
@@ -231,7 +447,7 @@ def enforce_webhook_security():
             try:
                 _verify_daraja_signature(request.data, daraja_signature)
             except Exception as e:
-                logger.warning("Webhook signature verification failed", extra={"error": str(e)})
+                logger.warning("Webhook signature verification failed", extra={"error": str(e), "source_ip": source_ip})
                 return jsonify({"ResultCode": 1, "ResultDesc": "Invalid signature"}), 403
 
 
@@ -316,17 +532,32 @@ def mpesa_confirmation():
 
     trans_id = payload.get("TransID")
     tenant_id = os.getenv("TENANT_ID", "default")
+    source_ip = get_client_ip(request)
+    signature_verified = False
+    daraja_signature = request.headers.get("X-Daraja-Signature")
+    if daraja_signature:
+        try:
+            _verify_daraja_signature(request.data, daraja_signature)
+            signature_verified = True
+        except Exception:
+            # This should not happen because enforce_webhook_security already verified
+            signature_verified = False
 
     # Fast-path optimization only — NOT the authoritative gate. Two near-simultaneous
     # callbacks can both pass this check before either has written anything; the real
     # guarantee is the unique constraint enforced inside mark_processed() below.
     if event_store.already_processed(str(trans_id)):
-        logger.info("Duplicate transaction (pre-check)", extra={"tenant_id": tenant_id, "trans_id": trans_id})
+        logger.info("Duplicate transaction (pre-check)", extra={"tenant_id": tenant_id, "trans_id": trans_id, "source_ip": source_ip})
         return jsonify({"ResultCode": 0, "ResultDesc": "Accepted (duplicate ignored)"}), 200
 
     # Authoritative idempotency write. Branch on the ACTUAL result — never assume
     # success and never treat an error the same as a duplicate.
-    result = event_store.mark_processed(payload, tenant_id=tenant_id)
+    result = event_store.mark_processed(
+        payload,
+        tenant_id=tenant_id,
+        source_ip=source_ip,
+        signature_verified=signature_verified,
+    )
 
     if result == ProcessResult.DUPLICATE:
         # A concurrent callback won the race between the pre-check above and this

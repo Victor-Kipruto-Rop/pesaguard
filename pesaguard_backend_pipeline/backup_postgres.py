@@ -21,11 +21,23 @@ import argparse
 import gzip
 import logging
 import os
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+
+
+def _first_writable_dir(candidates: list[Path]) -> Path:
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            if os.access(candidate, os.W_OK):
+                return candidate
+        except OSError:
+            continue
+    return Path.cwd() / "backups"
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -33,10 +45,34 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pesaguard.backup")
 
-# Configuration from environment
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
+# Default runtime configuration values
+DEFAULT_DATABASE_URL = "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard"
 BACKUP_DIR = Path(os.getenv("PESAGUARD_BACKUP_DIR", "/var/backups/pesaguard"))
-RETENTION_DAYS = int(os.getenv("PESAGUARD_BACKUP_RETENTION_DAYS", "30"))
+DEFAULT_RETENTION_DAYS = 30
+
+
+def get_database_url() -> str:
+    return os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
+
+
+def get_backup_dir() -> Path:
+    env_override = os.getenv("PESAGUARD_BACKUP_DIR")
+    if env_override:
+        return Path(env_override)
+
+    candidates = [
+        BACKUP_DIR,
+        Path("/tmp/pesaguard/backups"),
+        Path.cwd() / "backups",
+    ]
+    return _first_writable_dir(candidates)
+
+
+def get_retention_days() -> int:
+    try:
+        return int(os.getenv("PESAGUARD_BACKUP_RETENTION_DAYS", str(DEFAULT_RETENTION_DAYS)))
+    except ValueError:
+        return DEFAULT_RETENTION_DAYS
 
 
 def parse_db_url(url: str) -> dict[str, str]:
@@ -54,26 +90,35 @@ def parse_db_url(url: str) -> dict[str, str]:
     }
 
 
+def _find_executable(name: str) -> str:
+    path = shutil.which(name)
+    if not path:
+        raise RuntimeError(f"Required executable '{name}' not found in PATH")
+    return path
+
+
 def create_backup() -> Path:
     """Create a timestamped compressed backup of the Postgres database."""
     try:
-        db_params = parse_db_url(DATABASE_URL)
+        db_params = parse_db_url(get_database_url())
     except Exception as e:
         logger.error("Failed to parse DATABASE_URL: %s", e)
         sys.exit(1)
 
-    # Ensure target backup directory exists with secure permissions
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    backup_dir = get_backup_dir()
+    backup_dir.mkdir(parents=True, exist_ok=True)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    backup_file = BACKUP_DIR / f"pesaguard_{timestamp}.sql.gz"
+    backup_file = backup_dir / f"pesaguard_{timestamp}.sql.gz"
 
     env = os.environ.copy()
     if db_params["password"]:
         env["PGPASSWORD"] = db_params["password"]
 
+    pg_dump_cmd = _find_executable("pg_dump")
+
     dump_cmd = [
-        "pg_dump",
+        pg_dump_cmd,
         "-h", db_params["host"],
         "-p", db_params["port"],
         "-U", db_params["user"],
@@ -134,7 +179,7 @@ def restore_backup(backup_file: Path) -> None:
         sys.exit(1)
 
     try:
-        db_params = parse_db_url(DATABASE_URL)
+        db_params = parse_db_url(get_database_url())
     except Exception as e:
         logger.error("Failed to parse DATABASE_URL: %s", e)
         sys.exit(1)
@@ -143,8 +188,9 @@ def restore_backup(backup_file: Path) -> None:
     if db_params["password"]:
         env["PGPASSWORD"] = db_params["password"]
 
+    psql_cmd = _find_executable("psql")
     restore_cmd = [
-        "psql",
+        psql_cmd,
         "-h", db_params["host"],
         "-p", db_params["port"],
         "-U", db_params["user"],
@@ -190,9 +236,11 @@ def restore_backup(backup_file: Path) -> None:
 
 def _cleanup_old_backups() -> None:
     """Remove backup files older than the configured retention period."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)
+    retention_days = get_retention_days()
+    cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+    backup_dir = get_backup_dir()
 
-    for backup_file in sorted(BACKUP_DIR.glob("pesaguard_*.sql.gz")):
+    for backup_file in sorted(backup_dir.glob("pesaguard_*.sql.gz")):
         try:
             timestamp_str = backup_file.stem.replace("pesaguard_", "").replace(".sql", "")
             file_time = datetime.strptime(timestamp_str, "%Y%m%d_%H%M%S").replace(tzinfo=timezone.utc)
@@ -258,9 +306,10 @@ def main():
         restore_backup(Path(args.restore))
 
     elif args.test:
-        backups = sorted(BACKUP_DIR.glob("pesaguard_*.sql.gz"))
+        backup_dir = get_backup_dir()
+        backups = sorted(backup_dir.glob("pesaguard_*.sql.gz"))
         if not backups:
-            logger.warning("No backup files found in %s to test.", BACKUP_DIR)
+            logger.warning("No backup files found in %s to test.", backup_dir)
             sys.exit(1)
 
         latest_backup = backups[-1]
@@ -270,11 +319,12 @@ def main():
             sys.exit(1)
 
     elif args.list:
-        backups = sorted(BACKUP_DIR.glob("pesaguard_*.sql.gz"), reverse=True)
+        backup_dir = get_backup_dir()
+        backups = sorted(backup_dir.glob("pesaguard_*.sql.gz"), reverse=True)
         if not backups:
-            logger.info("No backups found in %s", BACKUP_DIR)
+            logger.info("No backups found in %s", backup_dir)
         else:
-            logger.info("Available backups in %s:", BACKUP_DIR)
+            logger.info("Available backups in %s:", backup_dir)
             for backup in backups[:10]:
                 size_mb = backup.stat().st_size / (1024 * 1024)
                 mtime = datetime.fromtimestamp(backup.stat().st_mtime, tz=timezone.utc)

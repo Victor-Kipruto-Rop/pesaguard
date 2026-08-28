@@ -29,6 +29,32 @@ from pesaguard_backend_pipeline.localization_utils import format_ke_currency, fo
 
 logger = logging.getLogger("pesaguard.alerting")
 
+
+def route_alert(discrepancy: Dict[str, Any], preferred_channels: Optional[list[str]] = None) -> Dict[str, Any]:
+    """Resolve which alert channels should be used based on severity and configuration."""
+    severity = str(discrepancy.get("severity", "warning")).lower()
+    channels = preferred_channels or ["slack", "email", "sms"]
+
+    if severity in {"critical", "urgent"}:
+        channels = ["slack", "sms", "email"]
+    elif severity == "warning":
+        channels = ["slack", "email"]
+    elif severity == "info":
+        channels = ["email"]
+
+    routing_policy = "critical_first" if severity in {"critical", "urgent"} else "standard"
+    return {
+        "trans_id": discrepancy.get("trans_id", discrepancy.get("TransID", "unknown")),
+        "tenant_id": discrepancy.get("tenant_id", "default"),
+        "severity": severity,
+        "channels": channels,
+        "routing_policy": routing_policy,
+        "status": "ready",
+        "recipient_count": len(channels),
+        "priority": "p1" if severity in {"critical", "urgent"} else "p2" if severity == "warning" else "p3",
+    }
+
+
 # Environment configurations
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
 SMS_RECIPIENT = os.getenv("SMS_ALERT_RECIPIENT", "")
@@ -45,6 +71,23 @@ EMAIL_RETRIES = int(os.getenv("ALERT_EMAIL_RETRIES", "3"))
 RETRY_BACKOFF_SECONDS = float(os.getenv("ALERT_RETRY_BACKOFF_SECONDS", "1.0"))
 
 sms_client = AfricasTalkingClient() if HAS_AFRICAS_TALKING else None
+
+
+def send_routed_alert(discrepancy: Dict[str, Any], locale: str = "en", channels: Optional[list[str]] = None) -> Dict[str, Any]:
+    """Deliver a discrepancy alert through the configured route for its severity."""
+    route = route_alert(discrepancy, preferred_channels=channels)
+    results: Dict[str, Any] = {"trans_id": route["trans_id"], "tenant_id": route["tenant_id"], "channels": {}}
+
+    for channel in route["channels"]:
+        if channel == "slack":
+            results["channels"][channel] = send_slack_alert(discrepancy, locale=locale, max_retries=SLACK_RETRIES)
+        elif channel == "sms":
+            results["channels"][channel] = send_sms_alert(discrepancy, locale=locale, max_retries=SMS_RETRIES)
+        elif channel == "email":
+            results["channels"][channel] = send_email_alert(discrepancy, locale=locale, max_retries=EMAIL_RETRIES)
+
+    results["status"] = "delivered" if any(results["channels"].values()) else "failed"
+    return results
 
 
 def send_slack_alert(discrepancy: Dict[str, Any], locale: str = "en", max_retries: int = SLACK_RETRIES) -> bool:
@@ -126,7 +169,9 @@ def send_sms_alert(discrepancy: Dict[str, Any], locale: str = "en", max_retries:
 
     for attempt in range(max_retries + 1):
         try:
-            sms_client.send_sms(recipient, message)
+            result = sms_client.send_sms(recipient, message)
+            if isinstance(result, dict) and result.get("status") == "failed":
+                raise RuntimeError(result.get("reason") or "sms_delivery_failed")
             logger.info("SMS alert sent successfully trans_id=%s recipient=%s", trans_id, recipient)
             return True
         except Exception as e:

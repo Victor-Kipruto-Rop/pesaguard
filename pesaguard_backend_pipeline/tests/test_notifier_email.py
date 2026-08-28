@@ -56,14 +56,28 @@ def test_send_sms_alert_uses_swahili_template(monkeypatch):
         def send_sms(self, recipient, message):
             captured['recipient'] = recipient
             captured['message'] = message
+            return {'status': 'sent'}
 
     monkeypatch.setattr(notifier, 'sms_client', FakeSMSClient())
 
     discrepancy = {'trans_id': 'T123', 'severity': 'critical', 'status': 'needs_review', 'anomalies': ['mismatch']}
-    notifier.send_sms_alert(discrepancy, locale='sw')
+    assert notifier.send_sms_alert(discrepancy, locale='sw') is True
 
     assert captured['recipient'] == '254700000000'
     assert 'PesaGuard: kuna tofauti' in captured['message'] or 'PesaGuard imegundua tofauti' in captured['message']
+
+
+def test_send_sms_alert_returns_false_when_client_reports_failure(monkeypatch):
+    monkeypatch.setenv('SMS_ALERT_RECIPIENT', '254700000000')
+
+    class FakeSMSClient:
+        def send_sms(self, recipient, message):
+            return {'status': 'failed', 'reason': 'rate_limited'}
+
+    monkeypatch.setattr(notifier, 'sms_client', FakeSMSClient())
+
+    discrepancy = {'trans_id': 'T123', 'severity': 'critical'}
+    assert notifier.send_sms_alert(discrepancy, locale='en') is False
 
 
 def test_format_alert_text_uses_swahili_template_and_kenyan_formatting():

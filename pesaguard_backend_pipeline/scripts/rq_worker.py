@@ -8,7 +8,7 @@ Run locally:
 """
 import os
 import redis
-from rq import Worker, Queue, Connection
+from rq import Worker, Queue
 
 RQ_QUEUE_NAME = os.getenv("RQ_QUEUE_NAME", "transaction_events")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -16,10 +16,9 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 def main():
     redis_conn = redis.from_url(REDIS_URL)
-    with Connection(redis_conn):
-        q = Queue(name=RQ_QUEUE_NAME, connection=redis_conn)
-        worker = Worker([q], connection=redis_conn)
-        worker.work()
+    q = Queue(name=RQ_QUEUE_NAME, connection=redis_conn)
+    worker = Worker([q], connection=redis_conn)
+    worker.work()
 
 
 if __name__ == "__main__":

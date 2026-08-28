@@ -61,3 +61,14 @@ def test_duplicate_transaction_is_flagged_without_double_alerting():
 
     assert "duplicate_transaction_id" in result["anomalies"]
     assert result["duplicate"] is True
+
+
+def test_matching_returns_confidence_and_risk_metrics():
+    event = make_event(trans_id="T-500", amount="100", phone="254700000004", trans_time="20240601120000")
+    internal_record = make_internal_record(internal_ref="ORD-5", phone="254700000004", timestamp="2024-06-01T12:00:00Z")
+
+    result = evaluate_transaction(event, [internal_record], seen_trans_ids=set())
+
+    assert result["risk_score"] >= 0.0
+    assert result["match"]["confidence"] >= 0.0
+    assert result["match"]["match_type"] == "exact"

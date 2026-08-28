@@ -50,7 +50,7 @@ class TenantSettingsStore:
 
     def update(self, tenant_id: str, updates: Dict[str, Any]) -> Dict[str, Any]:
         with self._lock:
-            tenant_cfg = dict(self._settings.get(tenant_id) or self.get(tenant_id))
+            tenant_cfg = dict(self._settings.get(tenant_id) or {})
             tenant_cfg.update(updates or {})
             if "preferred_locale" in tenant_cfg:
                 tenant_cfg["preferred_locale"] = normalise_locale(tenant_cfg.get("preferred_locale"))

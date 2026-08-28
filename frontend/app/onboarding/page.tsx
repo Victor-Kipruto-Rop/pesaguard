@@ -1,70 +1,25 @@
-'use client';
+"use client";
 
-import { useState } from 'react';
+import Link from 'next/link';
 import PageHeader from '../../components/PageHeader';
-import { useLocale } from '../../lib/i18n';
-
-const STEPS = ['credentials', 'rules', 'notifications', 'sync'] as const;
 
 export default function OnboardingPage() {
-  const { t } = useLocale();
-  const [step, setStep] = useState(0);
-  const [done, setDone] = useState<boolean[]>([false, false, false, false]);
-
-  const completeStep = () => {
-    setDone((current) => {
-      const next = [...current];
-      next[step] = true;
-      return next;
-    });
-    setStep((current) => Math.min(current + 1, STEPS.length - 1));
-  };
-
   return (
     <main className="shell">
-      <PageHeader eyebrow={t('onboardingPage.eyebrow')} title={t('onboardingPage.title')} summary={t('onboardingPage.summary')} />
-
-      <div className="wizardSteps">
-        {STEPS.map((key, index) => (
-          <span key={key} className={`wizardStep ${index === step ? 'active' : ''} ${done[index] ? 'done' : ''}`}>
-            {index + 1}. {t(`onboardingPage.steps.${key}`)}
-          </span>
-        ))}
-      </div>
+      <PageHeader
+        eyebrow="Onboarding"
+        title="Onboarding flow"
+        summary="Complete setup tasks for organization creation, verification, and configuration."
+      />
 
       <section className="card">
-        {step === 0 && (
-          <>
-            <div className="sectionTitle">{t('onboardingPage.credentialsTitle')}</div>
-            <p className="muted">{t('onboardingPage.credentialsBody')}</p>
-            <div className="formGrid" style={{ maxWidth: 480, marginTop: 16 }}>
-              <div className="formRow"><label>Consumer Key</label><input placeholder="Daraja consumer key" /></div>
-              <div className="formRow"><label>Consumer Secret</label><input type="password" placeholder="Daraja consumer secret" /></div>
-            </div>
-          </>
-        )}
-        {step === 1 && (
-          <>
-            <div className="sectionTitle">{t('onboardingPage.rulesTitle')}</div>
-            <p className="muted">{t('onboardingPage.rulesBody')}</p>
-          </>
-        )}
-        {step === 2 && (
-          <>
-            <div className="sectionTitle">{t('onboardingPage.notificationsTitle')}</div>
-            <p className="muted">{t('onboardingPage.notificationsBody')}</p>
-            <a className="secondaryBtn" href="/notifications">{t('onboardingPage.openNotifications')}</a>
-          </>
-        )}
-        {step === 3 && (
-          <>
-            <div className="sectionTitle">{t('onboardingPage.syncTitle')}</div>
-            <p className="muted">{t('onboardingPage.syncBody')}</p>
-          </>
-        )}
-        <div className="heroActions" style={{ marginTop: 20 }}>
-          <button disabled={step === 0} onClick={() => setStep((s) => Math.max(0, s - 1))}>{t('onboardingPage.back')}</button>
-          <button onClick={completeStep}>{step === STEPS.length - 1 ? t('onboardingPage.finish') : t('onboardingPage.continue')}</button>
+        <div style={{ display: 'grid', gap: 12 }}>
+          <Link href="/onboarding/welcome" className="secondaryBtn">Welcome</Link>
+          <Link href="/onboarding/create-organization" className="secondaryBtn">Create organization</Link>
+          <Link href="/onboarding/verify-organization" className="secondaryBtn">Verify organization</Link>
+          <Link href="/onboarding/upload-documents" className="secondaryBtn">Upload documents</Link>
+          <Link href="/onboarding/configure-reconciliation" className="secondaryBtn">Configure reconciliation</Link>
+          <Link href="/onboarding/complete-setup" className="secondaryBtn">Complete setup</Link>
         </div>
       </section>
     </main>
