@@ -60,20 +60,35 @@ def route_escalation(tenant_id: str, severity: str, service: str = "reconciliati
     if normalized in {"critical", "urgent"}:
         channels = ["slack", "sms", "email"]
         escalation_level = "p1"
+        retry_policy = {"max_retries": 3, "backoff_seconds": 2, "strategy": "exp_backoff"}
+        cooldown_seconds = 300
+        routing_policy = "critical_first"
+        status = "ready"
     elif normalized == "warning":
         channels = ["slack", "email"]
         escalation_level = "p2"
+        retry_policy = {"max_retries": 2, "backoff_seconds": 4, "strategy": "exp_backoff"}
+        cooldown_seconds = 600
+        routing_policy = "standard"
+        status = "ready"
     else:
         channels = ["email"]
         escalation_level = "p3"
+        retry_policy = {"max_retries": 1, "backoff_seconds": 6, "strategy": "exp_backoff"}
+        cooldown_seconds = 900
+        routing_policy = "standard"
+        status = "ready"
 
     return {
         "tenant_id": tenant_id,
         "service": service,
         "severity": normalized,
+        "status": status,
         "escalation_level": escalation_level,
         "channels": channels,
-        "cooldown_seconds": 300 if normalized in {"critical", "urgent"} else 900,
+        "routing_policy": routing_policy,
+        "retry_policy": retry_policy,
+        "cooldown_seconds": cooldown_seconds,
     }
 
 

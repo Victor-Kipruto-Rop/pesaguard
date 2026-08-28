@@ -37,12 +37,29 @@ def route_alert(discrepancy: Dict[str, Any], preferred_channels: Optional[list[s
 
     if severity in {"critical", "urgent"}:
         channels = ["slack", "sms", "email"]
+        retry_policy = {"max_retries": 3, "backoff_seconds": 2, "strategy": "exp_backoff"}
+        cooldown_seconds = 300
+        routing_policy = "critical_first"
+        priority = "p1"
     elif severity == "warning":
         channels = ["slack", "email"]
+        retry_policy = {"max_retries": 2, "backoff_seconds": 4, "strategy": "exp_backoff"}
+        cooldown_seconds = 600
+        routing_policy = "standard"
+        priority = "p2"
     elif severity == "info":
         channels = ["email"]
+        retry_policy = {"max_retries": 1, "backoff_seconds": 6, "strategy": "exp_backoff"}
+        cooldown_seconds = 900
+        routing_policy = "standard"
+        priority = "p3"
+    else:
+        channels = ["email"]
+        retry_policy = {"max_retries": 2, "backoff_seconds": 5, "strategy": "exp_backoff"}
+        cooldown_seconds = 900
+        routing_policy = "standard"
+        priority = "p3"
 
-    routing_policy = "critical_first" if severity in {"critical", "urgent"} else "standard"
     return {
         "trans_id": discrepancy.get("trans_id", discrepancy.get("TransID", "unknown")),
         "tenant_id": discrepancy.get("tenant_id", "default"),
@@ -51,7 +68,9 @@ def route_alert(discrepancy: Dict[str, Any], preferred_channels: Optional[list[s
         "routing_policy": routing_policy,
         "status": "ready",
         "recipient_count": len(channels),
-        "priority": "p1" if severity in {"critical", "urgent"} else "p2" if severity == "warning" else "p3",
+        "priority": priority,
+        "retry_policy": retry_policy,
+        "cooldown_seconds": cooldown_seconds,
     }
 
 

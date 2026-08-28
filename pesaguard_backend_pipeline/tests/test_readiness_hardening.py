@@ -268,6 +268,14 @@ def test_premium_alert_routing_and_status_page_ux(monkeypatch):
     assert "sms" in route["channels"]
     assert route["status"] == "ready"
     assert route["routing_policy"] == "critical_first"
+    assert route["retry_policy"]["max_retries"] >= 2
+    assert route["cooldown_seconds"] >= 300
+
+    escalation = __import__("pesaguard_backend_pipeline.escalation_engine", fromlist=["route_escalation"]).route_escalation("tenant-a", "critical", "reconciliation")
+    assert escalation["status"] == "ready"
+    assert escalation["routing_policy"] == "critical_first"
+    assert escalation["retry_policy"]["max_retries"] >= 2
+    assert escalation["cooldown_seconds"] >= 300
 
     status_page = health_module.build_status_page(service_name="pesaguard-premium")
     assert status_page["service"] == "pesaguard-premium"
