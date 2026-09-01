@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Tech Stack</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+            background: linear-gradient(135deg, #0f1419 0%, #1a1f2e 100%);
+            min-height: 100vh;
+            padding: 60px 20px;
+            color: #e5e7eb;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 60px;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            background: linear-gradient(135deg, #10b981, #6366f1);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            color: #9ca3af;
+        }
+
+        .tech-categories {
+            display: grid;
+            gap: 50px;
+            margin-bottom: 60px;
+        }
+
+        .category {
+            display: grid;
+            gap: 20px;
+        }
+
+        .category-title {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: #10b981;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+
+        .category-description {
+            color: #9ca3af;
+            font-size: 0.95rem;
+            margin-bottom: 20px;
+        }
+
+        .tech-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+        }
+
+        .tech-card {
+            position: relative;
+            height: 200px;
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+            border-radius: 12px;
+            padding: 24px;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.23, 1, 0.320, 1);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+        }
+
+        .tech-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(135deg, rgba(16, 185, 129, 0.1) 0%, rgba(99, 102, 241, 0.1) 100%);
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            pointer-events: none;
+        }
+
+        .tech-card:hover {
+            border-color: rgba(16, 185, 129, 0.5);
+            background: rgba(15, 23, 42, 0.9);
+            box-shadow: 0 20px 40px rgba(16, 185, 129, 0.1), 0 0 60px rgba(99, 102, 241, 0.05);
+            transform: translateY(-4px);
+        }
+
+        .tech-card:hover::before {
+            opacity: 1;
+        }
+
+        .tech-name {
+            position: relative;
+            z-index: 1;
+            font-size: 1.4rem;
+            font-weight: 600;
+            color: #10b981;
+            margin-bottom: 8px;
+            transition: opacity 0.3s ease;
+        }
+
+        .tech-category-label {
+            position: relative;
+            z-index: 1;
+            font-size: 0.85rem;
+            color: #9ca3af;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 16px;
+            transition: opacity 0.3s ease;
+        }
+
+        .tech-details {
+            position: absolute;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.95);
+            backdrop-filter: blur(4px);
+            padding: 24px;
+            border-radius: 12px;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.3s ease;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            border: 1px solid rgba(16, 185, 129, 0.3);
+        }
+
+        .tech-card:hover .tech-details {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .tech-card:hover .tech-name,
+        .tech-card:hover .tech-category-label {
+            opacity: 0;
+        }
+
+        .detail-section {
+            margin-bottom: 12px;
+        }
+
+        .detail-label {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #10b981;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .detail-content {
+            font-size: 0.9rem;
+            color: #d1d5db;
+            line-height: 1.4;
+        }
+
+        .detail-content a {
+            color: #10b981;
+            text-decoration: none;
+            transition: color 0.2s ease;
+        }
+
+        .detail-content a:hover {
+            color: #6ee7b7;
+            text-decoration: underline;
+        }
+
+        .divider {
+            height: 1px;
+            background: rgba(16, 185, 129, 0.2);
+            margin: 12px 0;
+        }
+
+        .tooltip-hint {
+            position: absolute;
+            bottom: 8px;
+            left: 0;
+            right: 0;
+            text-align: center;
+            font-size: 0.7rem;
+            color: #10b981;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 500;
+        }
+
+        .tech-card:hover .tooltip-hint {
+            opacity: 1;
+        }
+
+        .footer {
+            text-align: center;
+            padding: 40px 20px;
+            border-top: 1px solid rgba(16, 185, 129, 0.2);
+            color: #9ca3af;
+            font-size: 0.95rem;
+        }
+
+        @media (max-width: 768px) {
+            .header h1 {
+                font-size: 1.8rem;
+            }
+
+            .tech-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .tech-details {
+                font-size: 0.85rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Technical Stack</h1>
+            <p>Hover over each tool to learn why, where, and how it's used</p>
+        </div>
+
+        <div class="tech-categories">
+            <!-- DATA ENGINEERING -->
+            <div class="category">
+                <h2 class="category-title">Data Engineering</h2>
+                <p class="category-description">Pipelines, streaming, and data orchestration</p>
+                <div class="tech-grid">
+                    <div class="tech-card">
+                        <div class="tech-name">Kafka</div>
+                        <div class="tech-category-label">Event Streaming</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">Real-time event streaming and distributed message queuing for high-throughput transaction pipelines</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">PesaGuard transaction ingestion, Cloud ETL Pipeline, fintech fraud detection</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/pesaguard" target="_blank">PesaGuard</a></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tech-card">
+                        <div class="tech-name">Airflow</div>
+                        <div class="tech-category-label">Workflow Orchestration</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">Orchestrate complex data workflows with dependency management, scheduling, and monitoring</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">Cloud ETL Pipeline, Data-Enginerring-full-project, Containerised Data Stack</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/cloud-etl-pipeline" target="_blank">Cloud ETL Pipeline</a></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tech-card">
+                        <div class="tech-name">dbt</div>
+                        <div class="tech-category-label">Analytics Engineering</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">Build, test, and document analytics models in SQL with version control and CI/CD</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">dbt Data Modelling Trip Analytics, Data Quality Framework, Kenyan City Weather Pipeline</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/dbt-Data-Modelling-Trip-Analytics" target="_blank">dbt Modelling</a></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tech-card">
+                        <div class="tech-name">PostgreSQL</div>
+                        <div class="tech-category-label">Relational Data Systems</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">ACID-compliant relational database for transactional integrity and complex queries</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">PesaGuard, Bank Balance CDC Pipeline, Exchange Rate Pipeline, most production projects</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/pesaguard" target="_blank">PesaGuard</a></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tech-card">
+                        <div class="tech-name">BigQuery</div>
+                        <div class="tech-category-label">Cloud Data Warehouse</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">Serverless analytics for massive datasets with SQL querying and AI/ML integration</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">Cloud ETL Pipeline, Analytics projects, scale-out scenarios</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/cloud-etl-pipeline" target="_blank">Cloud ETL</a></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tech-card">
+                        <div class="tech-name">Flink</div>
+                        <div class="tech-category-label">Stream Processing</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">Distributed stream processing with low latency, high throughput, and complex event processing</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">Real-time fraud detection, streaming analytics, fintech anomaly detection</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/fintech-fraud_detection-data-pipeline" target="_blank">Fraud Detection</a></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- CLOUD & INFRASTRUCTURE -->
+            <div class="category">
+                <h2 class="category-title">Cloud & Infrastructure</h2>
+                <p class="category-description">Deployment, containerization, and cloud services</p>
+                <div class="tech-grid">
+                    <div class="tech-card">
+                        <div class="tech-name">Docker</div>
+                        <div class="tech-category-label">Containerization</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">Reproducible, portable container environments for consistent dev-to-prod deployments</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">All modern projects - PesaGuard, Cloud ETL, Containerised Data Stack</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/Containerised-Data_Stack" target="_blank">Data Stack</a></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tech-card">
+                        <div class="tech-name">AWS</div>
+                        <div class="tech-category-label">Cloud Platform</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">Comprehensive cloud services - EC2, S3, Lambda, RDS, Kinesis for scalable infrastructure</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">Streaming fraud detection, Cloud ETL, production deployments</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/aws-streaming-fraud-detection" target="_blank">AWS Fraud Detection</a></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tech-card">
+                        <div class="tech-name">GCP</div>
+                        <div class="tech-category-label">Cloud Platform</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">BigQuery, Dataflow, and Pub/Sub for integrated data analytics and streaming</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">Analytics pipelines, BigQuery data warehousing, data engineering workflows</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/cloud-etl-pipeline" target="_blank">Cloud ETL</a></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tech-card">
+                        <div class="tech-name">Kubernetes</div>
+                        <div class="tech-category-label">Orchestration</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">Container orchestration for scaling, self-healing, and declarative infrastructure</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">Production deployments, multi-tenant systems, microservices architectures</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content">Containerised Data Stack & microservices</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- BACKEND & LANGUAGES -->
+            <div class="category">
+                <h2 class="category-title">Backend & Languages</h2>
+                <p class="category-description">Core development frameworks and languages</p>
+                <div class="tech-grid">
+                    <div class="tech-card">
+                        <div class="tech-name">Python</div>
+                        <div class="tech-category-label">Primary Language</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">Versatile language for data engineering, backend APIs, automation, and ML</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">PesaGuard, all data pipelines, ETL workflows, backend services</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/pesaguard" target="_blank">PesaGuard</a></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tech-card">
+                        <div class="tech-name">Flask</div>
+                        <div class="tech-category-label">Web Framework</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">Lightweight, flexible Python web framework for building REST APIs and dashboards</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">PesaGuard dashboard API, webhook receivers, operational backends</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/pesaguard" target="_blank">PesaGuard</a></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tech-card">
+                        <div class="tech-name">FastAPI</div>
+                        <div class="tech-category-label">Modern API Framework</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">High-performance Python framework with auto-documentation and type validation</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">Modern API services, microservices, real-time applications</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content">Recent backend services and APIs</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tech-card">
+                        <div class="tech-name">SQLAlchemy</div>
+                        <div class="tech-category-label">ORM</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">Powerful Python ORM for database abstraction and complex queries</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">PesaGuard, all Python backends with database integrations</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/pesaguard" target="_blank">PesaGuard</a></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- FRONTEND & DATA VISUALIZATION -->
+            <div class="category">
+                <h2 class="category-title">Frontend & Visualization</h2>
+                <p class="category-description">User interfaces and data visualization</p>
+                <div class="tech-grid">
+                    <div class="tech-card">
+                        <div class="tech-name">React</div>
+                        <div class="tech-category-label">Frontend Framework</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">Component-based library for building interactive UIs with state management</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">PesaGuard dashboard, modern web applications, data visualization dashboards</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/pesaguard" target="_blank">PesaGuard</a></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tech-card">
+                        <div class="tech-name">Next.js</div>
+                        <div class="tech-category-label">Full-Stack React</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">Full-stack React framework with SSR, API routes, and optimized deployment</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">PesaGuard frontend, modern web applications with server-side rendering</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/pesaguard" target="_blank">PesaGuard</a></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tech-card">
+                        <div class="tech-name">Grafana</div>
+                        <div class="tech-category-label">Analytics & Monitoring</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">Open-source observability platform for dashboards, metrics, and alerting</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">PesaGuard operational dashboards, monitoring systems, metrics visualization</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/pesaguard" target="_blank">PesaGuard</a></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tech-card">
+                        <div class="tech-name">Tailwind CSS</div>
+                        <div class="tech-category-label">Styling</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">Utility-first CSS framework for rapid, responsive UI development</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">PesaGuard dashboard, modern web interfaces, design systems</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/pesaguard" target="_blank">PesaGuard</a></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- TESTING & MONITORING -->
+            <div class="category">
+                <h2 class="category-title">Testing & Monitoring</h2>
+                <p class="category-description">Quality assurance and observability</p>
+                <div class="tech-grid">
+                    <div class="tech-card">
+                        <div class="tech-name">Pytest</div>
+                        <div class="tech-category-label">Testing Framework</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">Powerful Python testing framework with fixtures, parametrization, and plugins</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">PesaGuard, all Python projects, unit and integration testing</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/pesaguard" target="_blank">PesaGuard</a></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tech-card">
+                        <div class="tech-name">Prometheus</div>
+                        <div class="tech-category-label">Metrics Monitoring</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">Time-series database for collecting and storing system and application metrics</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">PesaGuard monitoring, operational metrics, system observability</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/pesaguard" target="_blank">PesaGuard</a></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tech-card">
+                        <div class="tech-name">GitHub Actions</div>
+                        <div class="tech-category-label">CI/CD</div>
+                        <div class="tooltip-hint">Hover for details</div>
+                        <div class="tech-details">
+                            <div class="detail-section">
+                                <div class="detail-label">Why I Use It</div>
+                                <div class="detail-content">Native GitHub CI/CD for automated testing, building, and deployments</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Where I've Used It</div>
+                                <div class="detail-content">PesaGuard, all modern projects, automated workflows</div>
+                            </div>
+                            <div class="divider"></div>
+                            <div class="detail-section">
+                                <div class="detail-label">Project</div>
+                                <div class="detail-content"><a href="https://github.com/Victor-Kipruto-Rop/pesaguard" target="_blank">PesaGuard</a></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>These are the tools and technologies I use to build data systems, cloud infrastructure, and real-time applications.</p>
+            <p style="margin-top: 16px; color: #6b7280; font-size: 0.85rem;">Each project leverages a subset of these tools based on specific requirements and constraints.</p>
+        </div>
+    </div>
+</body>
+</html>
