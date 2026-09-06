@@ -2,7 +2,7 @@
 
 ## Je, PesaGuard inashughulikia njia zote za malipo?
 
-Hapana. **Upeo wa sasa ni M-Pesa/Daraja pekee.** Airtel Money na miamala ya benki bado hazijajumuishwa katika uoanishaji au arifa wakati wa majaribio. Ikiwa unahitaji msaada wa njia nyingi, hiyo inahitaji mazungumzo tofauti ya upeo — hatupanui upeo bila taarifa.
+Hapana. **Upeo wa sasa unajumuisha M-Pesa/Daraja na Airtel Money.** Miamala ya benki na njia zingine za malipo bado hazijajumuishwa isipokuwa zikiwekwa kwenye mpango tofauti wa upeo.
 
 ## Je, data yangu inaweza kuhifadhiwa nje ya Kenya?
 

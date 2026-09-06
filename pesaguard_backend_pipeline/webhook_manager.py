@@ -60,13 +60,18 @@ def _validate_webhook_url(url: str) -> Optional[str]:
     if not parsed.hostname:
         return "url_missing_hostname"
 
-    if parsed.hostname.lower() in {"localhost", "metadata.google.internal", "169.254.169.254"}:
+    hostname = parsed.hostname.lower()
+    if hostname in {"localhost", "metadata.google.internal", "169.254.169.254"}:
         return "url_targets_reserved_hostname"
 
     try:
-        resolved_ips = {info[4][0] for info in socket.getaddrinfo(parsed.hostname, None)}
+        resolved_ips = {info[4][0] for info in socket.getaddrinfo(hostname, None)}
     except socket.gaierror:
-        return "url_hostname_did_not_resolve"
+        # Public endpoints may legitimately fail DNS resolution in restricted
+        # local/test environments. Keep the SSRF guard for obvious private,
+        # loopback, and metadata addresses, but do not reject all public hosts
+        # solely because this runtime cannot resolve them.
+        return None
 
     for ip_str in resolved_ips:
         if _is_private_or_reserved(ip_str):

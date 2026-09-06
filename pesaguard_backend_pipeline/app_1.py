@@ -18,6 +18,27 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@local
 
 from pesaguard_backend_pipeline.app import app
 
+if getattr(app, "_got_first_request", False):
+    app._got_first_request = False
+
+
+def _idempotent_route(rule, **options):
+    if getattr(app, "_got_first_request", False):
+        def _noop(view_func):
+            return view_func
+        return _noop
+
+    endpoint = options.get("endpoint") or rule.strip("/").replace("/", "_") or "root"
+    if any(existing_rule.rule == rule for existing_rule in app.url_map.iter_rules()):
+        def _noop(view_func):
+            return view_func
+        return _noop
+    if endpoint in app.view_functions:
+        def _noop(view_func):
+            return view_func
+        return _noop
+    return app.route(rule, **options)
+
 
 def _create_engine(url: str):
     if url.startswith("sqlite:///:memory:") or url.startswith("sqlite:"):
@@ -95,7 +116,7 @@ if not getattr(app, "_got_first_request", False):
     app.before_request(_enforce_auth)
 
 
-@app.route("/api/discrepancies", methods=["GET"])
+@_idempotent_route("/api/discrepancies", methods=["GET"])
 def list_discrepancies():
     """Paginated list of unresolved discrepancies, most recent first.
 
@@ -143,7 +164,7 @@ def list_discrepancies():
         session.close()
 
 
-@app.route("/api/stats/summary", methods=["GET"])
+@_idempotent_route("/api/stats/summary", methods=["GET"])
 def summary():
     """Summary stats. reconciliation_rate reflects the share of DISTINCT
     transactions with no blocking discrepancy (needs_review / missing_payment),

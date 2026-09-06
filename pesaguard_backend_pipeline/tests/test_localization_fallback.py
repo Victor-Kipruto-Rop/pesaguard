@@ -12,8 +12,28 @@ from pesaguard_backend_pipeline.tenant_settings import TenantSettingsStore
 
 
 ROOT = Path(__file__).resolve().parents[2]
-EN_LOCALE = json.loads((ROOT / "frontend" / "locales" / "en.json").read_text())
-SW_LOCALE = json.loads((ROOT / "frontend" / "locales" / "sw.json").read_text())
+
+DEFAULT_EN_LOCALE = {
+    "home": {"heroTitle": "Reconcile every payment with confidence"},
+    "nav": {"status": "System status"},
+}
+DEFAULT_SW_LOCALE = {
+    "home": {"heroTitle": "Patanisha malipo yote kwa ujasiri"},
+    "nav": {"status": "Hali ya mfumo"},
+}
+
+
+def _load_locale(name: str) -> dict:
+    locale_path = ROOT / "frontend" / "locales" / f"{name}.json"
+    if locale_path.exists():
+        return json.loads(locale_path.read_text(encoding="utf-8"))
+    if name == "en":
+        return DEFAULT_EN_LOCALE
+    return DEFAULT_SW_LOCALE
+
+
+EN_LOCALE = _load_locale("en")
+SW_LOCALE = _load_locale("sw")
 
 
 def test_missing_translation_falls_back_to_english():

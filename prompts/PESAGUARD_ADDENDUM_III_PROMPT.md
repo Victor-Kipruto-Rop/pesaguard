@@ -88,14 +88,16 @@ languages beyond what's needed now.
 
 #### 3. Payment-Method Scope Boundary
 
-PesaGuard is Daraja-only today. Pilot customers who also take Airtel
-Money or bank transfers will still have an unreconciled gap outside
-M-Pesa. This needs an explicit decision, documented and reflected in the
-product itself — not silently discovered by a confused customer.
+PesaGuard supports M-Pesa and Airtel Money today, with provider-aware
+reconciliation and tenant-scoped configuration for both rails. Pilot
+customers who also take bank transfers or other payment methods will
+still have an unreconciled gap outside the supported wallets, and that
+needs an explicit decision documented in the product itself rather than
+being silently discovered by a confused customer.
 
 | ID | Requirement | Priority |
 |---|---|---|
-| SCOPE-1 | Document the current scope decision explicitly: M-Pesa/Daraja only, or intended to expand — and if expansion is intended, to which payment methods and on what timeline | Must |
+| SCOPE-1 | Document the current scope decision explicitly: supported rails are M-Pesa/Daraja and Airtel Money, with future expansion only for additional rails if a real requirement emerges | Must |
 | SCOPE-2 | The dashboard and onboarding materials state the scope boundary clearly, so a customer taking Airtel Money or bank transfers understands upfront what is and isn't reconciled | Must |
 | SCOPE-3 | If expansion beyond M-Pesa is the intended direction, the BaseConnector pattern already used for internal-ledger connectors should be evaluated for reuse as a PaymentSourceConnector pattern — don't hardcode M-Pesa-specific assumptions into core reconciliation logic where avoidable | Should |
 | SCOPE-4 | If a pilot customer explicitly needs multi-payment-method reconciliation now, treat that as a distinct scoping conversation and a likely separate phase — do not silently expand scope mid-build without re-running the requirements process | Must |

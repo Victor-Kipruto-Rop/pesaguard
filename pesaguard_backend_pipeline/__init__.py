@@ -18,6 +18,7 @@ if BACKEND_ROOT not in sys.path:
 # top-level imports resolve to the same module objects during tests and local runs.
 for module_name in [
     "action_audit",
+    "api_gateway",
     "auth_rbac",
     "event_store",
     "export_routes",

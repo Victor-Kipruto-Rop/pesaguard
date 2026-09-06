@@ -14,6 +14,25 @@ out/
 # Environment
 .env
 .env.local
+.env.staging
+.env.*.local
+
+# Local databases (dev/staging SQLite stores — contain transaction data)
+*.db
+*.sqlite
+*.sqlite3
+
+# Backup artifacts produced by pesaguard_backend_pipeline/backup_postgres.py
+*.sql.gz
+*.dump
+backups/
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
 
 # Logs
 *.log

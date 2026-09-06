@@ -1,12 +1,12 @@
 # Anza kutumia PesaGuard
 
-PesaGuard husaidia mashirika ya kifedha kuoanisha na kutazama shughuli za M-Pesa kwa wakati halisi.
+PesaGuard husaidia mashirika ya kifedha kuoanisha na kutazama shughuli za malipo kwa wakati halisi kwenye njia za malipo zinazotumiwa kwa kweli.
 
 ## Upeo wa sasa
 
-- Mfumo huu unasaidia tu mifumo ya **M-Pesa / Daraja**.
-- Mifumo ya Airtel Money, mifumo ya benki, au njia nyingine za malipo **bado si sehemu ya upeo wa sasa**.
-- Ikiwa unahitaji uoanishaji wa njia nyingi za malipo, wasiliana na timu yako ya utekelezaji — hiyo ni mazungumzo tofauti ya upeo.
+- Mfumo huu unasaidia **M-Pesa / Daraja**.
+- Mfumo pia unasaidia **Airtel Money** kupitia uthibitishaji wa callback, ulinganishaji wa wauzaji, na miamala ya kutoa mfuko.
+- Mifumo ya benki na njia nyingine za malipo **bado si sehemu ya upeo wa sasa** isipokuwa zikiwekwa kwenye mpango tofauti wa upeo.
 
 ## Unachotarajia
 

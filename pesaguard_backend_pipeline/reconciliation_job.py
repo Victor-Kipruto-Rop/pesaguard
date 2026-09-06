@@ -46,23 +46,29 @@ TOPIC_DISCREPANCIES = os.getenv("KAFKA_TOPIC_DISCREPANCIES", "mpesa.discrepancie
 DEFAULT_TENANT_ID = os.getenv("TENANT_ID", "default")
 WINDOW_MINUTES = int(os.getenv("RECONCILIATION_WINDOW_MINUTES", "15"))
 
-DB_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
-
 # Database Engine & Event Store Setup
-_engine_kwargs = {"pool_pre_ping": True}
-if not DB_URL.startswith("sqlite"):
-    _engine_kwargs.update({"pool_size": 5, "max_overflow": 10})
-engine = create_engine(DB_URL, **_engine_kwargs)
-AuditSession = sessionmaker(bind=engine, expire_on_commit=False)
-event_store = EventStore(database_url=DB_URL)
-settings_store = TenantSettingsStore()
-
-# Local DB session for audit writes + idempotency checks
+#
+# Audit writes (idempotency ledger + ActionAuditEntry) may be directed at a separate
+# database from the transactional data via AUDIT_DATABASE_URL. Both engines use
+# pool_pre_ping; the audit engine additionally gets explicit pool sizing for Postgres.
 DB_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
 AUDIT_DB_URL = os.getenv("AUDIT_DATABASE_URL", DB_URL)
-engine_for_audit = create_engine(AUDIT_DB_URL, pool_pre_ping=True)
+
+_audit_engine_kwargs = {"pool_pre_ping": True}
+if not AUDIT_DB_URL.startswith("sqlite"):
+    _audit_engine_kwargs.update({"pool_size": 5, "max_overflow": 10})
+
+engine_for_audit = create_engine(AUDIT_DB_URL, **_audit_engine_kwargs)
 AuditSession = sessionmaker(bind=engine_for_audit, expire_on_commit=False)
-event_store = EventStore(database_url=DB_URL)
+
+# The EventStore MUST be bound to the audit database: it is the store that owns the
+# idempotency ledger (ProcessedTransaction) rows written by mark_processed_in_session()
+# through AuditSession below. Binding it to DB_URL instead would make already_processed()
+# read from a different database than the one being written to, so the pre-flight
+# duplicate gate would never observe its own writes (silently useless whenever
+# AUDIT_DATABASE_URL differs from DATABASE_URL, as in docker-compose).
+event_store = EventStore(database_url=AUDIT_DB_URL)
+settings_store = TenantSettingsStore()
 
 # Ensure audit tables exist when module is imported (helps tests and first-run environments)
 try:
@@ -79,9 +85,11 @@ def _signal_handler(signum, frame):
     _RUNNING = False
 
 
-signal.signal(signal.SIGINT, _signal_handler)
-signal.signal(signal.SIGTERM, _signal_handler)
-
+# NOTE: Signal handlers are deliberately NOT registered at import time. Registering
+# them here would replace the caller's (e.g. pytest's) SIGINT handling for the whole
+# process whenever this module is imported, which previously aborted unrelated test
+# setup. run() installs them only while the consumer is actually running and restores
+# the previous handlers on exit.
 _RUNNING = True
 
 
@@ -177,8 +185,19 @@ def _publish_downstream(evaluation: Dict[str, Any], trans_id: str, producer: Any
 
 def run():
     """Main execution loop for the reconciliation Kafka consumer service."""
+    global _RUNNING
+    _RUNNING = True
+
+    # Install graceful-shutdown handlers only while the consumer runs, and restore
+    # whatever the caller had installed afterwards so importing/invoking this module
+    # never leaves a process-wide handler behind.
+    previous_sigint = signal.signal(signal.SIGINT, _signal_handler)
+    previous_sigterm = signal.signal(signal.SIGTERM, _signal_handler)
+
     if not HAS_KAFKA and (KafkaConsumer is None or KafkaProducer is None):
         logger.error("Kafka client dependencies unavailable. Reconciliation job exiting.")
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
         sys.exit(1)
 
     logger.info("Initializing Reconciliation Job consumer on topic='%s'...", TOPIC_RAW)
@@ -341,6 +360,10 @@ def run():
                         logger.exception("Unexpected error processing trans_id=%s in reconciliation loop: %s", trans_id, exc)
 
     logger.info("Cleaning up Kafka consumer resources...")
+    # Restore the caller's original signal handlers so this service never leaves a
+    # process-wide handler installed after it stops running.
+    signal.signal(signal.SIGINT, previous_sigint)
+    signal.signal(signal.SIGTERM, previous_sigterm)
     try:
         consumer.close()
         producer.close(timeout=5)

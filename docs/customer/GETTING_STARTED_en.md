@@ -1,12 +1,13 @@
 # Getting Started with PesaGuard
 
-PesaGuard helps finance and operations teams monitor M-Pesa reconciliation exceptions in near real time.
+PesaGuard helps finance and operations teams monitor wallet reconciliation exceptions in near real time across the payment rails they actually use.
 
 ## Current scope
 
-- PesaGuard reconciles **M-Pesa (Daraja) transactions only**.
-- Airtel Money, bank transfers, and other payment methods are **not** included in reconciliation or alerts during the pilot.
-- If you need multi-payment-method support, contact your implementation team — that is a separate scoping conversation.
+- PesaGuard reconciles **M-Pesa (Daraja) transactions**.
+- PesaGuard also supports **Airtel Money** callback validation, provider-aware matching, and outbound payment request flows.
+- PesaGuard includes **bank transfer settlement support** for normalized transfer requests and audit-friendly matching.
+- Other payment methods are **not** included in reconciliation or alerts unless they are included in a separate scoping conversation.
 
 ## What you can expect
 

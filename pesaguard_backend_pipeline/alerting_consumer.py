@@ -22,6 +22,9 @@ from pesaguard_backend_pipeline.tenant_settings import TenantSettingsStore
 
 logger = logging.getLogger("pesaguard.alerting.consumer")
 
+# Cooperative shutdown flag toggled by _signal_handler; read by run()'s consumer loop.
+_RUNNING = True
+
 
 class AlertingConsumer:
     """Processes discrepancy events from a topic or in-process list and routes them to the alerting service safely."""
@@ -93,11 +96,15 @@ class AlertingConsumer:
 
 def _signal_handler(signum, frame):
     logger.info("Received termination signal (%s), shutting down alerting consumer...", signum)
-    sys.exit(0)
+    global _RUNNING
+    _RUNNING = False
 
 
 def run():
     """Run the alerting consumer service against the configured discrepancy topic."""
+    global _RUNNING
+    _RUNNING = True
+
     if KafkaConsumer is None:
         logger.error("Kafka client dependencies unavailable. Alerting consumer cannot start.")
         sys.exit(1)
@@ -111,8 +118,12 @@ def run():
     SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
     settings_store = TenantSettingsStore()
 
-    signal.signal(signal.SIGINT, _signal_handler)
-    signal.signal(signal.SIGTERM, _signal_handler)
+    # Register handlers only when the consumer actually runs — importing this module
+    # (e.g. in tests) must not replace the caller's interrupt handling. Use a
+    # cooperative flag rather than sys.exit() so shutdown unwinds cleanly through
+    # the consumer loop and cannot hard-abort an unrelated caller.
+    previous_sigint = signal.signal(signal.SIGINT, _signal_handler)
+    previous_sigterm = signal.signal(signal.SIGTERM, _signal_handler)
 
     consumer = KafkaConsumer(
         topic,
@@ -125,28 +136,41 @@ def run():
 
     logger.info("Alerting consumer started and listening on topic=%s", topic)
 
-    for message in consumer:
-        try:
-            payload = message.value
-            if not isinstance(payload, dict):
-                logger.warning("Skipping invalid discrepancy message payload type=%s", type(payload))
+    try:
+        for message in consumer:
+            if not _RUNNING:
+                break
+            try:
+                payload = message.value
+                if not isinstance(payload, dict):
+                    logger.warning("Skipping invalid discrepancy message payload type=%s", type(payload))
+                    consumer.commit(message=message)
+                    continue
+
+                tenant_id = str(payload.get("tenant_id") or "default")
+                if "alert_channels" not in payload:
+                    tenant_settings = settings_store.get(tenant_id)
+                    payload["alert_channels"] = tenant_settings.get("alert_channels")
+
+                alert_service = AlertingService(
+                    session_factory=SessionLocal,
+                    tenant_settings=settings_store.get(tenant_id),
+                )
+                consumer_response = alert_service.handle_discrepancy(payload)
+                logger.info("Alerting result for trans_id=%s: %s", payload.get("trans_id"), consumer_response)
                 consumer.commit(message=message)
-                continue
-
-            tenant_id = str(payload.get("tenant_id") or "default")
-            if "alert_channels" not in payload:
-                tenant_settings = settings_store.get(tenant_id)
-                payload["alert_channels"] = tenant_settings.get("alert_channels")
-
-            alert_service = AlertingService(
-                session_factory=SessionLocal,
-                tenant_settings=settings_store.get(tenant_id),
-            )
-            consumer_response = alert_service.handle_discrepancy(payload)
-            logger.info("Alerting result for trans_id=%s: %s", payload.get("trans_id"), consumer_response)
-            consumer.commit(message=message)
-        except Exception as exc:
-            logger.exception("Unhandled exception in alerting consumer loop: %s", exc)
+            except Exception as exc:
+                logger.exception("Unhandled exception in alerting consumer loop: %s", exc)
+    finally:
+        # Restore the caller's original signal handlers so this service never
+        # leaves a process-wide handler installed after it stops running.
+        signal.signal(signal.SIGINT, previous_sigint)
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        try:
+            consumer.close()
+        except Exception:  # pragma: no cover - best-effort cleanup on shutdown
+            logger.debug("Error closing Kafka consumer during shutdown", exc_info=True)
+        logger.info("Alerting consumer stopped cleanly")
 
 
 if __name__ == "__main__":

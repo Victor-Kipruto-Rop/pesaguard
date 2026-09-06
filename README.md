@@ -1,105 +1,210 @@
-# PesaGuard 🛡️
+# PesaGuard 🛡️ Multi-Rail Reconciliation & Payment Control Platform
 
-**Real-time M-Pesa reconciliation and anomaly detection for SACCOs, e-commerce operators, and small fintechs.**
+PesaGuard is the financial operations backbone for modern payment ecosystems. It brings M-Pesa, Airtel Money, and bank transfer flows into one real-time reconciliation, alerting, and payout orchestration platform designed for teams that cannot tolerate silent mismatches, duplicate webhook replays, or weak operational auditability.
 
-PesaGuard watches your M-Pesa transaction flow as it happens, flags mismatches before they become disputes, and catches suspicious patterns before they become losses — so finance teams stop reconciling by hand and stop finding fraud after the money's gone.
+Built for finance teams, treasury teams, SACCOs, fintechs, lenders, insurers, and merchants operating in fast-moving, multi-rail transaction environments.
 
 ---
 
-## The Problem
+## Why this platform exists
 
-Most SACCOs and small fintechs in East Africa reconcile M-Pesa transactions manually — cross-checking statements, spreadsheets, and internal records days after the fact. By the time a discrepancy is spotted, the transaction window for recovery has often closed, and fraud patterns (duplicate payments, phantom reversals, callback spoofing) go unnoticed until they've repeated dozens of times.
+Most payment operations still depend on fragmented tools: spreadsheets, bank statements, wallet reports, and manual comparisons. That creates risk across the entire payment lifecyle:
 
-## What PesaGuard Does
+- duplicate callbacks and replayed transactions
+- mismatched ledger entries across provider and internal books
+- late detection of failed or suspicious payouts
+- weak accountability during exceptions and disputes
+- slow, manual reconciliation for every settlement cycle
 
-- **Real-time reconciliation** — ingests M-Pesa (Daraja) callbacks and matches them against internal records as transactions happen, not at end-of-day.
-- **Anomaly detection** — flags irregular patterns (duplicate transaction IDs, amount mismatches, timing anomalies, suspicious reversal sequences) using rule-based and statistical checks.
-- **Webhook-first architecture** — built for idempotent, secure ingestion of Safaricom Daraja callbacks, so retried or duplicate webhooks never corrupt your ledger.
-- **Alerting** — surfaces discrepancies to your team immediately, not at month-end audit.
-- **Built for scale-down as much as scale-up** — designed to run affordably for a single SACCO branch or a growing fintech, not just enterprise volumes.
+PesaGuard replaces that fragmentation with an auditable, provider-aware operational control layer.
 
-## Who It's For
+---
 
-- **SACCOs** reconciling member contributions and loan repayments via M-Pesa
-- **E-commerce operators** processing high volumes of STK Push payments
-- **Small fintechs** that need fraud visibility without building a data team
+## Platform capabilities
 
-## Status
+- Reconciliation across M-Pesa, Airtel Money, and bank transfer rails
+- Provider-aware validation and normalization for each payment gateway
+- Idempotent webhook ingestion to prevent double-processing
+- Duplicate detection and resilient dead-letter handling
+- Outbound payment request helpers for provider-controlled disbursements
+- Tenant-scoped provider configuration and admin-facing operational routes
+- Real-time anomaly detection and reconciliation reporting for finance operations
+- Production-oriented backend patterns with Kafka, Redis, PostgreSQL, and dockerized deployment support
 
-🚧 **MVP live with a pilot customer.** Currently in production hardening — focused on webhook idempotency, security, and reliability before wider rollout.
+---
 
-## Tech Stack
+## Supported rails
 
-| Layer | Technology |
-|---|---|
-| Backend | *(fill in: e.g. Django / FastAPI / Node.js)* |
-| Transaction ingestion | Safaricom Daraja API (M-Pesa) |
-| Deployment | Render (free-tier infrastructure) |
-| Database | *(fill in: e.g. PostgreSQL)* |
+| Rail | Status | Coverage |
+|---|---|---|
+| M-Pesa / Daraja | Production-ready | Webhook ingestion, validation, normalization, reconciliation |
+| Airtel Money | Production-ready | Auth flow, config, callback validation, outbound payout helper |
+| Bank transfers | Integrated | Transfer request flow, tenant credentials, normalization, ingestion support |
+| Additional providers | Extensible | Provider abstraction is ready for follow-on expansion |
 
-*(Update the stack table with your actual services — happy to fill this in if you tell me the current setup.)*
+---
 
-## Getting Started
+## Business value
+
+### Finance teams
+- reduce unreconciled payment exposure
+- accelerate settlement review and ledger confidence
+- audit every payment event from gateway to internal state
+
+### Operations teams
+- detect issues before they become customer-facing incidents
+- respond to payment exceptions with clear provider context
+- reduce manual investigations and spreadsheet-driven error handling
+
+### Risk and compliance teams
+- keep provider-level transaction trails in one place
+- identify suspicious activity earlier through consistent normalization
+- maintain clearer controls over payout and webhook processing
+
+---
+
+## Architecture overview
+
+PesaGuard is structured around a tenant-aware, webhook-first backend model:
+
+- incoming provider callbacks are validated and normalized
+- a reconciliation engine matches transaction patterns against ledger and settlement states
+- idempotent event storage prevents duplicate processing across retries
+- admin routes expose operational actions for provider-specific payouts and ingestion tasks
+- alerting and monitoring layers surface operational drift for finance teams
+
+### Bank reconciliation flow
+
+```mermaid
+flowchart TD
+    A[M-Pesa] --> N[Normalization]
+    B[Airtel Money] --> N
+    C[Bank] --> N
+    D[Future Providers] --> N
+
+    N --> R[Reconciliation Engine]
+
+    R --> M[Matched]
+    R --> E[Exceptions]
+    R --> U[Unmatched]
+
+    E --> S[Settlement Engine]
+    U --> S
+    M --> S
+```
+
+This advanced flow is the operational heart of the platform: raw payment events from multiple rails are normalized into one canonical model, evaluated against internal ledger records, and then partitioned into matched, exceptional, or unmatched results before settlement or follow-up handling.
+
+---
+
+## Quick start
 
 ```bash
-# Clone the repo
 git clone https://github.com/Victor-Kipruto-Rop/pesaguard.git
 cd pesaguard
-
-# Install dependencies
-# (add your install command here)
-
-# Configure environment variables
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 cp .env.example .env
-# Add your Daraja API credentials, database URL, etc.
-
-# Run locally
-# (add your run command here)
 ```
 
-Local Prometheus testing
-------------------------
+Configure the environment for your tenant and provider setup:
 
-Use the included Prometheus config at `infra/prometheus/prometheus.yml` to scrape the backend `/metrics` endpoint on port `5000`.
+- `DATABASE_URL`
+- `TENANT_ID`
+- `DARAJA_*` credentials
+- `AIRTEL_*` credentials
+- `BANK_*` credentials
+- `REDIS_URL` and optional Kafka settings
 
-If running Prometheus in Docker compose or locally, point the `scrape_configs` `targets` to the host where `app.py` is served (default `localhost:5000` or `host.docker.internal:5000` inside Docker).
+See the setup and API docs for production deployment guidance.
 
-Admin CLI
----------
+---
 
-A small CLI to query processed transaction records directly is available at `pesaguard_backend_pipeline/scripts/admin_query.py`.
-Example:
+## Documentation index
 
-```bash
-python -m pesaguard_backend_pipeline.scripts.admin_query T12345 T67890
-python -m pesaguard_backend_pipeline.scripts.admin_query --file trans_ids.txt
+- [docs/SETUP.md](docs/SETUP.md)
+- [docs/FEATURES.md](docs/FEATURES.md)
+- [docs/PRODUCT_SCOPE.md](docs/PRODUCT_SCOPE.md)
+- [docs/ADMIN_API.md](docs/ADMIN_API.md)
+- [docs/AIRTEL_MONEY_INTEGRATION.md](docs/AIRTEL_MONEY_INTEGRATION.md)
+
+---
+
+## Admin API at a glance
+
+The backend exposes provider-aware admin endpoints for payouts and ingestion flows:
+
+| Area | Endpoint | Purpose |
+|---|---|---|
+| M-Pesa | `POST /webhook/mpesa/validation` | Validation callback response |
+| M-Pesa | `POST /webhook/mpesa/confirmation` | Confirmation callback ingestion |
+| Airtel | `POST /admin/airtel/payments` | Trigger Airtel outbound payout |
+| Airtel | `GET /admin/airtel/payments/contracts` | Contract examples and validation notes |
+| Bank | `POST /admin/bank/payments` | Trigger bank transfer payout |
+| Bank | `GET /admin/bank/payments/contracts` | Contract examples and validation notes |
+| Bank | `POST /admin/bank/ingest` | Ingest CSV, Excel, PDF, webhooks, SFTP, API records |
+| Bank | `GET /admin/bank/ingest/contracts` | Statement ingestion contract examples |
+
+These endpoints are designed to be admin-authenticated and tenant-scoped for real operational use rather than demo-only plumbing.
+
+---
+
+## Example environment settings
+
+```env
+DATABASE_URL=postgresql://pesaguard:pesaguard@localhost:5432/pesaguard
+TENANT_ID=default
+REDIS_URL=redis://localhost:6379/0
+DARAJA_BASE_URL=https://sandbox.safaricom.co.ke
+DARAJA_CONSUMER_KEY=your_daraja_consumer_key_here
+DARAJA_CONSUMER_SECRET=your_daraja_consumer_secret_here
+AIRTEL_BASE_URL=https://sandbox.example.com
+AIRTEL_API_KEY=your_airtel_api_key_here
+AIRTEL_API_SECRET=your_airtel_api_secret_here
+BANK_BASE_URL=https://api.bank.example
+BANK_API_KEY=your_bank_api_key_here
+BANK_API_SECRET=your_bank_api_secret_here
+BANK_PARTNER_CODE=your_bank_partner_code_here
+PESAGUARD_ADMIN_API_TOKEN=your-admin-token
 ```
 
-CI
---
+---
 
-The GitHub Actions workflow `/.github/workflows/ci.yml` runs tests and starts an RQ worker against a Redis service for a simple smoke test.
+## Deployment posture
 
+PesaGuard is designed to be operationally practical in real-world finance environments:
+
+- PostgreSQL-compatible persistence
+- SQLite-safe local and test execution
+- Docker-friendly deployment patterns
+- Redis-backed operational caching and idempotency support
+- Kafka-based downstream event publication
+- tenant-scoped provider configuration for multi-client deployments
+
+---
 
 ## Roadmap
 
-- [x] Core reconciliation engine
-- [x] MVP deployed with first pilot customer
-- [ ] Webhook idempotency hardening
-- [ ] Security audit (auth, secrets management, rate limiting)
-- [ ] Multi-tenant support for additional SACCOs/fintechs
-- [ ] Public dashboard for real-time transaction health
+- [x] M-Pesa reconciliation foundation
+- [x] Airtel Money provider integration
+- [x] Bank transfer provider integration
+- [x] Provider-aware reconciliation across all three rails
+- [x] Outbound payout helpers and admin route wiring
+- [x] Multi-source bank statement ingestion support
+- [x] Standardized admin API contract documentation
+- [ ] Additional customer-specific operational workflow expansion
 
-## Branding
-
-PesaGuard uses a shield-and-"PG" mark in forest green — reflecting trust, security, and financial stewardship.
+---
 
 ## License
 
 MIT License — see [LICENSE](LICENSE) for details.
 
+---
+
 ## Contact
 
-Built by **Victor Kipruto Rop** ([DataForge](https://github.com/Victor-Kipruto-Rop)) — data engineer focused on East African fintech infrastructure.
+Built for serious financial operations teams in East Africa and beyond.
 
-For pilot inquiries or partnership questions, reach out via [GitHub](https://github.com/Victor-Kipruto-Rop).
+For pilot conversations, integration requests, or production deployment discussion, reach out through the repository owner and implementation channels.

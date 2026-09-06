@@ -118,13 +118,17 @@ def init_observability() -> Dict[str, Any]:
     """Initialise optional Sentry and OpenTelemetry integrations when configured."""
     status: Dict[str, Any] = {"sentry": "disabled", "opentelemetry": "disabled"}
 
+    env_name = (os.getenv("PESAGUARD_ENV", "development") or "development").lower()
     sentry_dsn = os.getenv("SENTRY_DSN")
-    if sentry_dsn:
+    sentry_opt_in = os.getenv("SENTRY_ENABLE", "").strip().lower() in {"1", "true", "yes", "on"}
+    sentry_explicitly_disabled = os.getenv("SENTRY_DISABLE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+    if sentry_dsn and not sentry_explicitly_disabled and (env_name not in {"development", "local"} or sentry_opt_in):
         try:
             import sentry_sdk
             sentry_sdk.init(
                 dsn=sentry_dsn,
-                environment=os.getenv("PESAGUARD_ENV", "development"),
+                environment=env_name,
                 traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.2")),
                 send_default_pii=False,
             )

@@ -44,7 +44,7 @@ This roadmap upgrades the existing readiness work into a robust operating model 
 - Pilot agreement and support plan
 
 ### 4. Product maturity
-- Clear scope boundary for M-Pesa/Daraja only versus future expansion
+- Clear scope boundary for M-Pesa and Airtel Money versus future expansion
 - Localization for English and Kiswahili
 - Data residency documentation and deployment configuration
 - Customer-facing onboarding and offboarding materials

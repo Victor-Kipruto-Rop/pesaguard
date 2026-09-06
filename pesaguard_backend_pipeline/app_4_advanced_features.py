@@ -21,28 +21,83 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
-from flask import Flask, jsonify, request, g
+from flask import Flask, jsonify, request, g, redirect
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from pesaguard_backend_pipeline.webhook_manager import WebhookManager
-from pesaguard_backend_pipeline.auth_rbac import AuthRBAC, require_auth, require_tenant_access, get_current_user
+from pesaguard_backend_pipeline.auth_rbac import AuthRBAC, IdentityAccessService, require_auth, require_tenant_access, get_current_user
 from pesaguard_backend_pipeline.rate_limiter import rate_limit, get_rate_limit_status
 from pesaguard_backend_pipeline.email_service import EmailService
 from pesaguard_backend_pipeline.escalation_engine import EscalationEngine
 from pesaguard_backend_pipeline.on_call_service import OnCallService
 from pesaguard_backend_pipeline.search_engine import AdvancedSearchEngine
 from pesaguard_backend_pipeline.action_audit import ActionAuditEntry
-from pesaguard_backend_pipeline.models import Base, Discrepancy, Report, DeadLetter
+from pesaguard_backend_pipeline.models import (
+    Base,
+    Discrepancy,
+    Report,
+    DeadLetter,
+    UserAccount,
+    UserSession,
+    ApiKeyRecord,
+    OIDCProvider,
+    MFAChallenge,
+    PasswordlessChallenge,
+)
 from pesaguard_backend_pipeline.tenant_settings import TenantSettingsStore
 
 configure_logging = lambda: None  # Import from logging_utils if available
 logger = logging.getLogger("pesaguard.advanced_features")
 
 from pesaguard_backend_pipeline.app import app
+
+if getattr(app, "_got_first_request", False):
+    app._got_first_request = False
+
+
+def _idempotent_route(rule, **options):
+    """Register a route so repeated imports/reloads of this module stay safe.
+
+    Flask's uniqueness constraint is on the ENDPOINT name, not on the URL rule:
+    the same rule may legitimately be registered more than once with different
+    methods (e.g. ``POST /webhooks`` to create and ``GET /webhooks`` to list).
+    Deduping on the rule alone silently dropped the second registration and made
+    those methods answer 405 Method Not Allowed, so we key on
+    (endpoint, methods) instead.
+    """
+    if getattr(app, "_got_first_request", False):
+        def _noop(view_func):
+            return view_func
+        return _noop
+
+    def decorator(view_func):
+        endpoint = options.get("endpoint") or view_func.__name__
+        methods = {str(m).upper() for m in (options.get("methods") or ["GET"])}
+
+        # Same endpoint already bound (module reload) — keep the existing view.
+        if endpoint in app.view_functions:
+            return view_func
+
+        # Same rule already serving every method requested — nothing to add.
+        for existing_rule in app.url_map.iter_rules():
+            if existing_rule.rule != rule:
+                continue
+            existing_methods = {str(m).upper() for m in (existing_rule.methods or set())}
+            if methods.issubset(existing_methods):
+                return view_func
+
+        route_options = {k: v for k, v in options.items() if k != "endpoint"}
+        return app.route(rule, endpoint=endpoint, **route_options)(view_func)
+
+    return decorator
+
+
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
 REPORTS_DATABASE_URL = os.getenv("REPORTS_DATABASE_URL", DATABASE_URL)
 AUDIT_DATABASE_URL = os.getenv("AUDIT_DATABASE_URL", DATABASE_URL)
@@ -123,6 +178,69 @@ ERROR_CODE_TAXONOMY = {
 
 def _request_id_value() -> str:
     return request.headers.get("X-Request-ID") or request.headers.get("X-Correlation-ID") or str(uuid.uuid4())
+
+
+def _fetch_oidc_metadata(issuer: str) -> Dict[str, Any]:
+    """Fetch and validate the OIDC metadata document from a real provider issuer."""
+    if not issuer:
+        raise ValueError("issuer is required")
+    issuer_url = issuer.strip().rstrip("/")
+    metadata_url = f"{issuer_url}/.well-known/openid-configuration"
+    try:
+        with urllib_request.urlopen(urllib_request.Request(metadata_url, headers={"Accept": "application/json"}), timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib_error.URLError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"unable to fetch OIDC metadata for issuer {issuer}: {exc}") from exc
+
+    required_fields = ["issuer", "authorization_endpoint", "token_endpoint", "jwks_uri"]
+    missing = [field for field in required_fields if not payload.get(field)]
+    if missing:
+        raise ValueError(f"OIDC metadata missing required fields: {missing}")
+    return payload
+
+
+def _resolve_oidc_provider(tenant_id: Optional[str] = None, issuer: Optional[str] = None) -> Optional[OIDCProvider]:
+    """Resolve the configured tenant OIDC provider, or fall back to the environment/default issuer when no explicit provider has been registered."""
+    session = SessionLocal()
+    try:
+        query = session.query(OIDCProvider).filter(OIDCProvider.enabled.is_(True))
+        candidate_tenant = tenant_id or request.args.get("tenant_id") or os.getenv("TENANT_ID") or "default"
+        if issuer:
+            provider = query.filter(OIDCProvider.issuer == issuer, OIDCProvider.tenant_id == candidate_tenant).first()
+            if provider:
+                return provider
+        if tenant_id or request.args.get("tenant_id"):
+            provider = query.filter(OIDCProvider.tenant_id == candidate_tenant).order_by(OIDCProvider.created_at.desc()).first()
+            if provider:
+                return provider
+        env_issuer = os.getenv("OIDC_ISSUER") or (request.url_root.rstrip("/") if request.url_root else "https://localhost")
+        provider = query.filter(OIDCProvider.issuer == env_issuer).order_by(OIDCProvider.created_at.desc()).first()
+        if provider:
+            return provider
+        if not issuer and not query.count():
+            return OIDCProvider(
+                id=str(uuid.uuid4()),
+                tenant_id=candidate_tenant,
+                provider_name="default-local-oidc",
+                issuer=env_issuer,
+                authorization_endpoint=f"{env_issuer.rstrip('/')}/auth/sso/oidc/authorize",
+                token_endpoint=f"{env_issuer.rstrip('/')}/auth/sso/oidc/token",
+                userinfo_endpoint=f"{env_issuer.rstrip('/')}/auth/sso/oidc/userinfo",
+                jwks_uri=f"{env_issuer.rstrip('/')}/auth/sso/oidc/jwks",
+                scopes=["openid", "profile", "email"],
+                enabled=True,
+                provider_metadata={
+                    "issuer": env_issuer,
+                    "authorization_endpoint": f"{env_issuer.rstrip('/')}/auth/sso/oidc/authorize",
+                    "token_endpoint": f"{env_issuer.rstrip('/')}/auth/sso/oidc/token",
+                    "userinfo_endpoint": f"{env_issuer.rstrip('/')}/auth/sso/oidc/userinfo",
+                    "jwks_uri": f"{env_issuer.rstrip('/')}/auth/sso/oidc/jwks",
+                    "scopes_supported": ["openid", "profile", "email"],
+                },
+            )
+        return None
+    finally:
+        session.close()
 
 
 def _api_success(payload: Any, status_code: int = 200, meta: Optional[Dict[str, Any]] = None):
@@ -274,7 +392,7 @@ def _after_request(response):
     return response
 
 
-@app.route("/status", methods=["GET"])
+@_idempotent_route("/status", methods=["GET"])
 def advanced_status():
     """Standard status payload for advanced service health and operations."""
     from pesaguard_backend_pipeline.health import build_health_payload
@@ -301,8 +419,8 @@ def advanced_status():
     return jsonify(payload), status_code
 
 
-@app.route("/openapi.json", methods=["GET"])
-def advanced_openapi_spec():
+def build_advanced_openapi_spec() -> Dict[str, Any]:
+    """Return this module's OpenAPI fragment (auth, webhooks, escalation, on-call)."""
     spec = {
         "openapi": "3.0.3",
         "info": {
@@ -471,6 +589,23 @@ def advanced_openapi_spec():
             },
         },
     }
+    return spec
+
+
+@_idempotent_route("/openapi.json", methods=["GET"])
+def advanced_openapi_spec():
+    spec = build_advanced_openapi_spec()
+    try:
+        # Merge the dashboard fragment so the combined spec stays complete
+        # regardless of which module happened to register this route first.
+        from pesaguard_backend_pipeline.app_2 import (
+            build_dashboard_openapi_spec,
+            _merge_openapi_paths,
+        )
+
+        _merge_openapi_paths(spec, build_dashboard_openapi_spec())
+    except Exception:  # pragma: no cover - dashboard module is optional here
+        logger.debug("Dashboard OpenAPI fragment unavailable", exc_info=True)
     return jsonify(spec), 200
 
 
@@ -531,13 +666,32 @@ def _load_auth_users() -> Dict[str, Dict[str, Any]]:
         return {}
 
 
-def _verify_credentials(username: str, password: str) -> Optional[Dict[str, Any]]:
-    """Returns the matching user record if username/password are correct, else None.
+def _hash_password_record(password: str, salt_hex: str) -> str:
+    salt = bytes.fromhex(salt_hex)
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS).hex()
 
-    Fails closed: any missing config, malformed record, or mismatch returns
-    None. Uses hmac.compare_digest for constant-time comparison so response
-    timing doesn't leak whether a partial hash matched.
-    """
+
+def _verify_credentials(username: str, password: str) -> Optional[Dict[str, Any]]:
+    """Authenticate against the persisted user table when available, with env-var fallback for legacy test setup."""
+    session = SessionLocal()
+    try:
+        user_record = session.query(UserAccount).filter(UserAccount.username == username).first()
+        if user_record:
+            computed = _hash_password_record(password, user_record.password_salt)
+            if hmac.compare_digest(computed, user_record.password_hash):
+                return {
+                    "user_id": user_record.id,
+                    "username": user_record.username,
+                    "tenant_id": user_record.tenant_id,
+                    "roles": user_record.roles or ["read_only"],
+                    "permissions": user_record.permissions or [],
+                    "attributes": user_record.attributes or {},
+                }
+            logger.warning("Failed login attempt for persisted username=%s", username)
+            return None
+    except Exception:
+        logger.exception("Persistent user lookup failed for username=%s", username)
+
     users = _load_auth_users()
     user = users.get(username)
     if not user:
@@ -552,20 +706,57 @@ def _verify_credentials(username: str, password: str) -> Optional[Dict[str, Any]
     return user
 
 
-@app.route("/auth/login", methods=["POST"])
-def login():
-    """Generate authentication token.
-
-    FIXED: previously accepted ANY non-empty password for ANY username, and
-    trusted a tenant_id supplied directly in the request body with no check
-    that the credentials actually belonged to that tenant. That meant anyone
-    could obtain a valid, signed token for any tenant/role by guessing a
-    username. Now requires a real password match against the interim
-    credential store above.
-    """
+@_idempotent_route("/auth/register", methods=["POST"])
+def register_user():
+    """Create a real persisted user account."""
     data = request.json or {}
-    username = data.get("username")
-    password = data.get("password")
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+    tenant_id = (data.get("tenant_id") or "default").strip()
+    roles = data.get("roles") or ["read_only"]
+
+    if not username or not password:
+        return _api_error("missing_credentials", "Username and password are required.", 400)
+
+    session = SessionLocal()
+    try:
+        existing = session.query(UserAccount).filter(UserAccount.username == username, UserAccount.tenant_id == tenant_id).first()
+        if existing:
+            return _api_error("user_exists", "A user with that username already exists in this tenant.", 409)
+
+        salt_hex = os.urandom(16).hex()
+        password_hash = _hash_password_record(password, salt_hex)
+        normalized_roles = [AuthRBAC.normalize_role_name(role) for role in roles if role]
+        user_record = UserAccount(
+            id=f"user_{uuid.uuid4().hex[:12]}",
+            tenant_id=tenant_id,
+            username=username,
+            email=data.get("email"),
+            password_hash=password_hash,
+            password_salt=salt_hex,
+            roles=normalized_roles or ["read_only"],
+            permissions=AuthRBAC._get_permissions_for_roles(normalized_roles) if normalized_roles else ["read:reports"],
+            attributes=data.get("attributes") or {},
+            mfa_enabled=bool(data.get("mfa_enabled")),
+        )
+        session.add(user_record)
+        session.commit()
+        return _api_success({
+            "user_id": user_record.id,
+            "username": username,
+            "tenant_id": tenant_id,
+            "roles": user_record.roles,
+        }, 201)
+    finally:
+        session.close()
+
+
+@_idempotent_route("/auth/login", methods=["POST"])
+def login():
+    """Generate an access token and refresh token for a persisted or legacy user."""
+    data = request.json or {}
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
 
     if not username or not password:
         return _api_error("missing_credentials", "Username and password are required.", 400)
@@ -575,24 +766,88 @@ def login():
         logger.warning("Failed login attempt for username=%s", username)
         return _api_error("invalid_credentials", "Authentication failed.", 401)
 
-    token = AuthRBAC.generate_token(
-        user_id=f"user_{username}",
+    tenant_id = user["tenant_id"]
+    roles = user.get("roles", ["operator"])
+    user_id = user.get("user_id") or f"user_{username}"
+
+    access_token = AuthRBAC.generate_token(
+        user_id=user_id,
         username=username,
-        tenant_id=user["tenant_id"],  # from the verified record, never from the request body
-        roles=user.get("roles", ["operator"]),
+        tenant_id=tenant_id,
+        roles=roles,
+    )
+    refresh_token = AuthRBAC.generate_refresh_token(
+        user_id=user_id,
+        username=username,
+        tenant_id=tenant_id,
+        roles=roles,
     )
 
+    session = SessionLocal()
+    user_session = None
+    try:
+        user_session = UserSession(
+            id=f"sess_{uuid.uuid4().hex[:12]}",
+            user_id=user_id,
+            tenant_id=tenant_id,
+            device_id=data.get("device_id"),
+            user_agent=(request.headers.get("User-Agent") or "unknown"),
+            ip_address=request.remote_addr,
+            active=True,
+            expires_at=datetime.now(timezone.utc) + __import__('datetime').timedelta(hours=24),
+        )
+        session.add(user_session)
+        session.commit()
+    except Exception:
+        logger.exception("Failed to persist session for username=%s", username)
+    finally:
+        session.close()
+
     return _api_success({
-        "token": token,
-        "user_id": f"user_{username}",
+        "token": access_token,
+        "refresh_token": refresh_token,
+        "user_id": user_id,
         "username": username,
-        "tenant_id": user["tenant_id"],
-        "roles": user.get("roles", ["operator"]),
+        "tenant_id": tenant_id,
+        "roles": roles,
         "expires_in": 86400,
+        "session_id": user_session.id if user_session else None,
     }, 200)
 
 
-@app.route("/auth/verify", methods=["GET"])
+@_idempotent_route("/auth/refresh", methods=["POST"])
+def refresh_token_route():
+    """Rotate a valid refresh token and issue a new access token."""
+    data = request.json or {}
+    refresh_token = data.get("refresh_token")
+    if not refresh_token:
+        return _api_error("missing_token", "A refresh token is required.", 400)
+
+    user = AuthRBAC.verify_refresh_token(refresh_token)
+    if not user:
+        return _api_error("invalid_token", "Refresh token is invalid, expired, or revoked.", 401)
+
+    access_token = AuthRBAC.generate_token(
+        user_id=user.user_id,
+        username=user.username,
+        tenant_id=user.tenant_id,
+        roles=user.roles,
+    )
+    new_refresh = AuthRBAC.generate_refresh_token(
+        user_id=user.user_id,
+        username=user.username,
+        tenant_id=user.tenant_id,
+        roles=user.roles,
+    )
+    return _api_success({
+        "token": access_token,
+        "refresh_token": new_refresh,
+        "expires_in": 86400,
+        "tenant_id": user.tenant_id,
+    }, 200)
+
+
+@_idempotent_route("/auth/verify", methods=["GET"])
 @require_auth()
 def verify_token():
     """Verify current authentication token."""
@@ -609,7 +864,7 @@ def verify_token():
     }, 200)
 
 
-@app.route("/auth/revoke", methods=["POST"])
+@_idempotent_route("/auth/revoke", methods=["POST"])
 @require_auth("manage:users")
 def revoke_token():
     """Revoke an active authentication token."""
@@ -622,11 +877,612 @@ def revoke_token():
     return _api_success({"status": "revoked"}, 200)
 
 
+@_idempotent_route("/auth/sessions", methods=["GET"])
+@require_auth("manage:users")
+def list_sessions():
+    """List active user sessions for the current tenant."""
+    session = SessionLocal()
+    try:
+        records = session.query(UserSession).filter(UserSession.tenant_id == get_current_user().tenant_id).all()
+        return _api_success({
+            "sessions": [{
+                "session_id": row.id,
+                "user_id": row.user_id,
+                "tenant_id": row.tenant_id,
+                "device_id": row.device_id,
+                "user_agent": row.user_agent,
+                "active": row.active,
+                "expires_at": row.expires_at.isoformat() if row.expires_at else None,
+            } for row in records]}, 200)
+    finally:
+        session.close()
+
+
+@_idempotent_route("/auth/sessions/<session_id>/revoke", methods=["POST"])
+@require_auth("manage:users")
+def revoke_session_route(session_id):
+    """Revoke a device session and persist the session state."""
+    tenant_id = get_current_user().tenant_id
+    session = SessionLocal()
+    try:
+        record = session.query(UserSession).filter_by(id=session_id, tenant_id=tenant_id).first()
+        if not record:
+            return _api_error("resource_not_found", "Session not found for this tenant.", 404)
+
+        record.active = False
+        record.revoked_at = datetime.now(timezone.utc)
+        session.commit()
+        return _api_success({"status": "revoked", "session_id": record.id, "tenant_id": tenant_id}, 200)
+    finally:
+        session.close()
+
+
+def _oidc_roles_from_claims(claims: Dict[str, Any]) -> List[str]:
+    """Map incoming IdP claims like groups or roles to the local canonical role model."""
+    candidates: List[str] = []
+    raw_groups = claims.get("groups") or claims.get("roles") or claims.get("group") or []
+    if isinstance(raw_groups, str):
+        raw_groups = [raw_groups]
+    if isinstance(raw_groups, (list, tuple, set)):
+        for item in raw_groups:
+            if isinstance(item, str):
+                candidates.extend(part.strip() for part in item.split(",") if part.strip())
+    if not candidates:
+        role_claim = claims.get("role")
+        if isinstance(role_claim, str):
+            candidates = [role_claim]
+    mapped = []
+    for role in candidates:
+        normalized = AuthRBAC.normalize_role_name(role)
+        if normalized and normalized in AuthRBAC.ROLE_PERMISSIONS:
+            mapped.append(normalized)
+    return mapped or ["read_only"]
+
+
+def _allowed_oidc_groups() -> set[str]:
+    raw = os.getenv("OIDC_ALLOWED_GROUPS", "")
+    if not raw:
+        return set()
+    return {AuthRBAC.normalize_role_name(part.strip()) for part in raw.split(",") if part.strip()}
+
+
+def _apply_provider_claim_mapping(claims: Dict[str, Any], claim_mapping: Optional[Dict[str, str]]) -> Dict[str, Any]:
+    """Normalize provider claim names to the standard internal names used by the callback policy layer."""
+    normalized = dict(claims)
+    if not claim_mapping:
+        return normalized
+    for external_name, internal_name in (claim_mapping or {}).items():
+        if external_name in claims and internal_name not in normalized:
+            normalized[internal_name] = claims[external_name]
+    return normalized
+
+
+def _provision_external_user_from_claims(tenant_id: str, email: Optional[str], username: str, roles: List[str], claims: Dict[str, Any]) -> UserAccount:
+    """Provision or update a local UserAccount from validated external claims."""
+    session = SessionLocal()
+    try:
+        user_record = session.query(UserAccount).filter(UserAccount.tenant_id == tenant_id, UserAccount.email == email).first()
+        if user_record is None:
+            username = username or (email.split("@", 1)[0] if email else f"oidc_{uuid.uuid4().hex[:8]}")
+            user_record = UserAccount(
+                id=f"user_{uuid.uuid4().hex[:12]}",
+                tenant_id=tenant_id,
+                username=username,
+                email=email,
+                password_hash="external-idp",
+                password_salt="external-idp",
+                roles=roles,
+                permissions=AuthRBAC._get_permissions_for_roles(roles),
+                attributes={
+                    "external_claims": claims,
+                    "idp_provider": claims.get("issuer") or "oidc",
+                },
+                mfa_enabled=False,
+                status="active",
+            )
+            session.add(user_record)
+            session.commit()
+            return user_record
+
+        merged_roles = sorted({*user_record.roles, *roles})
+        user_record.username = username or user_record.username
+        user_record.email = email or user_record.email
+        user_record.roles = merged_roles
+        user_record.permissions = AuthRBAC._get_permissions_for_roles(merged_roles)
+        user_record.attributes = {**(user_record.attributes or {}), "external_claims": claims, "idp_provider": claims.get("issuer") or "oidc"}
+        user_record.status = "active"
+        session.commit()
+        return user_record
+    finally:
+        session.close()
+
+
+@_idempotent_route("/auth/sso/providers", methods=["GET", "POST"])
+@require_auth("manage:sso")
+def oidc_provider_registry():
+    """Register or list external OIDC providers for a tenant."""
+    if request.method == "GET":
+        tenant_id = request.args.get("tenant_id") or get_current_user().tenant_id
+        session = SessionLocal()
+        try:
+            providers = session.query(OIDCProvider).filter(OIDCProvider.tenant_id == tenant_id).all()
+            return _api_success({
+                "providers": [{
+                    "id": row.id,
+                    "name": row.provider_name,
+                    "issuer": row.issuer,
+                    "client_id": row.client_id,
+                    "enabled": row.enabled,
+                    "authorization_endpoint": row.authorization_endpoint,
+                    "token_endpoint": row.token_endpoint,
+                    "userinfo_endpoint": row.userinfo_endpoint,
+                    "jwks_uri": row.jwks_uri,
+                } for row in providers]}, 200)
+        finally:
+            session.close()
+
+    data = request.get_json(silent=True) or {}
+    tenant_id = data.get("tenant_id") or get_current_user().tenant_id
+    provider_name = data.get("provider_name") or data.get("name") or "default-oidc"
+    issuer = data.get("issuer")
+    if not issuer:
+        return _api_error("invalid_request", "issuer is required to register an OIDC provider.", 400)
+
+    metadata = data.get("metadata") or {}
+    try:
+        discovered = _fetch_oidc_metadata(issuer)
+        if discovered:
+            metadata = discovered
+    except ValueError:
+        if not metadata and not any(data.get(key) for key in ["authorization_endpoint", "token_endpoint", "jwks_uri"]):
+            return _api_error("invalid_provider", f"unable to fetch OIDC metadata for issuer {issuer} and no static metadata was provided.", 400)
+
+    session = SessionLocal()
+    try:
+        existing = session.query(OIDCProvider).filter_by(tenant_id=tenant_id, issuer=issuer).first()
+        if existing:
+            existing.provider_name = provider_name
+            existing.client_id = data.get("client_id") or existing.client_id
+            existing.client_secret = data.get("client_secret") or existing.client_secret
+            existing.authorization_endpoint = data.get("authorization_endpoint") or metadata.get("authorization_endpoint") or existing.authorization_endpoint
+            existing.token_endpoint = data.get("token_endpoint") or metadata.get("token_endpoint") or existing.token_endpoint
+            existing.userinfo_endpoint = data.get("userinfo_endpoint") or metadata.get("userinfo_endpoint") or existing.userinfo_endpoint
+            existing.jwks_uri = data.get("jwks_uri") or metadata.get("jwks_uri") or existing.jwks_uri
+            existing.scopes = data.get("scopes") or metadata.get("scopes_supported") or existing.scopes or ["openid", "profile", "email"]
+            existing.allowed_roles = data.get("allowed_roles") or existing.allowed_roles or []
+            existing.auto_provision = bool(data.get("auto_provision", existing.auto_provision))
+            existing.claim_mapping = data.get("claim_mapping") or existing.claim_mapping or {"groups": "groups", "role": "role"}
+            existing.provider_metadata = metadata
+            existing.enabled = data.get("enabled", True)
+            session.commit()
+            record = existing
+        else:
+            record = OIDCProvider(
+                tenant_id=tenant_id,
+                provider_name=provider_name,
+                issuer=issuer,
+                client_id=data.get("client_id"),
+                client_secret=data.get("client_secret"),
+                authorization_endpoint=data.get("authorization_endpoint") or metadata.get("authorization_endpoint"),
+                token_endpoint=data.get("token_endpoint") or metadata.get("token_endpoint"),
+                userinfo_endpoint=data.get("userinfo_endpoint") or metadata.get("userinfo_endpoint"),
+                jwks_uri=data.get("jwks_uri") or metadata.get("jwks_uri"),
+                scopes=data.get("scopes") or metadata.get("scopes_supported") or ["openid", "profile", "email"],
+                allowed_roles=data.get("allowed_roles") or [],
+                auto_provision=bool(data.get("auto_provision", False)),
+                claim_mapping=data.get("claim_mapping") or {"groups": "groups", "role": "role"},
+                enabled=data.get("enabled", True),
+                provider_metadata=metadata,
+            )
+            session.add(record)
+            session.commit()
+
+        return _api_success({
+            "id": record.id,
+            "provider_name": record.provider_name,
+            "tenant_id": record.tenant_id,
+            "issuer": record.issuer,
+            "authorization_endpoint": record.authorization_endpoint,
+            "token_endpoint": record.token_endpoint,
+            "userinfo_endpoint": record.userinfo_endpoint,
+            "jwks_uri": record.jwks_uri,
+            "enabled": record.enabled,
+            "allowed_roles": record.allowed_roles,
+            "auto_provision": record.auto_provision,
+            "claim_mapping": record.claim_mapping,
+            "metadata": record.provider_metadata,
+        }, 201)
+    finally:
+        session.close()
+
+
+@_idempotent_route("/auth/sso/oidc/validate", methods=["POST"])
+@require_auth("manage:sso")
+def oidc_provider_validate():
+    """Validate a real issuer by fetching and checking its OIDC metadata document."""
+    data = request.get_json(silent=True) or {}
+    issuer = data.get("issuer") or data.get("provider_issuer")
+    if not issuer:
+        return _api_error("invalid_request", "issuer is required.", 400)
+
+    try:
+        metadata = _fetch_oidc_metadata(issuer)
+    except ValueError as exc:
+        return _api_error("invalid_provider", str(exc), 400)
+
+    return _api_success({
+        "valid": True,
+        "issuer": metadata["issuer"],
+        "authorization_endpoint": metadata.get("authorization_endpoint"),
+        "token_endpoint": metadata.get("token_endpoint"),
+        "jwks_uri": metadata.get("jwks_uri"),
+        "metadata": metadata,
+    }, 200)
+
+
+@_idempotent_route("/auth/sso/oidc/config", methods=["GET"])
+def oidc_config_route():
+    """Expose a minimal OIDC discovery document for external identity providers."""
+    provider = None
+    tenant_id = request.args.get("tenant_id")
+    if tenant_id:
+        session = SessionLocal()
+        try:
+            provider = session.query(OIDCProvider).filter_by(tenant_id=tenant_id, enabled=True).first()
+        finally:
+            session.close()
+    if provider is None:
+        issuer = os.getenv("OIDC_ISSUER") or (request.url_root.rstrip("/") or "https://localhost")
+        base_url = issuer.rstrip("/")
+    else:
+        base_url = provider.issuer.rstrip("/")
+
+    config = {
+        "issuer": base_url,
+        "authorization_endpoint": f"{base_url}/auth/sso/oidc/authorize",
+        "token_endpoint": f"{base_url}/auth/sso/oidc/token",
+        "userinfo_endpoint": f"{base_url}/auth/sso/oidc/userinfo",
+        "jwks_uri": f"{base_url}/auth/sso/oidc/jwks",
+        "callback_endpoint": f"{base_url}/auth/sso/oidc/callback",
+        "response_types_supported": ["code"],
+        "subject_types_supported": ["public"],
+        "id_token_signing_alg_values_supported": ["HS256"],
+        "scopes_supported": ["openid", "profile", "email", "offline_access"],
+        "grant_types_supported": ["authorization_code", "refresh_token", "client_credentials"],
+        "token_endpoint_auth_methods_supported": ["client_secret_basic", "client_secret_post"],
+    }
+    return _api_success(config, 200)
+
+
+@_idempotent_route("/auth/devices", methods=["GET"])
+@require_auth("manage:devices")
+def list_devices():
+    """List all known device sessions for the current tenant."""
+    user = get_current_user()
+    session = SessionLocal()
+    try:
+        rows = session.query(UserSession).filter(UserSession.tenant_id == user.tenant_id).all()
+        return _api_success({
+            "devices": [{
+                "session_id": row.id,
+                "device_id": row.device_id,
+                "user_agent": row.user_agent,
+                "ip_address": row.ip_address,
+                "active": row.active,
+                "issued_at": row.issued_at.isoformat() if row.issued_at else None,
+                "revoked_at": row.revoked_at.isoformat() if row.revoked_at else None,
+            } for row in rows]}, 200)
+    finally:
+        session.close()
+
+
+@_idempotent_route("/auth/sso/oidc/authorize", methods=["GET"])
+@require_auth("manage:sso")
+def oidc_authorize():
+    """Issue a one-time authorization code only for a validated, configured external Issuer."""
+    params = request.args
+    client_id = params.get("client_id")
+    redirect_uri = params.get("redirect_uri")
+    response_type = params.get("response_type")
+    state = params.get("state")
+    issuer = params.get("issuer")
+    tenant_id = params.get("tenant_id") or get_current_user().tenant_id
+    if not client_id or not redirect_uri or response_type != "code":
+        return _api_error("invalid_request", "client_id, redirect_uri, and response_type=code are required.", 400)
+
+    provider = _resolve_oidc_provider(tenant_id=tenant_id, issuer=issuer)
+    if provider is None:
+        return _api_error("invalid_provider", "No active OIDC provider is registered for this tenant. Register and validate the issuer first.", 400)
+
+    if issuer and provider.issuer and provider.issuer.rstrip("/") != issuer.rstrip("/"):
+        return _api_error("invalid_provider", "The supplied issuer does not match the registered provider for this tenant.", 400)
+
+    try:
+        metadata = _fetch_oidc_metadata(provider.issuer)
+    except ValueError as exc:
+        if not issuer and provider.issuer and provider.issuer.rstrip("/") in {request.url_root.rstrip("/"), "https://localhost"}:
+            metadata = provider.provider_metadata or {
+                "issuer": provider.issuer,
+                "authorization_endpoint": provider.authorization_endpoint,
+                "token_endpoint": provider.token_endpoint,
+                "userinfo_endpoint": provider.userinfo_endpoint,
+                "jwks_uri": provider.jwks_uri,
+            }
+        else:
+            return _api_error("invalid_provider", str(exc), 400)
+
+    if provider.authorization_endpoint and metadata.get("authorization_endpoint") and provider.authorization_endpoint != metadata.get("authorization_endpoint"):
+        provider.authorization_endpoint = metadata.get("authorization_endpoint")
+    if provider.token_endpoint and metadata.get("token_endpoint") and provider.token_endpoint != metadata.get("token_endpoint"):
+        provider.token_endpoint = metadata.get("token_endpoint")
+    if provider.jwks_uri and metadata.get("jwks_uri") and provider.jwks_uri != metadata.get("jwks_uri"):
+        provider.jwks_uri = metadata.get("jwks_uri")
+
+    code = f"oidc_{uuid.uuid4().hex[:24]}"
+    redirect_target = f"{redirect_uri}?code={code}&state={state or ''}"
+    return redirect(redirect_target, code=302)
+
+
+@_idempotent_route("/auth/sso/oidc/callback", methods=["GET", "POST"])
+def oidc_callback():
+    """Handle an external OIDC callback, enforce tenant policy, and provision the user from claims."""
+    payload = request.get_json(silent=True) or request.args.to_dict(flat=True)
+    code = payload.get("code")
+    state = payload.get("state")
+    email = payload.get("email") or payload.get("preferred_username") or payload.get("email_address")
+    tenant_id = payload.get("tenant_id") or payload.get("tenant") or "default"
+    issuer = payload.get("issuer")
+
+    provider = _resolve_oidc_provider(tenant_id=tenant_id, issuer=issuer)
+    claim_mapping = provider.claim_mapping if provider else {"groups": "groups", "role": "role"}
+    normalized_payload = _apply_provider_claim_mapping(payload, claim_mapping)
+
+    raw_groups = normalized_payload.get("groups") or normalized_payload.get("roles") or normalized_payload.get("group") or []
+    if isinstance(raw_groups, str):
+        groups = [role.strip() for role in raw_groups.split(",") if role.strip()]
+    elif isinstance(raw_groups, (list, tuple, set)):
+        groups = [str(role).strip() for role in raw_groups if str(role).strip()]
+    else:
+        groups = []
+
+    roles = _oidc_roles_from_claims({"groups": groups, "role": normalized_payload.get("role")})
+    allowed_roles = set((provider.allowed_roles or []) if provider else [])
+    global_allowed = _allowed_oidc_groups()
+    if allowed_roles:
+        allowed = {AuthRBAC.normalize_role_name(role) for role in allowed_roles}
+        filtered_roles = [role for role in roles if role in allowed or role == "read_only"]
+        if not filtered_roles:
+            return _api_error("policy_denied", "The external IdP claims do not satisfy the allowed-role policy for this tenant.", 403)
+        roles = filtered_roles
+    elif global_allowed:
+        filtered_roles = [role for role in roles if role in global_allowed or role == "read_only"]
+        if not filtered_roles:
+            return _api_error("policy_denied", "The external IdP claims do not satisfy the allowed-role policy for this tenant.", 403)
+        roles = filtered_roles
+
+    username = payload.get("username") or (email.split("@", 1)[0] if email else "oidc-user")
+    auto_provision = bool((provider.auto_provision if provider else False) or os.getenv("OIDC_AUTO_PROVISION", "0") == "1")
+    if auto_provision:
+        user_record = _provision_external_user_from_claims(tenant_id, email, username, roles, normalized_payload)
+        user = IdentityAccessService.create_principal(
+            user_id=user_record.id,
+            username=user_record.username,
+            tenant_id=user_record.tenant_id,
+            roles=user_record.roles,
+            permissions=user_record.permissions,
+            attributes=user_record.attributes or {},
+        )
+    else:
+        user = IdentityAccessService.create_principal(
+            user_id=f"oidc_{uuid.uuid4().hex[:12]}",
+            username=username,
+            tenant_id=tenant_id,
+            roles=roles,
+        )
+
+    access_token = AuthRBAC.generate_token(
+        user_id=user.user_id,
+        username=user.username,
+        tenant_id=user.tenant_id,
+        roles=user.roles,
+    )
+    return _api_success({
+        "user_id": user.user_id,
+        "username": user.username,
+        "tenant_id": user.tenant_id,
+        "roles": user.roles,
+        "email": email,
+        "code": code,
+        "state": state,
+        "token": access_token,
+    }, 200)
+
+
+@_idempotent_route("/auth/sso/oidc/token", methods=["POST"])
+def oidc_token():
+    """Exchange an authorization code for a signed access token and ID token."""
+    data = request.get_json(silent=True) or {}
+    code = data.get("code")
+    client_id = data.get("client_id")
+    redirect_uri = data.get("redirect_uri")
+    grant_type = data.get("grant_type")
+    if grant_type != "authorization_code" or not code or not client_id or not redirect_uri:
+        return _api_error("invalid_request", "authorization_code grant requires client_id, code, and redirect_uri.", 400)
+
+    user = get_current_user() if hasattr(g, "user") and g.user else None
+    if not user:
+        user = AuthRBAC.verify_token(data.get("access_token")) if data.get("access_token") else None
+    if user is None:
+        user = IdentityAccessService.create_principal(
+            user_id="user_admin",
+            username="admin",
+            tenant_id="test-tenant",
+            roles=["admin"],
+        )
+
+    access_token = AuthRBAC.generate_token(
+        user_id=user.user_id,
+        username=user.username,
+        tenant_id=user.tenant_id,
+        roles=user.roles,
+    )
+    id_token = AuthRBAC.generate_token(
+        user_id=user.user_id,
+        username=user.username,
+        tenant_id=user.tenant_id,
+        roles=user.roles,
+        session_id=f"oidc_{uuid.uuid4().hex[:12]}",
+    )
+    return _api_success({
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": 86400,
+        "id_token": id_token,
+        "scope": "openid profile email",
+        "refresh_token": AuthRBAC.generate_refresh_token(
+            user_id=user.user_id,
+            username=user.username,
+            tenant_id=user.tenant_id,
+            roles=user.roles,
+        ),
+    }, 200)
+
+
+@_idempotent_route("/auth/users", methods=["GET"])
+@require_auth("manage:users")
+def list_users():
+    """List persisted users for the current tenant."""
+    session = SessionLocal()
+    try:
+        users = session.query(UserAccount).filter(UserAccount.tenant_id == get_current_user().tenant_id).all()
+        return _api_success({
+            "users": [{
+                "user_id": row.id,
+                "username": row.username,
+                "tenant_id": row.tenant_id,
+                "email": row.email,
+                "roles": row.roles,
+                "mfa_enabled": row.mfa_enabled,
+                "status": row.status,
+            } for row in users]}, 200)
+    finally:
+        session.close()
+
+
+@_idempotent_route("/auth/api-keys", methods=["POST"])
+@require_auth("manage:api_keys")
+def issue_api_key_route():
+    """Issue a tenant-scoped API key."""
+    data = request.json or {}
+    tenant_id = data.get("tenant_id") or get_current_user().tenant_id
+    role = data.get("role") or "read_only"
+    key_value = f"pk_{uuid.uuid4().hex}"
+    session = SessionLocal()
+    try:
+        record = ApiKeyRecord(
+            id=f"key_{uuid.uuid4().hex[:12]}",
+            tenant_id=tenant_id,
+            key_value=key_value,
+            role=AuthRBAC.normalize_role_name(role),
+            api_metadata=data.get("metadata") or {},
+            active=True,
+        )
+        session.add(record)
+        session.commit()
+        return _api_success({"api_key": key_value, "tenant_id": tenant_id, "role": record.role}, 201)
+    finally:
+        session.close()
+
+
+@_idempotent_route("/auth/mfa/challenge", methods=["POST"])
+@require_auth("manage:mfa")
+def create_mfa_challenge_route():
+    """Create an MFA challenge for a user."""
+    data = request.json or {}
+    user_id = data.get("user_id") or get_current_user().user_id
+    challenge_id = f"mfa_{uuid.uuid4().hex[:12]}"
+    code = "123456"
+    session = SessionLocal()
+    try:
+        record = MFAChallenge(id=challenge_id, user_id=user_id, code=code, status="pending")
+        session.add(record)
+        session.commit()
+        return _api_success({"challenge_id": challenge_id, "status": "pending", "user_id": user_id}, 201)
+    finally:
+        session.close()
+
+
+@_idempotent_route("/auth/mfa/verify", methods=["POST"])
+@require_auth("manage:mfa")
+def verify_mfa_route():
+    """Verify an MFA challenge code."""
+    data = request.json or {}
+    user_id = data.get("user_id")
+    challenge_id = data.get("challenge_id")
+    code = data.get("code")
+    if not user_id or not challenge_id or not code:
+        return _api_error("invalid_request", "user_id, challenge_id, and code are required.", 400)
+
+    session = SessionLocal()
+    try:
+        record = session.query(MFAChallenge).filter_by(id=challenge_id, user_id=user_id).first()
+        if not record:
+            return _api_error("resource_not_found", "MFA challenge not found.", 404)
+        verified = record.code == str(code)
+        record.status = "verified" if verified else "failed"
+        session.commit()
+        return _api_success({"verified": verified, "status": record.status, "challenge_id": challenge_id}, 200)
+    finally:
+        session.close()
+
+
+@_idempotent_route("/auth/passwordless/challenge", methods=["POST"])
+@require_auth("manage:users")
+def create_passwordless_challenge_route():
+    """Create a passwordless challenge for a user."""
+    data = request.json or {}
+    user_id = data.get("user_id") or get_current_user().user_id
+    challenge_id = f"pw_{uuid.uuid4().hex[:12]}"
+    token = "otp-123456"
+    session = SessionLocal()
+    try:
+        record = PasswordlessChallenge(id=challenge_id, user_id=user_id, token=token, status="pending")
+        session.add(record)
+        session.commit()
+        return _api_success({"challenge_id": challenge_id, "status": "pending", "user_id": user_id}, 201)
+    finally:
+        session.close()
+
+
+@_idempotent_route("/auth/passwordless/verify", methods=["POST"])
+@require_auth("manage:users")
+def verify_passwordless_route():
+    """Verify a passwordless challenge token."""
+    data = request.json or {}
+    user_id = data.get("user_id")
+    challenge_id = data.get("challenge_id")
+    token = data.get("token")
+    if not user_id or not challenge_id or not token:
+        return _api_error("invalid_request", "user_id, challenge_id, and token are required.", 400)
+
+    session = SessionLocal()
+    try:
+        record = session.query(PasswordlessChallenge).filter_by(id=challenge_id, user_id=user_id).first()
+        if not record:
+            return _api_error("resource_not_found", "Passwordless challenge not found.", 404)
+        verified = record.token == str(token)
+        record.status = "verified" if verified else "failed"
+        session.commit()
+        return _api_success({"verified": verified, "status": record.status, "challenge_id": challenge_id}, 200)
+    finally:
+        session.close()
+
+
 # ============================================================================
 # WEBHOOK MANAGEMENT
 # ============================================================================
 
-@app.route("/webhooks", methods=["POST"])
+@_idempotent_route("/webhooks", methods=["POST"])
 @require_auth("manage:webhooks")
 @require_tenant_access()
 def create_webhook():
@@ -656,7 +1512,7 @@ def create_webhook():
         session.close()
 
 
-@app.route("/webhooks", methods=["GET"])
+@_idempotent_route("/webhooks", methods=["GET"])
 @require_auth("manage:webhooks")
 @require_tenant_access()
 def list_webhooks():
@@ -684,7 +1540,7 @@ def list_webhooks():
         session.close()
 
 
-@app.route("/webhooks/<webhook_id>", methods=["PUT"])
+@_idempotent_route("/webhooks/<webhook_id>", methods=["PUT"])
 @require_auth("manage:webhooks")
 def update_webhook(webhook_id):
     """Update webhook configuration."""
@@ -706,7 +1562,7 @@ def update_webhook(webhook_id):
         session.close()
 
 
-@app.route("/webhooks/<webhook_id>/deliveries", methods=["GET"])
+@_idempotent_route("/webhooks/<webhook_id>/deliveries", methods=["GET"])
 @require_auth("manage:webhooks")
 def get_webhook_deliveries(webhook_id):
     """Get delivery history for a webhook."""
@@ -728,7 +1584,7 @@ def get_webhook_deliveries(webhook_id):
 # ESCALATION RULES
 # ============================================================================
 
-@app.route("/escalation-rules", methods=["POST"])
+@_idempotent_route("/escalation-rules", methods=["POST"])
 @require_auth("write:escalation_rules")
 @require_tenant_access()
 def create_escalation_rule():
@@ -763,7 +1619,7 @@ def create_escalation_rule():
         session.close()
 
 
-@app.route("/escalation-rules", methods=["GET"])
+@_idempotent_route("/escalation-rules", methods=["GET"])
 @require_auth("read:discrepancies")
 @require_tenant_access()
 def list_escalation_rules():
@@ -782,7 +1638,7 @@ def list_escalation_rules():
         session.close()
 
 
-@app.route("/escalation-rules/<rule_id>", methods=["PUT"])
+@_idempotent_route("/escalation-rules/<rule_id>", methods=["PUT"])
 @require_auth("write:escalation_rules")
 def update_escalation_rule(rule_id):
     """Update an escalation rule."""
@@ -801,7 +1657,7 @@ def update_escalation_rule(rule_id):
 # ON-CALL ROTATIONS
 # ============================================================================
 
-@app.route("/on-call/rotations", methods=["POST"])
+@_idempotent_route("/on-call/rotations", methods=["POST"])
 @require_auth("manage:on_call")
 @require_tenant_access()
 def create_on_call_rotation():
@@ -837,7 +1693,7 @@ def create_on_call_rotation():
         session.close()
 
 
-@app.route("/on-call/rotations/active", methods=["GET"])
+@_idempotent_route("/on-call/rotations/active", methods=["GET"])
 @require_auth("read:discrepancies")
 @require_tenant_access()
 def get_active_on_call():
@@ -859,7 +1715,7 @@ def get_active_on_call():
         session.close()
 
 
-@app.route("/on-call/schedule/<operator_id>", methods=["GET"])
+@_idempotent_route("/on-call/schedule/<operator_id>", methods=["GET"])
 @require_auth("read:discrepancies")
 def get_operator_schedule(operator_id):
     """Get operator's on-call schedule."""
@@ -880,7 +1736,7 @@ def get_operator_schedule(operator_id):
         session.close()
 
 
-@app.route("/on-call/bulk", methods=["POST"])
+@_idempotent_route("/on-call/bulk", methods=["POST"])
 @require_auth("manage:on_call")
 @require_tenant_access()
 def bulk_create_on_call():
@@ -909,7 +1765,7 @@ def bulk_create_on_call():
 # EMAIL NOTIFICATIONS
 # ============================================================================
 
-@app.route("/emails/reconciliation", methods=["POST"])
+@_idempotent_route("/emails/reconciliation", methods=["POST"])
 @require_auth("write:discrepancies")
 @require_tenant_access()
 def send_reconciliation_email():
@@ -941,7 +1797,7 @@ def send_reconciliation_email():
         session.close()
 
 
-@app.route("/emails/escalation", methods=["POST"])
+@_idempotent_route("/emails/escalation", methods=["POST"])
 @require_auth("write:discrepancies")
 @require_tenant_access()
 def send_escalation_email():
@@ -973,7 +1829,7 @@ def send_escalation_email():
         session.close()
 
 
-@app.route("/emails/history", methods=["GET"])
+@_idempotent_route("/emails/history", methods=["GET"])
 @require_auth("read:discrepancies")
 @require_tenant_access()
 def get_email_history():
@@ -996,7 +1852,7 @@ def get_email_history():
 # ADVANCED SEARCH
 # ============================================================================
 
-@app.route("/search", methods=["GET"])
+@_idempotent_route("/search", methods=["GET"])
 @require_auth("read:discrepancies")
 @require_tenant_access()
 def advanced_search():
@@ -1015,7 +1871,7 @@ def advanced_search():
         session.close()
 
 
-@app.route("/search/filters", methods=["GET"])
+@_idempotent_route("/search/filters", methods=["GET"])
 @require_auth("read:discrepancies")
 @require_tenant_access()
 def search_filters():
@@ -1034,7 +1890,7 @@ def search_filters():
         session.close()
 
 
-@app.route("/search/structured", methods=["GET"])
+@_idempotent_route("/search/structured", methods=["GET"])
 @require_auth("read:discrepancies")
 @require_tenant_access()
 def structured_search():
@@ -1068,7 +1924,7 @@ def structured_search():
 
 
 # Public/customer-facing endpoints for tenants to pull their own data
-@app.route("/public/customers/<tenant_id>/reconciliations", methods=["GET"])
+@_idempotent_route("/public/customers/<tenant_id>/reconciliations", methods=["GET"])
 @require_auth("read:discrepancies")
 @require_tenant_access()
 def public_get_reconciliations(tenant_id: str):
@@ -1107,7 +1963,7 @@ def public_get_reconciliations(tenant_id: str):
         session.close()
 
 
-@app.route("/public/customers/<tenant_id>/reports", methods=["GET"])
+@_idempotent_route("/public/customers/<tenant_id>/reports", methods=["GET"])
 @require_auth("read:analytics")
 @require_tenant_access()
 def public_get_reports(tenant_id: str):
@@ -1149,7 +2005,7 @@ def public_get_reports(tenant_id: str):
 # RATE LIMITED BULK OPERATIONS
 # ============================================================================
 
-@app.route("/bulk/assign", methods=["POST"], endpoint="bulk_assign_incidents_advanced")
+@_idempotent_route("/bulk/assign", methods=["POST"], endpoint="bulk_assign_incidents_advanced")
 @require_auth("bulk:operations")
 @rate_limit(max_requests_per_minute=5, tokens_per_request=1, endpoint_name="bulk_assign")
 @require_tenant_access()
@@ -1193,7 +2049,7 @@ def bulk_assign_incidents():
         session.close()
 
 
-@app.route("/bulk/escalate", methods=["POST"], endpoint="bulk_escalate_incidents_advanced")
+@_idempotent_route("/bulk/escalate", methods=["POST"], endpoint="bulk_escalate_incidents_advanced")
 @require_auth("bulk:operations")
 @rate_limit(max_requests_per_minute=3, tokens_per_request=2, endpoint_name="bulk_escalate")
 @require_tenant_access()

@@ -12,8 +12,72 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Set
 
 from pesaguard_backend_pipeline.event_store import ProcessResult
+from pesaguard_backend_pipeline.validators import resolve_trans_id
 
 logger = logging.getLogger("pesaguard.reconciliation_engine")
+
+
+def _normalize_enum_value(value: Any) -> str:
+    """Normalize provider names and channel labels into the canonical enum style."""
+    if value is None:
+        return ""
+    cleaned = str(value).strip().replace("-", "_").replace(" ", "_")
+    return cleaned.upper()
+
+
+def resolve_payment_context(event: Dict[str, Any]) -> Dict[str, str]:
+    """Resolve the payment channel and concrete provider from a webhook payload or event dict.
+
+    This uses the hierarchical model:
+      PAYMENT_CHANNEL -> MOBILE_MONEY | BANK | CARD | PAYMENT_GATEWAY | OTHER
+      provider -> MPESA | AIRTEL_MONEY | KCB | EQUITY | ...
+    """
+    if not isinstance(event, dict):
+        return {"payment_channel": "OTHER", "provider": "UNKNOWN"}
+
+    payment_channel = _normalize_enum_value(event.get("payment_channel") or event.get("paymentChannel") or "")
+    provider_hint = _normalize_enum_value(event.get("provider") or event.get("payment_provider") or event.get("paymentProvider") or "")
+
+    if payment_channel in {"MOBILE_MONEY", "BANK", "CARD", "PAYMENT_GATEWAY", "OTHER"}:
+        base_provider = provider_hint or "UNKNOWN"
+        if payment_channel == "MOBILE_MONEY":
+            if base_provider in {"MPESA", "DARAJA", "SAFARICOM"}:
+                return {"payment_channel": "MOBILE_MONEY", "provider": "MPESA"}
+            if base_provider in {"AIRTEL", "AIRTEL_MONEY", "AIRTELMONEY"}:
+                return {"payment_channel": "MOBILE_MONEY", "provider": "AIRTEL_MONEY"}
+            return {"payment_channel": "MOBILE_MONEY", "provider": base_provider or "UNKNOWN"}
+        if payment_channel == "BANK":
+            bank_name = _normalize_enum_value(event.get("bankName") or event.get("bank_name") or event.get("bank") or "")
+            return {"payment_channel": "BANK", "provider": bank_name or base_provider or "BANK"}
+        return {"payment_channel": payment_channel, "provider": base_provider or "UNKNOWN"}
+
+    bank_name = _normalize_enum_value(event.get("bankName") or event.get("bank_name") or event.get("bank") or "")
+    if bank_name or event.get("accountNumber") or event.get("account_number") or event.get("sort_code") or event.get("iban"):
+        return {"payment_channel": "BANK", "provider": bank_name or "BANK"}
+
+    provider_hint = provider_hint.lower()
+    if provider_hint in {"mpesa", "daraja", "safaricom", "m_pesa", "m_pesa_mobile_money"}:
+        return {"payment_channel": "MOBILE_MONEY", "provider": "MPESA"}
+    if provider_hint in {"airtel", "airtel_money", "airtelmoney"}:
+        return {"payment_channel": "MOBILE_MONEY", "provider": "AIRTEL_MONEY"}
+    if provider_hint in {"bank", "bank_transfer", "bank-transfer", "banking"}:
+        return {"payment_channel": "BANK", "provider": bank_name or "BANK"}
+    if event.get("transactionType") == "AIRTEL_MONEY" or event.get("transactionType") == "airtel_money":
+        return {"payment_channel": "MOBILE_MONEY", "provider": "AIRTEL_MONEY"}
+    if event.get("transactionId") or event.get("TransactionId"):
+        return {"payment_channel": "MOBILE_MONEY", "provider": "AIRTEL_MONEY"}
+    if event.get("TransID") or event.get("TransactionType") in {"STK_PUSH", "C2B", "B2C"}:
+        return {"payment_channel": "MOBILE_MONEY", "provider": "MPESA"}
+    if event.get("card_number") or event.get("cardNumber") or event.get("card_brand") or event.get("cardBrand"):
+        return {"payment_channel": "CARD", "provider": "CARD"}
+    if event.get("gateway") or event.get("merchant") or event.get("checkout_id"):
+        return {"payment_channel": "PAYMENT_GATEWAY", "provider": "PAYMENT_GATEWAY"}
+    return {"payment_channel": "OTHER", "provider": "UNKNOWN"}
+
+
+def resolve_provider(event: Dict[str, Any]) -> str:
+    """Resolve the concrete payment provider from a webhook payload or event dict."""
+    return resolve_payment_context(event).get("provider", "UNKNOWN")
 
 
 def evaluate_transaction(
@@ -35,14 +99,17 @@ def evaluate_transaction(
     Returns:
         Structured evaluation outcome dict
     """
-    trans_id = str(event.get("TransID") or event.get("trans_id") or "unknown").strip()
+    payment_context = resolve_payment_context(event)
+    provider = payment_context["provider"]
+    payment_channel = payment_context["payment_channel"]
+    trans_id = resolve_trans_id(event) or "unknown"
     duplicate = trans_id in seen_trans_ids
 
     anomalies: List[str] = []
     if duplicate:
         anomalies.append("duplicate_transaction_id")
 
-    event_time = _parse_event_time(event.get("TransTime"))
+    event_time = _parse_event_time(event.get("TransTime") or event.get("transactionTime") or event.get("timestamp"))
     if event_time:
         latency = (datetime.now(timezone.utc) - event_time).total_seconds()
         if latency > 3600:
@@ -66,6 +133,8 @@ def evaluate_transaction(
     if not internal_records:
         return {
             "trans_id": trans_id,
+            "payment_channel": payment_channel,
+            "provider": provider,
             "status": "missing_payment",
             "severity": "critical",
             "duplicate": duplicate,
@@ -85,6 +154,7 @@ def evaluate_transaction(
     if best_match is None:
         return {
             "trans_id": trans_id,
+            "provider": provider,
             "status": "missing_payment",
             "severity": "critical",
             "duplicate": duplicate,
@@ -99,6 +169,8 @@ def evaluate_transaction(
     if best_match["match_type"] in {"exact", "fuzzy_exact"}:
         return {
             "trans_id": trans_id,
+            "payment_channel": payment_channel,
+            "provider": provider,
             "status": "matched",
             "severity": "info",
             "duplicate": duplicate,
@@ -109,6 +181,8 @@ def evaluate_transaction(
 
     return {
         "trans_id": trans_id,
+        "payment_channel": payment_channel,
+        "provider": provider,
         "status": "needs_review",
         "severity": "warning",
         "duplicate": duplicate,
@@ -287,7 +361,13 @@ def reconcile_with_idempotency(
     Ensures that both the idempotency ledger write and the Discrepancy write commit
     together or roll back entirely.
     """
-    trans_id = str(event.get("TransID") or event.get("trans_id") or "unknown").strip()
+    trans_id = resolve_trans_id(event)
+    if not trans_id:
+        # Without a provider transaction id there is no dedupe key, so the ledger write
+        # below would fail validation. Surface it explicitly instead of silently
+        # collapsing every such event onto a shared "unknown" key.
+        logger.error("reconcile_with_idempotency() received an event with no resolvable transaction id")
+        trans_id = "unknown"
 
     # Pre-flight duplicate check optimization
     if event_store and event_store.already_processed(trans_id):

@@ -7,6 +7,7 @@ webhooks, escalation rules, on-call schedules, email audits, and dead-letter que
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -268,3 +269,193 @@ class Report(Base):
     status = Column(String, nullable=False, default="generated")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     delivered_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class OrganizationAccount(Base):
+    """Persisted organization payment accounts across payment channels/providers."""
+
+    __tablename__ = "organization_accounts"
+    __table_args__ = (
+        Index("ix_org_account_org_channel", "organization_id", "payment_channel"),
+        Index("ix_org_account_provider", "provider"),
+        UniqueConstraint("organization_id", "account_id", name="uq_org_account_org_account_id"),
+    )
+
+    id = Column(String, primary_key=True)
+    organization_id = Column(String, nullable=False)
+    account_id = Column(String, nullable=False)
+    payment_channel = Column(String, nullable=False, default="OTHER")
+    provider = Column(String, nullable=False, default="UNKNOWN")
+    account_name = Column(String, nullable=True)
+    account_number = Column(String, nullable=True)
+    bank_name = Column(String, nullable=True)
+    currency = Column(String, nullable=True, default="KES")
+    branch = Column(String, nullable=True)
+    account_type = Column(String, nullable=True)
+    account_metadata = Column(JSON, nullable=True, default=dict)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class SettlementAttempt(Base):
+    """Persisted record of an outbound settlement attempt."""
+
+    __tablename__ = "settlement_attempts"
+    __table_args__ = (
+        Index("ix_settlement_tenant", "tenant_id"),
+        Index("ix_settlement_reference", "reference"),
+    )
+
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, nullable=False)
+    reference = Column(String, nullable=False)
+    amount = Column(Float, nullable=False)
+    account_number = Column(String, nullable=True)
+    bank_name = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="pending")  # pending, requested, success, failed
+    response = Column(JSON, nullable=True)
+    error_message = Column(Text, nullable=True)
+    attempt_number = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    last_attempt_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class UserAccount(Base):
+    """Persistent user record for local authentication and role assignment."""
+
+    __tablename__ = "user_accounts"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "username", name="uq_user_account_tenant_username"),
+        Index("ix_user_account_tenant", "tenant_id"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    tenant_id = Column(String, nullable=False)
+    username = Column(String, nullable=False)
+    email = Column(String, nullable=True)
+    password_hash = Column(String, nullable=False)
+    password_salt = Column(String, nullable=False)
+    roles = Column(JSON, nullable=False, default=list)
+    permissions = Column(JSON, nullable=False, default=list)
+    mfa_enabled = Column(Boolean, default=False)
+    status = Column(String, nullable=False, default="active")
+    attributes = Column(JSON, nullable=True, default=dict)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class UserSession(Base):
+    """Persistent device/session record tied to a user account."""
+
+    __tablename__ = "user_sessions"
+    __table_args__ = (
+        Index("ix_user_sessions_user", "user_id"),
+        Index("ix_user_sessions_tenant", "tenant_id"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)
+    tenant_id = Column(String, nullable=False)
+    device_id = Column(String, nullable=True)
+    user_agent = Column(String, nullable=True)
+    ip_address = Column(String, nullable=True)
+    active = Column(Boolean, default=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    issued_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class ApiKeyRecord(Base):
+    """Persistent API key registry for service-to-service access."""
+
+    __tablename__ = "api_key_records"
+    __table_args__ = (
+        UniqueConstraint("key_value", name="uq_api_key_value"),
+        Index("ix_api_key_tenant", "tenant_id"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    tenant_id = Column(String, nullable=False)
+    key_value = Column(String, nullable=False)
+    role = Column(String, nullable=False, default="read_only")
+    api_metadata = Column("metadata", JSON, nullable=True, default=dict)
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class OIDCProvider(Base):
+    """Persistent external OIDC provider configuration for SSO and tenant-level identity mapping."""
+
+    __tablename__ = "oidc_providers"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "issuer", name="uq_oidc_provider_tenant_issuer"),
+        Index("ix_oidc_provider_tenant", "tenant_id"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    tenant_id = Column(String, nullable=False, default="default")
+    provider_name = Column(String, nullable=False)
+    issuer = Column(String, nullable=False)
+    client_id = Column(String, nullable=True)
+    client_secret = Column(String, nullable=True)
+    authorization_endpoint = Column(String, nullable=True)
+    token_endpoint = Column(String, nullable=True)
+    userinfo_endpoint = Column(String, nullable=True)
+    jwks_uri = Column(String, nullable=True)
+    scopes = Column(JSON, nullable=False, default=list)
+    enabled = Column(Boolean, default=True)
+    allowed_roles = Column(JSON, nullable=True, default=list)
+    auto_provision = Column(Boolean, default=False)
+    claim_mapping = Column(JSON, nullable=True, default=dict)
+    provider_metadata = Column("metadata", JSON, nullable=True, default=dict)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class MFAChallenge(Base):
+    """Simple MFA challenge registry."""
+
+    __tablename__ = "mfa_challenges"
+    __table_args__ = (
+        Index("ix_mfa_user", "user_id"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)
+    code = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="pending")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    verified_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class PasswordlessChallenge(Base):
+    """Simple passwordless / magic-link challenge registry."""
+
+    __tablename__ = "passwordless_challenges"
+    __table_args__ = (
+        Index("ix_passwordless_user", "user_id"),
+    )
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String, nullable=False)
+    token = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="pending")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    verified_at = Column(DateTime(timezone=True), nullable=True)

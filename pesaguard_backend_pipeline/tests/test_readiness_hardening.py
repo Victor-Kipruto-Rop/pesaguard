@@ -248,6 +248,16 @@ def test_observability_init_enables_sentry_and_otel_when_configured(monkeypatch)
     assert status["opentelemetry"] in {"enabled", "error:missing opentelemetry packages"}
 
 
+def test_observability_skips_sentry_in_development_by_default(monkeypatch):
+    monkeypatch.setenv("PESAGUARD_ENV", "development")
+    monkeypatch.setenv("SENTRY_DSN", "https://public@example.ingest.sentry.io/1")
+
+    import pesaguard_backend_pipeline.logging_utils as logging_utils
+
+    status = logging_utils.init_observability()
+    assert status["sentry"] == "disabled"
+
+
 def test_premium_alert_routing_and_status_page_ux(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
     monkeypatch.setenv("PESAGUARD_HEALTH_CHECK_KAFKA", "0")
@@ -324,6 +334,27 @@ def test_legacy_api_contract_uses_standard_envelope(monkeypatch):
         payload = response.get_json()
         assert payload["status"] == "error"
         assert payload["error"]["code"] == "forbidden"
+
+
+def test_deployment_readiness_includes_backup_and_incident_controls(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
+    monkeypatch.setenv("PESAGUARD_HEALTH_CHECK_KAFKA", "0")
+    monkeypatch.setenv("PESAGUARD_HEALTH_CHECK_REDIS", "0")
+    monkeypatch.setenv("PESAGUARD_HEALTH_CHECK_DARAJA", "0")
+
+    import health as health_module
+    importlib.reload(health_module)
+
+    readiness = health_module.build_deployment_readiness()
+    assert readiness["status"] in {"ready", "degraded"}
+    assert "backup" in readiness["controls"]
+    assert "incident_response" in readiness["controls"]
+    assert readiness["controls"]["backup"]["status"] in {"ready", "configured", "degraded"}
+
+    page = health_module.build_status_page(service_name="pesaguard-premium")
+    assert "deployment_readiness" in page
+    assert "incident_readiness" in page
+    assert page["deployment_readiness"]["status"] in {"ready", "degraded"}
 
 
 def test_check_kafka_connectivity_returns_failed_when_kafka_dependency_is_missing(monkeypatch):

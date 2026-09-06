@@ -797,7 +797,69 @@ rule = engine.create_rule(
 
 # When an incident escalates:
 # 1. EscalationEngine evaluates rules
+
+---
+
+## Remaining Items / Production Hardening
+
+### Real production OIDC hardening
+
+- Validate live issuer metadata and JWKS rotation more strictly
+- Enforce audience, issuer, nonce, PKCE, and token lifetime checks correctly for real IdPs
+- Add provider-specific trust policies for production tenants beyond the current mock/test-friendly flow
+
+### SAML / external IdP breadth
+
+- OIDC is implemented and tested
+- SAML support is still a future expansion, not part of the current runtime path
+
+### Advanced session and device risk controls
+
+- Current device/session listing and revocation are in place
+- Remaining controls: stronger anomaly detection, device fingerprinting, session risk scoring, and explicit idle/absolute timeout policies
+
+### Admin and tenant governance
+
+- User/session/API-key management is functional
+- Full tenant admin workflows, delegated admin roles, and richer approval/audit tooling are still operational work
+
+### Operational security polish
+
+- Secret rotation automation
+- Audit/event retention tuning
+- Rate-limit and abuse protections for auth endpoints at production scale
+- Deployment-specific config hardening for production secrets and environment isolation
+
 # 2. If matched, triggers webhook
+
+---
+
+## Remaining items
+
+These are higher-effort items and production hardening tasks still outstanding.
+
+- **Real production OIDC hardening**
+  - Validate live issuer metadata and JWKS rotation more strictly
+  - Enforce audience, issuer, nonce, PKCE, and token lifetime checks correctly for real IdPs
+  - Add provider-specific trust policies for production tenants beyond the current mock/test-friendly flow
+
+- **SAML / external IdP breadth**
+  - OIDC is implemented and tested
+  - SAML support is still a future expansion, not part of the current runtime path
+
+- **Advanced session and device risk controls**
+  - Current device/session listing and revocation are in place
+  - Remaining controls are stronger anomaly detection, device fingerprinting, session risk scoring, and explicit idle/absolute timeout policies
+
+- **Admin and tenant governance**
+  - User/session/API-key management is functional
+  - Full tenant admin workflows, delegated admin roles, and richer approval/audit tooling are still operational work
+
+- **Operational security polish**
+  - Secret rotation automation
+  - Audit/event retention tuning
+  - Rate-limit and abuse protections for auth endpoints at production scale
+  - Deployment-specific config hardening for production secrets and environment isolation
 # 3. WebhookManager delivers with retries
 # 4. EmailService sends notifications
 ```

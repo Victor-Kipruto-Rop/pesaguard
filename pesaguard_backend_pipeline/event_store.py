@@ -27,8 +27,41 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from pesaguard_backend_pipeline.models import Base, Transaction, ProcessedTransaction
+from pesaguard_backend_pipeline.validators import resolve_trans_id
 
 logger = logging.getLogger("pesaguard.event_store")
+
+# Provider field aliases so the ledger stores the same logical columns whether the
+# payload is a canonical (already normalized) event or a raw Airtel/Daraja callback.
+_AMOUNT_KEYS = ("TransAmount", "trans_amount", "amount", "transactionAmount")
+_MSISDN_KEYS = ("MSISDN", "msisdn", "phoneNumber", "senderMsisdn", "customerMsisdn")
+_SHORT_CODE_KEYS = ("BusinessShortCode", "business_short_code", "merchantCode", "provider")
+_TRANS_TIME_KEYS = ("TransTime", "trans_time", "transactionTime", "timestamp")
+
+
+def _first_present(payload: dict, keys) -> str:
+    """Return the first non-empty string value found among ``keys`` in ``payload``."""
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _coerce_amount(payload: dict) -> float:
+    """Best-effort numeric amount extraction across provider payload shapes."""
+    for key in _AMOUNT_KEYS:
+        value = payload.get(key)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
 
 
 class ProcessResult(str, Enum):
@@ -194,9 +227,9 @@ class EventStore:
             ProcessResult.DUPLICATE — already recorded, safe no-op
             ProcessResult.ERROR     — genuine failure, caller should signal retry
         """
-        trans_id = str(payload.get("TransID", ""))
+        trans_id = resolve_trans_id(payload)
         if not trans_id:
-            logger.error("mark_processed() called with missing TransID in payload")
+            logger.error("mark_processed() called with payload missing a resolvable transaction id")
             return ProcessResult.ERROR
 
         try:
@@ -220,10 +253,10 @@ class EventStore:
 
                 t_record = Transaction(
                     trans_id=trans_id,
-                    trans_amount=float(payload.get("TransAmount", 0)),
-                    msisdn=str(payload.get("MSISDN", "")),
-                    business_short_code=str(payload.get("BusinessShortCode", "")),
-                    trans_time=str(payload.get("TransTime", "")),
+                    trans_amount=_coerce_amount(payload),
+                    msisdn=_first_present(payload, _MSISDN_KEYS),
+                    business_short_code=_first_present(payload, _SHORT_CODE_KEYS),
+                    trans_time=_first_present(payload, _TRANS_TIME_KEYS),
                     raw_payload=payload,
                     created_at=datetime.now(timezone.utc),
                 )
@@ -292,9 +325,9 @@ class EventStore:
             ProcessResult.ERROR     — payload was invalid (e.g. missing TransID); caller
                                        should not proceed
         """
-        trans_id = str(payload.get("TransID", ""))
+        trans_id = resolve_trans_id(payload)
         if not trans_id:
-            logger.error("mark_processed_in_session() called with missing TransID in payload")
+            logger.error("mark_processed_in_session() called with payload missing a resolvable transaction id")
             return ProcessResult.ERROR
 
         # Pre-flight check using the SAME session/transaction, so it sees any prior
@@ -321,10 +354,10 @@ class EventStore:
 
         t_record = Transaction(
             trans_id=trans_id,
-            trans_amount=float(payload.get("TransAmount", 0)),
-            msisdn=str(payload.get("MSISDN", "")),
-            business_short_code=str(payload.get("BusinessShortCode", "")),
-            trans_time=str(payload.get("TransTime", "")),
+            trans_amount=_coerce_amount(payload),
+            msisdn=_first_present(payload, _MSISDN_KEYS),
+            business_short_code=_first_present(payload, _SHORT_CODE_KEYS),
+            trans_time=_first_present(payload, _TRANS_TIME_KEYS),
             raw_payload=payload,
             created_at=datetime.now(timezone.utc),
         )

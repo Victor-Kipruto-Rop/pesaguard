@@ -1,6 +1,47 @@
 # PesaGuard Advanced Features Documentation
 
-## 🚀 New Features Added
+## 🚀 Platform Features
+
+### Provider coverage
+PesaGuard is designed for East African payment operations with support for multi-rail payment reconciliation across mobile money and bank-led settlement flows:
+
+- M-Pesa / Daraja reconciliation and callback handling
+- Airtel Money auth, webhook validation, and outbound payout helpers
+- Bank transfer normalization, statement ingestion, and settlement reconciliation
+- Tenant-aware provider selection and normalization in the reconciliation layer
+
+---
+
+### Bank reconciliation architecture
+
+The platform is built around a single normalization-to-reconciliation model that scales beyond any single provider:
+
+```mermaid
+flowchart TD
+    A[M-Pesa] --> N[Normalization]
+    B[Airtel Money] --> N
+    C[Bank] --> N
+    D[Future Providers] --> N
+
+    N --> R[Reconciliation Engine]
+
+    R --> M[Matched]
+    R --> E[Exceptions]
+    R --> U[Unmatched]
+
+    E --> S[Settlement Engine]
+    U --> S
+    M --> S
+```
+
+This is the operational pattern the backend follows:
+
+- raw provider events are normalized into a canonical transaction shape
+- matching logic compares the normalized event against internal ledger records
+- exceptions and unmatched transactions are flagged for operator review or further settlement logic
+- workflows are designed to scale to future rails without rewriting the core reconciliation model
+
+---
 
 ### 1. **CSV Export** (`/discrepancies/export/csv`)
 - **Purpose**: Export all or filtered incidents to CSV file

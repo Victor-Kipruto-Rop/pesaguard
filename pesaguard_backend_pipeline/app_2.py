@@ -15,6 +15,7 @@ from werkzeug.exceptions import HTTPException
 from pesaguard_backend_pipeline.export_routes import bp as export_bp
 from pesaguard_backend_pipeline.action_audit import ActionAuditEntry, Base as AuditBase, build_audit_entry
 from pesaguard_backend_pipeline.dashboard_api.models.roles import has_permission
+from pesaguard_backend_pipeline.api_gateway import ApiGateway, ApiGatewayConfig
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -39,6 +40,26 @@ except Exception:
     pass
 logger = logging.getLogger("pesaguard.dashboard")
 from pesaguard_backend_pipeline.app import app
+
+
+def _idempotent_route(rule, **options):
+    if getattr(app, "_got_first_request", False):
+        def _noop(view_func):
+            return view_func
+        return _noop
+
+    endpoint = options.get("endpoint") or rule.strip("/").replace("/", "_") or "root"
+    if any(existing_rule.rule == rule for existing_rule in app.url_map.iter_rules()):
+        def _noop(view_func):
+            return view_func
+        return _noop
+    if endpoint in app.view_functions:
+        def _noop(view_func):
+            return view_func
+        return _noop
+    return app.route(rule, **options)
+
+
 # Allow tests to reload this module and re-run setup even if the app
 # has previously handled a request in the same interpreter. Tests use
 # importlib.reload to apply different env vars between cases; reset the
@@ -48,6 +69,18 @@ if getattr(app, "_got_first_request", False):
 app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("PESAGUARD_API_MAX_BODY_BYTES", "1048576"))
 if "export_routes" not in app.blueprints:
     app.register_blueprint(export_bp)
+
+api_gateway = ApiGateway(
+    app,
+    ApiGatewayConfig(
+        default_version="v1",
+        require_auth=False,
+        allowed_origins=["*"],
+        rate_limit_per_minute=int(os.getenv("PESAGUARD_API_RATE_LIMIT_PER_MINUTE", "60")),
+        allow_json_validation=True,
+        cache_ttl_seconds=60,
+    ),
+)
 settings_store = TenantSettingsStore()
 api_rate_limiter = RateLimiter()
 api_rate_limiter.set_limits(int(os.getenv("PESAGUARD_API_RATE_LIMIT_PER_MINUTE", "60")))
@@ -296,7 +329,7 @@ def add_dashboard_trace_headers(response):
     return response
 
 
-@app.route("/status", methods=["GET"])
+@_idempotent_route("/status", methods=["GET"])
 def dashboard_status():
     """Dashboard service status payload with health, metrics, and trace metadata."""
     from pesaguard_backend_pipeline.health import build_health_payload
@@ -323,7 +356,7 @@ def dashboard_status():
     return jsonify(payload), status_code
 
 
-@app.route("/v1/settings", methods=["POST"])
+@_idempotent_route("/v1/settings", methods=["POST"])
 @require_auth("write:settings")
 def update_settings():
     """CHANGED: was gated by a spoofable `X-Role: admin` request header with
@@ -343,8 +376,29 @@ def update_settings():
     return jsonify(settings_store.update(tenant_id, payload)), 200
 
 
-@app.route("/openapi.json", methods=["GET"])
-def openapi_spec():
+def _merge_openapi_paths(base: Dict[str, Any], *others: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge OpenAPI fragments into ``base`` (in place) and return it.
+
+    Both this module and ``app_4_advanced_features`` register ``/openapi.json`` on the
+    shared Flask app via ``_idempotent_route``; whichever module is imported first owns
+    the route. To keep the served spec complete regardless of import order, the winning
+    handler merges its own fragment with the sibling modules' fragments.
+    """
+    for other in others:
+        if not isinstance(other, dict):
+            continue
+        for path, item in (other.get("paths") or {}).items():
+            merged_item = base.setdefault("paths", {}).setdefault(path, {})
+            if isinstance(item, dict):
+                merged_item.update(item)
+        other_schemas = (other.get("components") or {}).get("schemas") or {}
+        for name, schema in other_schemas.items():
+            base.setdefault("components", {}).setdefault("schemas", {}).setdefault(name, schema)
+    return base
+
+
+def build_dashboard_openapi_spec() -> Dict[str, Any]:
+    """Return this module's OpenAPI fragment (dashboard, reconciliation, tenants)."""
     spec = {
         "openapi": "3.0.3",
         "info": {
@@ -424,14 +478,21 @@ def openapi_spec():
                     "responses": {"200": {"description": "Paginated discrepancy list"}},
                 }
             },
-            "/discrepancies/<discrepancy_id>/resolve": {
+            "/discrepancies/{discrepancy_id}/resolve": {
                 "post": {
                     "summary": "Resolve a discrepancy",
                     "security": [{"bearerAuth": []}],
                     "responses": {"200": {"description": "Resolved"}},
                 }
             },
-            "/tenants/<tenant_id>/settings": {
+            "/discrepancies/bulk-resolve": {
+                "post": {
+                    "summary": "Bulk resolve discrepancies",
+                    "security": [{"bearerAuth": []}],
+                    "responses": {"200": {"description": "Bulk resolution result"}},
+                }
+            },
+            "/tenants/{tenant_id}/settings": {
                 "get": {
                     "summary": "Fetch tenant settings",
                     "security": [{"bearerAuth": []}],
@@ -452,10 +513,26 @@ def openapi_spec():
             },
         },
     }
+    return spec
+
+
+@_idempotent_route("/openapi.json", methods=["GET"])
+def openapi_spec():
+    spec = build_dashboard_openapi_spec()
+    try:
+        # Merge the advanced-features fragment so the combined spec stays complete
+        # regardless of which module happened to register this route first.
+        from pesaguard_backend_pipeline.app_4_advanced_features import (
+            build_advanced_openapi_spec,
+        )
+
+        _merge_openapi_paths(spec, build_advanced_openapi_spec())
+    except Exception:  # pragma: no cover - advanced module is optional here
+        logger.debug("Advanced OpenAPI fragment unavailable", exc_info=True)
     return jsonify(spec), 200
 
 
-@app.route("/docs", methods=["GET"])
+@_idempotent_route("/docs", methods=["GET"])
 def docs():
     html = """
     <!doctype html>
@@ -512,7 +589,7 @@ def _build_sla_context(item: Discrepancy) -> Dict[str, Any]:
     return {"sla_status": "on_track", "sla_remaining_minutes": remaining}
 
 
-@app.route("/discrepancies", methods=["GET"])
+@_idempotent_route("/discrepancies", methods=["GET"])
 @require_auth("read:discrepancies")
 def discrepancies():
     status = request.args.get("status", "").strip()
@@ -574,7 +651,7 @@ def discrepancies():
         session.close()
 
 
-@app.route("/tenants/<tenant_id>/settings", methods=["GET", "POST"])
+@_idempotent_route("/tenants/<tenant_id>/settings", methods=["GET", "POST"])
 @require_auth("read:settings")
 def tenant_settings(tenant_id: str):
     """CHANGED: previously had NO auth check at all — any request could read
@@ -596,7 +673,7 @@ def tenant_settings(tenant_id: str):
     return jsonify(settings_store.update(tenant_id, payload)), 200
 
 
-@app.route("/activity-feed", methods=["GET"])
+@_idempotent_route("/activity-feed", methods=["GET"])
 @require_auth("read:discrepancies")
 def activity_feed():
     limit = min(int(request.args.get("limit", "5")), 100)
@@ -634,7 +711,7 @@ def activity_feed():
         session.close()
 
 
-@app.route("/assignment-queue", methods=["GET"])
+@_idempotent_route("/assignment-queue", methods=["GET"])
 @require_auth("read:discrepancies")
 def assignment_queue():
     tenant_id = _current_tenant_id()
@@ -661,7 +738,7 @@ def assignment_queue():
         session.close()
 
 
-@app.route("/discrepancies/<discrepancy_id>/resolve", methods=["POST"])
+@_idempotent_route("/discrepancies/<discrepancy_id>/resolve", methods=["POST"])
 @require_auth("write:discrepancies")
 def resolve_discrepancy(discrepancy_id: str):
     tenant_id = _current_tenant_id()
@@ -693,7 +770,7 @@ def resolve_discrepancy(discrepancy_id: str):
         session.close()
 
 
-@app.route("/discrepancies/bulk-resolve", methods=["POST"])
+@_idempotent_route("/discrepancies/bulk-resolve", methods=["POST"])
 @require_auth("bulk:operations")
 def bulk_resolve_discrepancies():
     tenant_id = _current_tenant_id()
@@ -728,7 +805,7 @@ def bulk_resolve_discrepancies():
         session.close()
 
 
-@app.route("/discrepancies/<discrepancy_id>/notes", methods=["POST"])
+@_idempotent_route("/discrepancies/<discrepancy_id>/notes", methods=["POST"])
 @require_auth("write:discrepancies")
 def save_notes(discrepancy_id: str):
     tenant_id = _current_tenant_id()
@@ -753,7 +830,7 @@ def save_notes(discrepancy_id: str):
         session.close()
 
 
-@app.route("/discrepancies/<discrepancy_id>/assign", methods=["POST"])
+@_idempotent_route("/discrepancies/<discrepancy_id>/assign", methods=["POST"])
 @require_auth("write:discrepancies")
 def assign_discrepancy(discrepancy_id: str):
     tenant_id = _current_tenant_id()
@@ -777,7 +854,7 @@ def assign_discrepancy(discrepancy_id: str):
         session.close()
 
 
-@app.route("/analytics/sla-metrics", methods=["GET"])
+@_idempotent_route("/analytics/sla-metrics", methods=["GET"])
 @require_auth("read:discrepancies")
 def analytics_sla_metrics():
     """Returns SLA compliance statistics for critical incidents."""
@@ -809,7 +886,7 @@ def analytics_sla_metrics():
         session.close()
 
 
-@app.route("/analytics/resolution-times", methods=["GET"])
+@_idempotent_route("/analytics/resolution-times", methods=["GET"])
 @require_auth("read:discrepancies")
 def analytics_resolution_times():
     """Returns average resolution times for resolved incidents."""
@@ -853,7 +930,7 @@ def analytics_resolution_times():
         session.close()
 
 
-@app.route("/analytics/operator-stats", methods=["GET"])
+@_idempotent_route("/analytics/operator-stats", methods=["GET"])
 @require_auth("read:discrepancies")
 def analytics_operator_stats():
     """Returns performance statistics grouped by operator/assignee."""
@@ -898,7 +975,7 @@ def analytics_operator_stats():
         session.close()
 
 
-@app.route("/discrepancies/export/csv", methods=["GET"])
+@_idempotent_route("/discrepancies/export/csv", methods=["GET"])
 @require_auth("read:discrepancies")
 def export_discrepancies_csv():
     """Export incidents as CSV file.
@@ -971,7 +1048,7 @@ def export_discrepancies_csv():
         session.close()
 
 
-@app.route("/analytics/incident-trends", methods=["GET"])
+@_idempotent_route("/analytics/incident-trends", methods=["GET"])
 @require_auth("read:discrepancies")
 def analytics_incident_trends():
     """Returns weekly and monthly trend comparisons."""
@@ -1018,7 +1095,7 @@ def analytics_incident_trends():
         session.close()
 
 
-@app.route("/incidents/filters/presets", methods=["GET", "POST"])
+@_idempotent_route("/incidents/filters/presets", methods=["GET", "POST"])
 @require_auth("read:discrepancies")
 def filter_presets():
     """Manage saved filter presets."""
@@ -1043,7 +1120,7 @@ def filter_presets():
     return jsonify({"status": "saved", "presets": app.filter_presets}), 201
 
 
-@app.route("/incidents/auto-escalate", methods=["POST"])
+@_idempotent_route("/incidents/auto-escalate", methods=["POST"])
 @require_auth("bulk:operations")
 def auto_escalate_incidents():
     """Auto-escalate old unresolved critical incidents."""
@@ -1079,7 +1156,7 @@ def auto_escalate_incidents():
         session.close()
 
 
-@app.route("/analytics/reconciliation-report", methods=["GET"])
+@_idempotent_route("/analytics/reconciliation-report", methods=["GET"])
 @require_auth("read:discrepancies")
 def reconciliation_report():
     """Generate reconciliation summary report."""
@@ -1129,7 +1206,7 @@ def reconciliation_report():
         session.close()
 
 
-@app.route("/incidents/bulk-assign", methods=["POST"])
+@_idempotent_route("/incidents/bulk-assign", methods=["POST"])
 @require_auth("bulk:operations")
 def bulk_assign_incidents():
     """Bulk assign multiple incidents to an operator."""
@@ -1163,7 +1240,7 @@ def bulk_assign_incidents():
         session.close()
 
 
-@app.route("/incidents/search", methods=["GET"])
+@_idempotent_route("/incidents/search", methods=["GET"])
 @require_auth("read:discrepancies")
 def search_incidents():
     """Full-text search across incidents."""

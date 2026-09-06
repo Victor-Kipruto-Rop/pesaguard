@@ -6,16 +6,18 @@ This document satisfies requirements **SCOPE-1** through **SCOPE-4** from Addend
 
 ## Current scope (SCOPE-1)
 
-**PesaGuard reconciles M-Pesa transactions via the Safaricom Daraja API only.**
+**PesaGuard reconciles M-Pesa, Airtel Money, and bank-transfer transactions using provider-aware reconciliation logic and tenant-scoped configuration.**
 
-| In scope | Out of scope (pilot) |
+| In scope | Out of scope (future phase) |
 |---|---|
-| M-Pesa C2B/B2C webhook ingestion | Airtel Money |
-| Daraja transaction status queries | Bank transfer / RTGS reconciliation |
-| Internal-ledger matching (Postgres, Sheets, REST) against M-Pesa records | Card payments, PayPal, other rails |
-| Anomaly detection on M-Pesa reconciliation gaps | Multi-rail unified payment inbox |
+| M-Pesa C2B/B2C webhook ingestion | Card payments, PayPal, other non-bank rails |
+| Daraja transaction status queries | Additional country-specific rails beyond the approved providers |
+| Airtel Money callback validation and payout helpers | Broad product expansion without a customer requirement |
+| Bank transfer payout requests and normalized transfer reconciliation | Advanced treasury features outside the core settlement/reconciliation model |
+| Internal-ledger matching (Postgres, Sheets, REST) against normalized payment records | Multi-rail unified payment inbox beyond the supported providers |
+| Anomaly detection on provider reconciliation gaps | Broad product expansion without a customer requirement |
 
-**Timeline for expansion:** No committed date. Expansion is a **separate phase** triggered only by a concrete pilot requirement and re-scoping exercise — not mid-build scope creep (**SCOPE-4**).
+**Timeline for expansion:** The core product now supports three major rails, and further expansion remains gated by concrete pilot requirements and scoping review rather than ad hoc feature creep (**SCOPE-4**).
 
 ---
 
@@ -29,7 +31,7 @@ This document satisfies requirements **SCOPE-1** through **SCOPE-4** from Addend
 
 ## Customer-facing statement (SCOPE-2)
 
-> PesaGuard currently monitors and reconciles **M-Pesa (Daraja) transactions only**. If your business also accepts Airtel Money, bank transfers, or other payment methods, those transactions are **not** included in reconciliation or alerting until a future release. Contact us if multi-rail support is a hard requirement — that becomes a separate scoping conversation.
+> PesaGuard monitors and reconciles **M-Pesa (Daraja), Airtel Money, and bank transfer transactions** through provider-aware reconciliation workflows. If your business accepts additional payment methods such as card payments, wallets, or other rails beyond the approved list, those transactions are not included in reconciliation or alerting until a future release. Contact us if multi-rail support is a hard requirement — that becomes a separate scoping conversation.
 
 This statement appears in:
 
@@ -64,8 +66,8 @@ class PaymentSourceConnector(ABC):
 
 | Rail | Integration path | Effort estimate | Status |
 |---|---|---|---|
-| Airtel Money | Partner API / file export | Medium–High | Not started |
-| Bank transfers | Statement import / open banking | High | Not started |
+| Airtel Money | Partner API / file export | Medium–High | In scope |
+| Bank transfers | Open banking / settlement API | High | In scope |
 | Additional M-Pesa products | Daraja APIs already partially integrated | Low–Medium | In scope via Daraja |
 
 ---
@@ -74,7 +76,7 @@ class PaymentSourceConnector(ABC):
 
 1. **Do not** silently add connectors during the current build.
 2. Schedule a scoping call using Phase 0 discovery questions:
-   - *"Besides M-Pesa, do you take payments through Airtel Money, bank transfer, or anything else we'd need to reconcile?"*
+   - *"Besides M-Pesa, do you take payments through Airtel Money, bank transfer, or any other rail we'd need to reconcile?"*
 3. Produce a separate phase proposal: connectors needed, timeline, pricing, residency impact.
 4. Update this document with the agreed expansion plan before development starts.
 

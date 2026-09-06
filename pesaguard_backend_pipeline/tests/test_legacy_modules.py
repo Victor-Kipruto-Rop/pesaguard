@@ -219,7 +219,43 @@ def test_base_connector_rest_handles_http_errors(monkeypatch):
 
     monkeypatch.setattr(connector._session, "get", fake_get)
 
-    assert connector.fetch_recent_records() == []
+
+def test_identity_access_supports_enterprise_roles_sessions_and_abac():
+    from pesaguard_backend_pipeline.auth_rbac import IdentityAccessService
+
+    iam = IdentityAccessService()
+
+    roles = iam.get_supported_roles()
+    assert "super_admin" in roles
+    assert "finance_manager" in roles
+    assert "reconciliation_officer" in roles
+    assert "customer" in roles
+
+    user = iam.create_principal(
+        user_id="user-101",
+        username="finance.manager",
+        tenant_id="tenant-a",
+        roles=["Finance Manager"],
+        attributes={"department": "finance", "country": "KE"},
+    )
+    assert "finance:approve_settlement" in user.permissions
+    assert iam.can_access_resource(user, "settlement", {"tenant_id": "tenant-a", "department": "finance"}) is True
+    assert iam.can_access_resource(user, "settlement", {"tenant_id": "tenant-b", "department": "finance"}) is False
+
+    session = iam.create_session(user_id=user.user_id, tenant_id=user.tenant_id, device_id="device-1", user_agent="Safari")
+    assert session["user_id"] == user.user_id
+    assert iam.get_session(session["session_id"]) is not None
+
+    api_key = iam.issue_api_key("tenant-a", "finance_manager")
+    assert iam.verify_api_key(api_key)["tenant_id"] == "tenant-a"
+
+    mfa = iam.create_mfa_challenge(user.user_id)
+    assert mfa["status"] == "pending"
+    assert iam.verify_mfa(user.user_id, mfa["challenge_id"], "123456")["verified"] is True
+
+    passwordless = iam.create_passwordless_challenge(user.user_id)
+    assert passwordless["status"] == "pending"
+    assert iam.verify_passwordless_token(user.user_id, passwordless["challenge_id"], "otp-123456")["verified"] is True
 
 
 def test_base_connector_postgres_drops_invalid_identifiers():

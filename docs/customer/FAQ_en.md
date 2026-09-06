@@ -2,7 +2,7 @@
 
 ### Does PesaGuard reconcile all payment methods?
 
-No. **Current scope is M-Pesa/Daraja only.** Airtel Money, bank transfers, and other payment rails are not reconciled or alerted on during the pilot. If you need multi-rail support, that requires a separate scoping conversation — we will not expand scope silently.
+No. **Current scope includes M-Pesa/Daraja, Airtel Money, and bank transfer settlements.** Other payment rails are not reconciled or alerted on unless they are explicitly added during a separate scoping exercise.
 
 ### Where is my data stored?
 

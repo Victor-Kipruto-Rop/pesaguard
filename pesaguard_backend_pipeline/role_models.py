@@ -38,6 +38,95 @@ ROLES: Dict[str, RoleDefinition] = {
         name="super_admin",
         permissions=frozenset({"*"}),  # Full system wildcard access
     ),
+    "organization_admin": RoleDefinition(
+        name="organization_admin",
+        permissions=frozenset({
+            "manage:*",
+            PERM_VIEW_DISCREPANCIES,
+            PERM_RESOLVE_DISCREPANCIES,
+            PERM_VIEW_CONNECTORS,
+            PERM_MANAGE_CONNECTORS,
+            PERM_VIEW_SETTINGS,
+            PERM_MANAGE_SETTINGS,
+            PERM_VIEW_AUDIT_LOG,
+            PERM_MANAGE_WEBHOOKS,
+            PERM_EXPORT_DATA,
+            "manage:api_keys",
+            "manage:service_accounts",
+            "manage:sso",
+        }),
+    ),
+    "finance_manager": RoleDefinition(
+        name="finance_manager",
+        permissions=frozenset({
+            "read:financials",
+            "write:financials",
+            "approve:settlements",
+            "finance:approve_settlement",
+            "read:reports",
+            PERM_VIEW_DISCREPANCIES,
+        }),
+    ),
+    "reconciliation_officer": RoleDefinition(
+        name="reconciliation_officer",
+        permissions=frozenset({
+            PERM_VIEW_DISCREPANCIES,
+            PERM_RESOLVE_DISCREPANCIES,
+            "read:reconciliation",
+            "write:reconciliation",
+            PERM_VIEW_CONNECTORS,
+            PERM_EXPORT_DATA,
+        }),
+    ),
+    "auditor": RoleDefinition(
+        name="auditor",
+        permissions=frozenset({
+            "audit:read",
+            "read:audits",
+            "read:analytics",
+            "read:reconciliation",
+            PERM_EXPORT_DATA,
+        }),
+    ),
+    "risk_analyst": RoleDefinition(
+        name="risk_analyst",
+        permissions=frozenset({
+            "read:analytics",
+            "read:risks",
+            "write:risk_rules",
+            PERM_VIEW_DISCREPANCIES,
+        }),
+    ),
+    "developer": RoleDefinition(
+        name="developer",
+        permissions=frozenset({
+            "manage:api_keys",
+            "manage:service_accounts",
+            "read:api",
+            "write:integrations",
+            PERM_VIEW_CONNECTORS,
+            PERM_MANAGE_CONNECTORS,
+            PERM_VIEW_SETTINGS,
+        }),
+    ),
+    "read_only": RoleDefinition(
+        name="read_only",
+        permissions=frozenset({
+            PERM_VIEW_DISCREPANCIES,
+            PERM_VIEW_CONNECTORS,
+            PERM_VIEW_SETTINGS,
+            "read:reports",
+        }),
+    ),
+    "customer": RoleDefinition(
+        name="customer",
+        permissions=frozenset({
+            "read:own_data",
+            "read:transactions",
+            "read:reports",
+            "read:reconciliation",
+        }),
+    ),
     "admin": RoleDefinition(
         name="admin",
         permissions=frozenset({
