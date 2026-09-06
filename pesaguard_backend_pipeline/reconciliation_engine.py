@@ -15,7 +15,10 @@ from event_store import ProcessResult
 from reconciliation_scoring import score_match
 
 # Import normalization helpers (added in feat/phase1-reconciliation-systematic)
-from .reconciliation_utils import normalize_daraja_event, time_window_match
+try:
+    from .reconciliation_utils import normalize_daraja_event, time_window_match
+except ImportError:  # pragma: no cover - fallback for top-level script execution
+    from reconciliation_utils import normalize_daraja_event, time_window_match
 
 logger = logging.getLogger("pesaguard.reconciliation_engine")
 

@@ -268,3 +268,277 @@ class Report(Base):
     status = Column(String, nullable=False, default="generated")
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
     delivered_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class UserAccount(Base):
+    """Local account record provisioned from an external IdP or internal directory."""
+
+    __tablename__ = "user_accounts"
+
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, nullable=False, default="default")
+    username = Column(String, nullable=False)
+    email = Column(String, nullable=True)
+    password_hash = Column(String, nullable=True)
+    password_salt = Column(String, nullable=True)
+    roles = Column(JSON, nullable=False, default=list)
+    permissions = Column(JSON, nullable=False, default=list)
+    attributes = Column(JSON, nullable=True, default=dict)
+    mfa_enabled = Column(Boolean, nullable=False, default=False)
+    status = Column(String, nullable=False, default="active")
+    authorization_version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class Organization(Base):
+    """Top-level SaaS organization or customer tenant container."""
+
+    __tablename__ = "organizations"
+    __table_args__ = (
+        Index("ix_organizations_tenant_slug", "tenant_id", "slug", unique=True),
+        Index("ix_organizations_tenant_id", "tenant_id"),
+    )
+
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, nullable=False, default="default")
+    name = Column(String, nullable=False)
+    slug = Column(String, nullable=False)
+    owner_user_id = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="active")
+    settings = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class Team(Base):
+    """Functional team within an organization."""
+
+    __tablename__ = "teams"
+    __table_args__ = (
+        Index("ix_teams_organization_tenant", "organization_id", "tenant_id"),
+        Index("ix_teams_slug", "tenant_id", "slug", unique=False),
+    )
+
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, nullable=False, default="default")
+    organization_id = Column(String, nullable=False)
+    name = Column(String, nullable=False)
+    slug = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class Department(Base):
+    """Department or sub-unit under a team or organization."""
+
+    __tablename__ = "departments"
+    __table_args__ = (
+        Index("ix_departments_organization_tenant", "organization_id", "tenant_id"),
+        Index("ix_departments_team", "team_id"),
+    )
+
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, nullable=False, default="default")
+    organization_id = Column(String, nullable=False)
+    team_id = Column(String, nullable=True)
+    name = Column(String, nullable=False)
+    slug = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class OrganizationMembership(Base):
+    """Associates users with organizations, teams, and departments."""
+
+    __tablename__ = "organization_memberships"
+    __table_args__ = (
+        Index("ix_org_membership_user_tenant", "tenant_id", "user_id"),
+        Index("ix_org_membership_org", "organization_id"),
+    )
+
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, nullable=False, default="default")
+    user_id = Column(String, nullable=False)
+    organization_id = Column(String, nullable=False)
+    team_id = Column(String, nullable=True)
+    department_id = Column(String, nullable=True)
+    role = Column(String, nullable=False, default="member")
+    active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class OrganizationApproval(Base):
+    """Approval workflow records for SaaS org onboarding and lifecycle changes."""
+
+    __tablename__ = "organization_approvals"
+    __table_args__ = (
+        Index("ix_org_approval_tenant", "tenant_id", "status"),
+    )
+
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, nullable=False, default="default")
+    organization_id = Column(String, nullable=True)
+    request_type = Column(String, nullable=False, default="create")
+    requested_by = Column(String, nullable=False)
+    approver_id = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="pending")
+    reason = Column(Text, nullable=True)
+    approval_metadata = Column(JSON, nullable=True, default=dict)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    reviewed_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class TenantConfiguration(Base):
+    """Tenant-wide configuration and feature flags."""
+
+    __tablename__ = "tenant_configurations"
+    __table_args__ = (
+        Index("ix_tenant_config_unique", "tenant_id", unique=True),
+    )
+
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, nullable=False, default="default")
+    organization_id = Column(String, nullable=True)
+    config = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class TenantLimit(Base):
+    """Enforced limit for a tenant or organization metric."""
+
+    __tablename__ = "tenant_limits"
+    __table_args__ = (
+        Index("ix_tenant_limits_tenant_metric", "tenant_id", "organization_id", "metric_name", "period", unique=True),
+    )
+
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, nullable=False, default="default")
+    organization_id = Column(String, nullable=False)
+    metric_name = Column(String, nullable=False)
+    limit_value = Column(Float, nullable=False, default=0.0)
+    period = Column(String, nullable=False, default="monthly")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class TenantUsage(Base):
+    """Usage tracking for tenant and organization resource consumption."""
+
+    __tablename__ = "tenant_usage"
+    __table_args__ = (
+        Index("ix_tenant_usage_tenant_metric", "tenant_id", "organization_id", "metric_name", "period", unique=True),
+    )
+
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, nullable=False, default="default")
+    organization_id = Column(String, nullable=False)
+    metric_name = Column(String, nullable=False)
+    current_usage = Column(Float, nullable=False, default=0.0)
+    period = Column(String, nullable=False, default="monthly")
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class UserSession(Base):
+    """Authenticated session record for device and session risk evaluation."""
+
+    __tablename__ = "user_sessions"
+
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, nullable=False, default="default")
+    user_id = Column(String, nullable=True)
+    device_id = Column(String, nullable=True)
+    user_agent = Column(String, nullable=True)
+    ip_address = Column(String, nullable=True)
+    active = Column(Boolean, nullable=False, default=True)
+    issued_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    session_metadata = Column(JSON, nullable=True, default=dict)
+
+
+class OIDCProvider(Base):
+    """Tenant-managed external OIDC identity provider configuration."""
+
+    __tablename__ = "oidc_providers"
+
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, nullable=False, default="default")
+    provider_name = Column(String, nullable=False)
+    issuer = Column(String, nullable=False)
+    client_id = Column(String, nullable=True)
+    client_secret = Column(String, nullable=True)
+    authorization_endpoint = Column(String, nullable=True)
+    token_endpoint = Column(String, nullable=True)
+    userinfo_endpoint = Column(String, nullable=True)
+    jwks_uri = Column(String, nullable=True)
+    scopes = Column(JSON, nullable=False, default=list)
+    allowed_roles = Column(JSON, nullable=False, default=list)
+    auto_provision = Column(Boolean, nullable=False, default=False)
+    claim_mapping = Column(JSON, nullable=True, default=dict)
+    provider_metadata = Column("provider_metadata", JSON, nullable=True, default=dict)
+    enabled = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class PaymentProvider(Base):
+    """Tenant-scoped payment provider registration and operational configuration."""
+
+    __tablename__ = "payment_providers"
+
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, nullable=False, default="default", index=True)
+    name = Column(String, nullable=False)
+    provider_type = Column(String, nullable=False, default="payment")
+    status = Column(String, nullable=False, default="active")
+    credentials = Column(JSON, nullable=False, default=dict)
+    api_configuration = Column(JSON, nullable=False, default=dict)
+    account_configuration = Column(JSON, nullable=False, default=dict)
+    provider_metadata = Column("metadata", JSON, nullable=False, default=dict)
+    supported_currencies = Column(JSON, nullable=False, default=list)
+    capabilities = Column(JSON, nullable=False, default=list)
+    webhook_configuration = Column(JSON, nullable=False, default=dict)
+    connection_status = Column(String, nullable=False, default="unknown")
+    connection_checked_at = Column(DateTime(timezone=True), nullable=True)
+    health_status = Column(String, nullable=False, default="unknown")
+    health_details = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class ApiKeyRecord(Base):
+    """Tenant-scoped API keys issued for machine access."""
+
+    __tablename__ = "api_key_records"
+
+    id = Column(String, primary_key=True)
+    tenant_id = Column(String, nullable=False, default="default")
+    key_value = Column(String, nullable=False)
+    role = Column(String, nullable=False, default="read-only")
+    api_metadata = Column("api_metadata", JSON, nullable=True, default=dict)
+    active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class MFAChallenge(Base):
+    """MFA challenge state for end-user verification flows."""
+
+    __tablename__ = "mfa_challenges"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(String, nullable=False)
+    code = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="pending")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class PasswordlessChallenge(Base):
+    """Passwordless challenge state for email or magic-link verification."""
+
+    __tablename__ = "passwordless_challenges"
+
+    id = Column(String, primary_key=True)
+    user_id = Column(String, nullable=False)
+    token = Column(String, nullable=False)
+    status = Column(String, nullable=False, default="pending")
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)

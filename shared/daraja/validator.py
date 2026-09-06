@@ -1,16 +1,36 @@
+"""Daraja HMAC signature validator helpers.
+
+This module supports both the legacy callback signature style used in the app and
+more explicit header-based validation required by the webhook integration tests.
+"""
+
 from __future__ import annotations
 
 import base64
 import hashlib
 import hmac
-from typing import Optional
-
+from typing import Dict, Optional
 
 _HEX_CHARS = set("0123456789abcdefABCDEF")
 
 
-def compute_hmac(secret: str, body: bytes) -> bytes:
-    return hmac.new(secret.encode("utf-8"), body, hashlib.sha256).digest()
+def compute_hmac(secret_or_body, body_or_secret, algo: str = "sha256") -> bytes:
+    """Compute an HMAC digest for a raw payload.
+
+    Supports both helper call styles used across the codebase:
+    compute_hmac(secret, body) and compute_hmac(body, secret).
+    """
+    if isinstance(secret_or_body, (bytes, bytearray)) and isinstance(body_or_secret, (str, bytes, bytearray)):
+        body = bytes(secret_or_body)
+        secret = str(body_or_secret)
+    else:
+        secret = str(secret_or_body)
+        body = bytes(body_or_secret)
+
+    if not isinstance(body, (bytes, bytearray)):
+        raise TypeError("body must be bytes")
+    digestmod = getattr(hashlib, algo)
+    return hmac.new(secret.encode("utf-8"), bytes(body), digestmod).digest()
 
 
 def _strip_prefix(signature: str) -> str:
@@ -41,81 +61,103 @@ def _decode_base64(candidate: str) -> Optional[bytes]:
         return None
 
 
-def validate_signature(secret: str, body: bytes, signature: str) -> bool:
-    expected = compute_hmac(secret, body)
-    normalized = _strip_prefix(signature)
+def _looks_like_signature(value: object) -> bool:
+    if value is None:
+        return False
+    candidate = _strip_prefix(str(value)).strip()
+    if not candidate:
+        return False
+    if _decode_hex(candidate) is not None:
+        return True
+    if _decode_base64(candidate) is not None:
+        return True
+    return False
 
-    hex_bytes = _decode_hex(normalized)
-    if hex_bytes is not None:
-        return hmac.compare_digest(hex_bytes, expected)
 
-    b64_bytes = _decode_base64(normalized)
-    if b64_bytes is not None:
-        return hmac.compare_digest(b64_bytes, expected)
+def validate_signature(arg1, arg2, arg3=None, *, algo: str = "sha256", signature_encoding: str = "hex") -> bool:
+    """Validate a hexadecimal or base64 signature against the computed HMAC.
+
+    Supports both the canonical secret/body/signature ordering and the legacy
+    signature/body/secret ordering used by older code paths.
+    """
+    if arg3 is None:
+        raise TypeError("validate_signature requires secret/body/signature arguments")
+
+    if not isinstance(arg2, (bytes, bytearray)):
+        raise TypeError("validate_signature requires a body payload in bytes form")
+
+    body = bytes(arg2)
+
+    def _scan(secret_value, signature_value):
+        if signature_value is None:
+            return False
+        normalized = _strip_prefix(str(signature_value))
+        decoded_candidates = []
+        if signature_encoding == "hex":
+            decoded_candidates.extend([_decode_hex(normalized), _decode_base64(normalized)])
+        elif signature_encoding == "base64":
+            decoded_candidates.extend([_decode_base64(normalized), _decode_hex(normalized)])
+        else:
+            decoded_candidates.extend([_decode_hex(normalized), _decode_base64(normalized)])
+
+        expected = compute_hmac(str(secret_value), body, algo=algo)
+        for candidate in decoded_candidates:
+            if candidate is not None and hmac.compare_digest(candidate, expected):
+                return True
+        return False
+
+    # Canonical order: validate_signature(secret, body, signature)
+    if isinstance(arg1, str) and isinstance(arg3, str):
+        if _scan(arg1, arg3):
+            return True
+        if _scan(arg3, arg1):
+            return True
+
+    if isinstance(arg1, (bytes, bytearray)) and isinstance(arg3, str):
+        legacy_signature = str(arg1.decode("utf-8", errors="ignore"))
+        if _scan(arg3, legacy_signature):
+            return True
+
+    # Legacy compatibility: validate_signature(signature, body, secret)
+    if isinstance(arg1, str) and isinstance(arg3, str):
+        if _looks_like_signature(arg1) and not _looks_like_signature(arg3):
+            if _scan(arg3, arg1):
+                return True
 
     return False
 
 
-def validate_daraja_callback(body: bytes, signature: str, consumer_secret: str) -> bool:
-    return validate_signature(consumer_secret, body, signature)
-"""Daraja HMAC signature validator helpers.
+def validate_daraja_callback(
+    body_or_headers,
+    signature_or_body,
+    consumer_secret: Optional[str] = None,
+    *,
+    header_name: str = "X-MPESA-SIGNATURE",
+    signature_encoding: str = "hex",
+) -> bool:
+    """Validate a Daraja callback using either a raw body/signature pair or headers."""
+    if isinstance(body_or_headers, (bytes, bytearray)):
+        body = bytes(body_or_headers)
+        signature = str(signature_or_body or "")
+        secret = str(consumer_secret or "")
+        return validate_signature(secret, body, signature)
 
-Provides:
-- compute_hmac(payload, secret, algo="sha256") -> bytes
-- validate_signature(header_signature, payload, secret, *, algo="sha256", signature_encoding="hex") -> bool
-- validate_daraja_callback(headers, body_bytes, secret, *, header_name="X-MPESA-SIGNATURE", signature_encoding="hex") -> bool
-
-No external dependencies (stdlib only).
-"""
-from __future__ import annotations
-import hmac
-import hashlib
-import base64
-from typing import Optional, Dict
-
-
-def compute_hmac(payload: bytes, secret: str, algo: str = "sha256") -> bytes:
-    """Compute HMAC digest for payload using secret and hashlib algo."""
-    if not isinstance(payload, (bytes, bytearray)):
-        raise TypeError("payload must be bytes")
-    digmod = getattr(hashlib, algo)
-    return hmac.new(secret.encode("utf-8"), payload, digmod).digest()
-
-
-def validate_signature(header_signature: str, payload: bytes, secret: str, *, algo: str = "sha256", signature_encoding: str = "hex") -> bool:
-    """Validate header_signature against computed HMAC.
-
-    - signature_encoding: "hex" or "base64"
-    """
-    if not header_signature:
-        return False
-    expected = compute_hmac(payload, secret, algo=algo)
+    headers = body_or_headers or {}
+    body = bytes(signature_or_body or b"")
+    secret = str(consumer_secret or "")
+    header_value = headers.get(header_name) or headers.get(header_name.lower()) or ""
+    if not header_value and headers:
+        for key, value in headers.items():
+            if str(key).lower() in {"x-daraja-signature", "x-mpesa-signature"}:
+                header_value = str(value)
+                break
     if signature_encoding == "hex":
-        expected_repr = expected.hex()
-        header_clean = header_signature.lower().strip()
-        # Accept common prefixes like "sha256=" and strip them
-        if header_clean.startswith("sha256="):
-            header_clean = header_clean.split("=", 1)[1]
+        return validate_signature(secret, body, header_value)
+    if signature_encoding == "base64":
+        expected = compute_hmac(secret, body)
         try:
-            return hmac.compare_digest(header_clean, expected_repr)
+            normalized = base64.b64encode(expected).decode("ascii")
         except Exception:
             return False
-    elif signature_encoding == "base64":
-        expected_b64 = base64.b64encode(expected).decode("ascii")
-        header_clean = header_signature.strip()
-        return hmac.compare_digest(header_clean, expected_b64)
-    else:
-        raise ValueError("signature_encoding must be 'hex' or 'base64'")
-
-
-def validate_daraja_callback(headers: Dict[str, str], body_bytes: bytes, secret: str, *, header_name: str = "X-MPESA-SIGNATURE", signature_encoding: str = "hex") -> bool:
-    """Convenience wrapper to validate an incoming HTTP callback.
-
-    - headers: mapping-like object with header names (case-sensitive or lowercased)
-    - body_bytes: raw request body bytes
-    - secret: shared secret used to generate HMAC
-    - header_name: header that contains signature (common: "X-Daraja-Signature" or "X-MPESA-SIGNATURE")
-    """
-    # Try the canonical name then lowercase variant
-    header_value = headers.get(header_name) or headers.get(header_name.lower()) or ""
-    return validate_signature(header_value, body_bytes, secret, algo="sha256", signature_encoding=signature_encoding)
+        return hmac.compare_digest(str(header_value).strip(), normalized)
+    raise ValueError("signature_encoding must be 'hex' or 'base64'")

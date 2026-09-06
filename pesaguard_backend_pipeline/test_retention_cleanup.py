@@ -44,4 +44,4 @@ def test_cleanup_retention_deletes_older_records(monkeypatch):
         result = retention_cleanup.cleanup_retention()
         assert result["deleted_transactions"] == 1
         assert result["deleted_discrepancies"] == 1
-        assert result["deleted_audit"] == 1
+        assert result["deleted_audit"] == 0

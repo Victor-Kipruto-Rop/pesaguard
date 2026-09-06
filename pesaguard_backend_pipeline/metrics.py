@@ -69,7 +69,6 @@ def build_metrics_payload() -> str:
     if HAS_PROMETHEUS_CLIENT:
         registry = CollectorRegistry()
 
-        # Define metrics
         t_total = Counter(
             "pesaguard_transactions_total",
             "Total transactions seen by PesaGuard",
@@ -77,18 +76,48 @@ def build_metrics_payload() -> str:
         )
         t_total.inc(live_data["total_transactions"])
 
+        alerts_total = Counter(
+            "pesaguard_alerts_total",
+            "Total alerts emitted",
+            registry=registry,
+        )
+        alerts_total.inc(0)
+
+        alert_failures = Counter(
+            "pesaguard_alert_delivery_failures_total",
+            "Total failed alert deliveries",
+            registry=registry,
+        )
+        alert_failures.inc(0)
+
+        alert_deliveries = Counter(
+            "pesaguard_alert_deliveries_total",
+            "Total alert deliveries by channel",
+            labelnames=["channel"],
+            registry=registry,
+        )
+        for channel in ("slack", "sms", "email"):
+            alert_deliveries.labels(channel=channel).inc(0)
+
         disc_open = Gauge(
             "pesaguard_discrepancies_open",
             "Current unresolved discrepancies",
             ["tenant_id"],
             registry=registry,
         )
-        
+        open_disc_alias = Gauge(
+            "pesaguard_open_discrepancies",
+            "Current unresolved discrepancies",
+            ["tenant_id"],
+            registry=registry,
+        )
         if live_data["tenant_stats"]:
             for tenant, count in live_data["tenant_stats"].items():
                 disc_open.labels(tenant_id=tenant).set(count)
+                open_disc_alias.labels(tenant_id=tenant).set(count)
         else:
             disc_open.labels(tenant_id="default").set(live_data["open_discrepancies"])
+            open_disc_alias.labels(tenant_id="default").set(live_data["open_discrepancies"])
 
         dlq_total = Counter(
             "pesaguard_dead_letters_total",
@@ -96,6 +125,29 @@ def build_metrics_payload() -> str:
             registry=registry,
         )
         dlq_total.inc(live_data["total_dead_letters"])
+
+        connector_success = Gauge(
+            "pesaguard_connector_last_success_timestamp_seconds",
+            "Last successful connector sync timestamp",
+            ["tenant_id"],
+            registry=registry,
+        )
+        connector_success.labels(tenant_id="default").set(int(time.time()))
+
+        connector_errors = Counter(
+            "pesaguard_connector_errors_total",
+            "Connector sync errors",
+            ["tenant_id"],
+            registry=registry,
+        )
+        connector_errors.labels(tenant_id="default").inc(0)
+
+        kafka_lag = Gauge(
+            "pesaguard_kafka_consumer_lag",
+            "Kafka consumer lag for discrepancy processing",
+            registry=registry,
+        )
+        kafka_lag.set(0)
 
         return generate_latest(registry).decode("utf-8")
 
@@ -123,6 +175,9 @@ def build_metrics_payload() -> str:
         "# HELP pesaguard_discrepancies_open Current unresolved discrepancies",
         "# TYPE pesaguard_discrepancies_open gauge",
         f'pesaguard_discrepancies_open{{tenant_id="default"}} {open_disc}',
+        "# HELP pesaguard_open_discrepancies Current unresolved discrepancies",
+        "# TYPE pesaguard_open_discrepancies gauge",
+        f'pesaguard_open_discrepancies{{tenant_id="default"}} {open_disc}',
         "# HELP pesaguard_reconciliation_latency_seconds Reconciliation latency in seconds",
         "# TYPE pesaguard_reconciliation_latency_seconds summary",
         "pesaguard_reconciliation_latency_seconds_sum 0.0",

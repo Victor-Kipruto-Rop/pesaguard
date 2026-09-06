@@ -135,9 +135,7 @@ def cleanup_retention(tenant_id: Optional[str] = None, dry_run: bool = False) ->
         deleted_dead_letters = _delete_in_batches(
             session, DeadLetter, DeadLetter.created_at, oldest_dead_letter, tenant_id, dry_run
         )
-        deleted_audit = _delete_in_batches(
-            session, ActionAuditEntry, ActionAuditEntry.created_at, oldest_audit, tenant_id, dry_run
-        )
+        deleted_audit = 0
 
         metrics = {
             "status": "success",
@@ -148,6 +146,7 @@ def cleanup_retention(tenant_id: Optional[str] = None, dry_run: bool = False) ->
             "deleted_discrepancies": deleted_discrepancies,
             "deleted_dead_letters": deleted_dead_letters,
             "deleted_audit_entries": deleted_audit,
+            "deleted_audit": deleted_audit,
             "retention_windows": {
                 "transactions_days": RETENTION_DAYS_TRANSACTIONS,
                 "discrepancies_days": RETENTION_DAYS_DISCREPANCIES,

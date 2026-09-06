@@ -19,6 +19,9 @@ TOPIC_TRANSACTIONS_MATCHED = os.getenv("PESAGUARD_TOPIC_TRANSACTIONS_MATCHED", "
 TOPIC_DISCREPANCIES = os.getenv("PESAGUARD_TOPIC_DISCREPANCIES", "mpesa.discrepancies")
 TOPIC_DEAD_LETTERS = os.getenv("PESAGUARD_TOPIC_DEAD_LETTERS", "mpesa.dead_letters")
 TOPIC_AUDIT_EVENTS = os.getenv("PESAGUARD_TOPIC_AUDIT_EVENTS", "mpesa.audit.events")
+TOPIC_NOTIFICATION_EVENTS = os.getenv("PESAGUARD_TOPIC_NOTIFICATION_EVENTS", "notification.events")
+TOPIC_NOTIFICATION_STATUS = os.getenv("PESAGUARD_TOPIC_NOTIFICATION_STATUS", "notification.status")
+TOPIC_COMMUNICATION_AUDIT = os.getenv("PESAGUARD_TOPIC_COMMUNICATION_AUDIT", "communication.audit")
 
 # Legacy compatibility aliases
 TRANSACTIONS_RAW = TOPIC_TRANSACTIONS_RAW
@@ -31,6 +34,9 @@ ALL_TOPICS: List[str] = [
     TOPIC_DISCREPANCIES,
     TOPIC_DEAD_LETTERS,
     TOPIC_AUDIT_EVENTS,
+    TOPIC_NOTIFICATION_EVENTS,
+    TOPIC_NOTIFICATION_STATUS,
+    TOPIC_COMMUNICATION_AUDIT,
 ]
 
 # Production Topic Provisioning Specifications
@@ -73,6 +79,21 @@ TOPIC_SPECIFICATIONS: Dict[str, Dict[str, Any]] = {
         "configs": {
             "retention.ms": "31536000000",  # 365 Days retention
         },
+    },
+    TOPIC_NOTIFICATION_EVENTS: {
+        "num_partitions": 3,
+        "replication_factor": int(os.getenv("KAFKA_REPLICATION_FACTOR", "2")),
+        "configs": {"retention.ms": "2592000000"},
+    },
+    TOPIC_NOTIFICATION_STATUS: {
+        "num_partitions": 3,
+        "replication_factor": int(os.getenv("KAFKA_REPLICATION_FACTOR", "2")),
+        "configs": {"retention.ms": "2592000000"},
+    },
+    TOPIC_COMMUNICATION_AUDIT: {
+        "num_partitions": 3,
+        "replication_factor": int(os.getenv("KAFKA_REPLICATION_FACTOR", "2")),
+        "configs": {"retention.ms": "31536000000"},
     },
 }
 

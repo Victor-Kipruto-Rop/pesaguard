@@ -12,10 +12,10 @@ from typing import Any, Dict
 
 from flask import Blueprint, jsonify, request, g
 
-from alerting_service import AlertingService
-from rbac import PERM_MANAGE_SETTINGS, PERM_VIEW_SETTINGS, enforce_permission, has_permission
-from security_helpers import is_payload_within_limit, sanitize_error_message
-from tenant_settings_store import TenantSettingsStore
+from pesaguard_backend_pipeline.alerting_service import AlertingService
+from pesaguard_backend_pipeline.rbac import PERM_MANAGE_SETTINGS, PERM_VIEW_SETTINGS, enforce_permission, has_permission
+from pesaguard_backend_pipeline.security_helpers import is_payload_within_limit, sanitize_error_message
+from pesaguard_backend_pipeline.tenant_settings_store import TenantSettingsStore
 
 logger = logging.getLogger("pesaguard.settings_api")
 

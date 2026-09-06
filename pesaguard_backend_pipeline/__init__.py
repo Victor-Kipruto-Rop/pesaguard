@@ -22,6 +22,9 @@ for module_name in [
     "producer",
     "rate_limiter",
     "security_helpers",
+    "tenant_organization_service",
+    "tenant_org_dashboard",
+    "tenant_org_routes",
     "tenant_settings",
     "validators",
 ]:

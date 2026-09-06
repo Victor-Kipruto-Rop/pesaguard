@@ -40,7 +40,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@local
 
 def create_db_engine(url: str):
     """Create a robust database engine with appropriate pooling and timeout settings."""
-    if url.startswith("sqlite:///:memory:"):
+    if url.startswith("sqlite"):
         return create_engine(
             url,
             connect_args={"check_same_thread": False},
@@ -186,8 +186,9 @@ def _verify_credentials(username: str, password: str) -> Optional[Dict[str, Any]
     return user
 
 
-@app.route("/auth/login", methods=["POST"])
-def login():
+if "login" not in app.view_functions:
+    @app.route("/auth/login", methods=["POST"])
+    def login():
     """Authenticate operational users and issue secure signed session tokens."""
     data = request.json or {}
     username = data.get("username")

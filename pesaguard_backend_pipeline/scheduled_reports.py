@@ -24,7 +24,10 @@ from models import Base, Discrepancy, Report, Transaction
 logger = logging.getLogger("pesaguard.scheduled_reports")
 
 DB_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
-engine = create_engine(DB_URL, pool_pre_ping=True, pool_size=5, max_overflow=10)
+if DB_URL.startswith("sqlite"):
+    engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
+else:
+    engine = create_engine(DB_URL, pool_pre_ping=True, pool_size=5, max_overflow=10)
 Session = sessionmaker(bind=engine, expire_on_commit=False)
 
 # Ensure schema exists when run as isolated standalone script

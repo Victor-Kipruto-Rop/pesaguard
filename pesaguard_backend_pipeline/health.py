@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 import requests
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.pool import StaticPool
 
 logger = logging.getLogger("pesaguard.health")
 
@@ -51,13 +52,16 @@ def _get_or_create_engine(database_url: str, timeout: int):
     with _db_engine_lock:
         engine = _db_engines.get(cache_key)
         if engine is None:
-            engine = create_engine(
-                database_url,
-                pool_pre_ping=True,
-                pool_size=2,
-                max_overflow=0,
-                connect_args=_database_connect_args(database_url, timeout),
-            )
+            engine_kwargs = {
+                "pool_pre_ping": True,
+                "connect_args": _database_connect_args(database_url, timeout),
+            }
+            if database_url.startswith("sqlite"):
+                if database_url in {"sqlite://", "sqlite:///:memory:"}:
+                    engine_kwargs["poolclass"] = StaticPool
+            else:
+                engine_kwargs.update({"pool_size": 2, "max_overflow": 0})
+            engine = create_engine(database_url, **engine_kwargs)
             _db_engines[cache_key] = engine
         return engine
 

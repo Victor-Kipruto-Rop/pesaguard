@@ -192,10 +192,23 @@ def enforce_webhook_security():
     if request.method == "OPTIONS":
         return None
 
-    if not is_payload_within_limit(request):
+    is_webhook_request = (
+        request.path in {"/webhook", "/webhook/", "/webhook/mpesa/confirmation", "/webhook/mpesa/validation"}
+        or request.path.startswith("/daraja")
+        or request.path.startswith("/webhook/")
+        or request.headers.get("X-Daraja-Shared-Secret") is not None
+        or request.headers.get("X-PesaGuard-Signature") is not None
+    )
+
+    if not is_payload_within_limit(
+        request,
+        max_body_bytes=int(os.getenv("PESAGUARD_WEBHOOK_MAX_BODY_BYTES", "1048576"))
+        if is_webhook_request
+        else None,
+    ):
         return jsonify({"ResultCode": 1, "ResultDesc": "Request body too large"}), 413
 
-    if request.path.startswith("/webhook"):
+    if is_webhook_request:
         client_ip = get_client_ip(request)
         if not is_allowed_source(client_ip, request):
             logger.warning("Webhook request rejected: forbidden source IP", extra={"source_ip": client_ip})
@@ -294,11 +307,14 @@ def mpesa_confirmation():
         )
         return jsonify({"ResultCode": 1, "ResultDesc": "Temporary processing error, please retry"}), 500
 
-    # Best-effort Redis cache warm
+    # Best-effort Redis cache warm: maintain both the canonical idempotency key and
+    # the legacy trans-id key expected by older callers and tests.
     try:
         redis_conn = redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), socket_connect_timeout=2)
         cache_key = f"processed:{idempotency_key}"
+        legacy_cache_key = f"processed_trans_id:{trans_id}"
         redis_conn.set(cache_key, "1", ex=86400)
+        redis_conn.set(legacy_cache_key, "1", ex=86400)
     except Exception:
         pass
 

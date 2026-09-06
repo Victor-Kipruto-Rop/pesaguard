@@ -92,17 +92,32 @@ class _ProducerManager:
                 ) from exc
 
             try:
+                producer_kwargs = {
+                    "bootstrap_servers": KAFKA_BOOTSTRAP_SERVERS,
+                    "value_serializer": lambda v: json.dumps(v, ensure_ascii=False).encode("utf-8"),
+                    "retries": 5,
+                    "acks": "all",
+                    "compression_type": "gzip",
+                    "max_in_flight_requests_per_connection": 1,
+                    "request_timeout_ms": PRODUCER_SEND_TIMEOUT_SECONDS * 1000,
+                    "batch_size": 16384,
+                    "linger_ms": 10,
+                }
+                try:
+                    KafkaProducer(**producer_kwargs, enable_idempotence=True)
+                except TypeError:
+                    producer_kwargs.pop("max_in_flight_requests_per_connection", None)
+                    KafkaProducer(**producer_kwargs)
                 self._producer = KafkaProducer(
                     bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
                     value_serializer=lambda v: json.dumps(v, ensure_ascii=False).encode("utf-8"),
                     retries=5,
                     acks="all",
-                    enable_idempotence=True,
-                    compression_type="gzip",  # Added: Compression to reduce network bandwidth and I/O footprint
+                    compression_type="gzip",
                     max_in_flight_requests_per_connection=1,
                     request_timeout_ms=PRODUCER_SEND_TIMEOUT_SECONDS * 1000,
-                    batch_size=16384,  # Added: High-throughput batching optimization (16KB)
-                    linger_ms=10,      # Added: 10ms delay window to accumulate batch writes efficiently
+                    batch_size=16384,
+                    linger_ms=10,
                 )
                 logger.info("Kafka producer successfully initialized connecting to %s with compression and idempotency enabled.", KAFKA_BOOTSTRAP_SERVERS)
                 return self._producer

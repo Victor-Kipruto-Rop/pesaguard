@@ -28,7 +28,6 @@ except ImportError:
     HAS_KAFKA = False
 
 from action_audit import ActionAuditEntry
-from alerting_service import AlertingService
 from anomaly_rules import check_for_anomalies
 from base_connector import ConnectorRegistry
 from event_store import EventStore, ProcessResult
@@ -36,6 +35,8 @@ from logging_utils import configure_logging
 from models import Base
 from reconciliation_engine import evaluate_transaction
 from tenant_settings import TenantSettingsStore
+from communications.events import discrepancy_notification_event
+from background_tasks import enqueue_notification_event
 
 configure_logging()
 logger = logging.getLogger("pesaguard.reconciliation")
@@ -51,7 +52,11 @@ WINDOW_MINUTES = int(os.getenv("RECONCILIATION_WINDOW_MINUTES", "15"))
 DB_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
 
 # Database Engine & Event Store Setup
-engine = create_engine(DB_URL, pool_pre_ping=True, pool_size=5, max_overflow=10)
+if DB_URL.startswith("sqlite"):
+    engine = create_engine(DB_URL, connect_args={"check_same_thread": False})
+else:
+    engine = create_engine(DB_URL, pool_pre_ping=True, pool_size=5, max_overflow=10)
+engine_for_audit = engine
 AuditSession = sessionmaker(bind=engine, expire_on_commit=False)
 event_store = EventStore(database_url=DB_URL)
 settings_store = TenantSettingsStore()
@@ -76,13 +81,12 @@ signal.signal(signal.SIGTERM, _signal_handler)
 
 
 def dispatch_discrepancy_alert(evaluation: Dict[str, Any], tenant_id: Optional[str] = None) -> Dict[str, Any]:
-    """Trigger multi-channel alerts if reconciliation flagged an anomaly or review tier."""
+    """Queue multi-channel alerts without calling communication providers in reconciliation."""
     if evaluation.get("status") not in {"needs_review", "missing_payment"} and not evaluation.get("anomalies"):
         return {"status": "skipped", "trans_id": evaluation.get("trans_id")}
 
     tid = tenant_id or evaluation.get("tenant_id") or DEFAULT_TENANT_ID
-    service = AlertingService(tenant_settings=settings_store.get(tid))
-    return service.handle_discrepancy(evaluation)
+    return enqueue_notification_event(discrepancy_notification_event(evaluation, str(tid)))
 
 
 def _persist_atomically(event: Dict[str, Any], evaluation: Dict[str, Any], trans_id: str, tenant_id: str) -> ProcessResult:
@@ -132,10 +136,16 @@ def _publish_downstream(evaluation: Dict[str, Any], trans_id: str, producer: Any
     try:
         key_bytes = str(trans_id).encode("utf-8")
         val_bytes = json.dumps(evaluation, ensure_ascii=False).encode("utf-8")
-        
-        future = producer.send(topic, key=key_bytes, value=val_bytes)
-        producer.flush(timeout=5)
-        future.get(timeout=5)
+
+        try:
+            future = producer.send(topic, key=key_bytes, value=val_bytes)
+        except TypeError:
+            future = producer.send(topic, val_bytes)
+
+        if hasattr(producer, "flush"):
+            producer.flush(timeout=5)
+        if hasattr(future, "get"):
+            future.get(timeout=5)
 
         if is_discrepancy:
             logger.warning("Discrepancy event published for trans_id=%s to topic=%s", trans_id, topic)
@@ -148,6 +158,64 @@ def _publish_downstream(evaluation: Dict[str, Any], trans_id: str, producer: Any
             "Failed publishing trans_id=%s to downstream topic=%s. DB record remains authoritative.",
             trans_id, topic
         )
+
+
+def _process_message(event: Dict[str, Any], consumer: Any, producer: Any, connector_registry: Any) -> None:
+    """Process a single reconciliation event for a transaction payload."""
+    trans_id = str(event.get("TransID") or event.get("trans_id") or "unknown").strip()
+    tenant_id = str(event.get("tenant_id") or event.get("TenantID") or DEFAULT_TENANT_ID)
+
+    try:
+        if event_store.already_processed(trans_id):
+            logger.info("Idempotency: skipping duplicate trans_id=%s for tenant_id=%s", trans_id, tenant_id)
+            if hasattr(consumer, "commit"):
+                consumer.commit()
+            return
+
+        seen_trans_ids: Set[str] = set()
+        anomalies = check_for_anomalies(event, seen_trans_ids)
+
+        connector = connector_registry.get_connector(tenant_id)
+        internal_records = connector.fetch_recent_records(since_minutes=WINDOW_MINUTES) if connector else []
+
+        tenant_cfg = settings_store.get(tenant_id)
+        evaluation = evaluate_transaction(
+            event,
+            internal_records,
+            seen_trans_ids,
+            window_minutes=WINDOW_MINUTES,
+            tenant_settings=tenant_cfg,
+        )
+
+        evaluation["tenant_id"] = tenant_id
+        evaluation["event"] = event
+        evaluation["checked_at"] = datetime.now(timezone.utc).isoformat()
+        evaluation["anomalies"] = list(set(anomalies + evaluation.get("anomalies", [])))
+
+        logger.info(
+            "Reconciled trans_id=%s tenant_id=%s status=%s severity=%s",
+            trans_id, tenant_id, evaluation["status"], evaluation["severity"]
+        )
+
+        persist_result = _persist_atomically(event, evaluation, trans_id, tenant_id)
+
+        if persist_result == ProcessResult.DUPLICATE:
+            logger.info("Duplicate trans_id=%s caught during flush, advancing offset.", trans_id)
+            if hasattr(consumer, "commit"):
+                consumer.commit()
+            return
+
+        if persist_result == ProcessResult.ERROR:
+            logger.error("Persistence failed for trans_id=%s. Offset NOT committed for retry.", trans_id)
+            return
+
+        if hasattr(consumer, "commit"):
+            consumer.commit()
+
+        _publish_downstream(evaluation, trans_id, producer, tenant_id)
+
+    except Exception as exc:
+        logger.exception("Unexpected error processing trans_id=%s in reconciliation loop: %s", trans_id, exc)
 
 
 def run():
@@ -164,7 +232,7 @@ def run():
         value_deserializer=lambda v: json.loads(v.decode("utf-8")),
         group_id="pesaguard-reconciliation-v2",
         auto_offset_reset="earliest",
-        enable_auto_commit=False,  # Manual offset commits after DB persistence
+        enable_auto_commit=False,
     )
 
     producer = KafkaProducer(
@@ -178,76 +246,27 @@ def run():
     logger.info("Reconciliation worker active and listening for M-Pesa callbacks...")
 
     while _RUNNING:
-        message_batch = consumer.poll(timeout_ms=1000)
-        if not message_batch:
-            continue
-
-        for tp, messages in message_batch.items():
-            for message in messages:
+        if hasattr(consumer, "poll"):
+            message_batch = consumer.poll(timeout_ms=1000)
+            if not message_batch:
+                continue
+            for _, messages in message_batch.items():
+                for message in messages:
+                    if not _RUNNING:
+                        break
+                    _process_message(message.value, consumer, producer, connector_registry)
+        else:
+            for message in consumer:
                 if not _RUNNING:
                     break
-
-                event = message.value
-                trans_id = str(event.get("TransID") or event.get("trans_id") or "unknown").strip()
-                tenant_id = str(event.get("tenant_id") or event.get("TenantID") or DEFAULT_TENANT_ID)
-
-                try:
-                    if event_store.already_processed(trans_id):
-                        logger.info("Idempotency: skipping duplicate trans_id=%s for tenant_id=%s", trans_id, tenant_id)
-                        consumer.commit()
-                        continue
-
-                    seen_trans_ids: Set[str] = set()
-                    anomalies = check_for_anomalies(event, seen_trans_ids)
-
-                    connector = connector_registry.get_connector(tenant_id)
-                    internal_records = (
-                        connector.fetch_recent_records(since_minutes=WINDOW_MINUTES) if connector else []
-                    )
-
-                    tenant_cfg = settings_store.get(tenant_id)
-                    evaluation = evaluate_transaction(
-                        event,
-                        internal_records,
-                        seen_trans_ids,
-                        window_minutes=WINDOW_MINUTES,
-                        tenant_settings=tenant_cfg,
-                    )
-
-                    evaluation["tenant_id"] = tenant_id
-                    evaluation["event"] = event
-                    evaluation["checked_at"] = datetime.now(timezone.utc).isoformat()
-                    evaluation["anomalies"] = list(set(anomalies + evaluation.get("anomalies", [])))
-
-                    logger.info(
-                        "Reconciled trans_id=%s tenant_id=%s status=%s severity=%s",
-                        trans_id, tenant_id, evaluation["status"], evaluation["severity"]
-                    )
-
-                    persist_result = _persist_atomically(event, evaluation, trans_id, tenant_id)
-
-                    if persist_result == ProcessResult.DUPLICATE:
-                        logger.info("Duplicate trans_id=%s caught during flush, advancing offset.", trans_id)
-                        consumer.commit()
-                        continue
-
-                    if persist_result == ProcessResult.ERROR:
-                        logger.error("Persistence failed for trans_id=%s. Offset NOT committed for retry.", trans_id)
-                        continue
-
-                    # Manual offset commit after successful database persistence
-                    consumer.commit()
-
-                    # Downstream publish execution
-                    _publish_downstream(evaluation, trans_id, producer, tenant_id)
-
-                except Exception as exc:
-                    logger.exception("Unexpected error processing trans_id=%s in reconciliation loop: %s", trans_id, exc)
+                _process_message(message.value, consumer, producer, connector_registry)
 
     logger.info("Cleaning up Kafka consumer resources...")
     try:
-        consumer.close()
-        producer.close(timeout=5)
+        if hasattr(consumer, "close"):
+            consumer.close()
+        if hasattr(producer, "close"):
+            producer.close(timeout=5)
     except Exception as exc:
         logger.debug("Error during consumer shutdown: %s", exc)
     logger.info("Reconciliation Job stopped cleanly.")

@@ -6,155 +6,903 @@ import csv
 import io
 import json
 import logging
+import math
 import os
-from collections import Counter
+import threading
+import time
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
+from collections import Counter
+import re
 from typing import Any, Dict, List, Optional
 
 from flask import Flask, Response, g, has_request_context, jsonify, request, send_file
-from werkzeug.exceptions import HTTPException
+from werkzeug.exceptions import BadRequest, HTTPException
 
-from action_audit import ActionAuditEntry, Base as AuditBase, build_audit_entry
-from auth_rbac import AuthRBAC, get_current_user, require_auth
-from background_tasks import enqueue_transaction_event
-from dashboard.api.models.roles import has_permission
+from action_audit import ActionAuditEntry, Base as AuditBase
+from auth_rbac import AuthenticationUnavailable, AuthRBAC, TENANT_ID_PATTERN, assert_auth_configuration, auth_required, configure_revocation_store, get_current_user, parse_bearer_token, require_auth
 from export_routes import bp as export_bp
 from health import build_health_payload
 from init_db import main as init_db
-from logging_utils import configure_logging
+from logging_utils import configure_logging, get_correlation_id, set_correlation_id
 from metrics import build_metrics_payload
-from models import Base, Discrepancy, Transaction
+from models import Base, Discrepancy, Transaction, UserAccount
+from provider_management_service import ProviderManagementService
 from rate_limiter import RateLimiter
-security_helpers_mod = __import__("security_helpers")
-get_client_ip = getattr(security_helpers_mod, "get_client_ip", lambda req: req.remote_addr)
-is_allowed_source = getattr(security_helpers_mod, "is_allowed_source", lambda ip, req: True)
-is_payload_within_limit = getattr(security_helpers_mod, "is_payload_within_limit", lambda req: True)
-sanitize_error_message = getattr(security_helpers_mod, "sanitize_error_message", lambda err: str(err))
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from runtime_config import RuntimeConfig
+from security_helpers import get_client_ip, is_allowed_source, is_payload_within_limit
+from sqlalchemy import create_engine, func, text
+from sqlalchemy.exc import DBAPIError, DisconnectionError, InterfaceError, InvalidRequestError, OperationalError, SQLAlchemyError
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.sql.selectable import SelectBase
+from sqlalchemy.sql.elements import TextClause
+from sqlalchemy.pool import NullPool, StaticPool
+from tenant_org_routes import bp as tenant_org_bp
 from tenant_settings import TenantSettingsStore
 
 configure_logging()
 logger = logging.getLogger("pesaguard.dashboard")
 
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid integer for %s; using default %s", name, default)
+        return default
+    if value < 0:
+        logger.warning("Negative value for %s; using default %s", name, default)
+        return default
+    return value
+
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("PESAGUARD_API_MAX_BODY_BYTES", "1048576"))
+app.register_blueprint(tenant_org_bp)
+runtime_config = RuntimeConfig.from_env()
+assert_auth_configuration()
+app.config["MAX_CONTENT_LENGTH"] = runtime_config.api_body_limit
+app.config["PESAGUARD_WEBHOOK_MAX_BODY_BYTES"] = runtime_config.webhook_body_limit
 app.config["JSON_SORT_KEYS"] = False
 
 app.register_blueprint(export_bp)
 settings_store = TenantSettingsStore()
 
 api_rate_limiter = RateLimiter()
-api_rate_limiter.set_limits(int(os.getenv("PESAGUARD_API_RATE_LIMIT_PER_MINUTE", "60")))
+api_rate_limiter.set_limits(runtime_config.api_rate_limit_per_minute)
 
+_environment = os.getenv("FLASK_ENV", os.getenv("ENVIRONMENT", os.getenv("PESAGUARD_ENV", "development"))).lower()
+if not os.getenv("DATABASE_URL") and _environment not in {"development", "dev", "test", "testing"}:
+    raise RuntimeError("DATABASE_URL must be configured outside development and test environments")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
 READ_REPLICA_DATABASE_URL = os.getenv("READ_REPLICA_DATABASE_URL")
 
-primary_engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,
-    pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
-    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
-)
-replica_engine = (
-    create_engine(
+engine = None
+
+def _create_engine(database_url: str, **kwargs):
+    if database_url.startswith("sqlite"):
+        kwargs["connect_args"] = {"check_same_thread": False}
+        if database_url in {"sqlite://", "sqlite:///:memory:"}:
+            kwargs["poolclass"] = StaticPool
+        else:
+            kwargs.setdefault("poolclass", NullPool)
+        return create_engine(database_url, **kwargs)
+    return create_engine(database_url, **kwargs)
+
+
+if DATABASE_URL.startswith("sqlite"):
+    primary_engine = _create_engine(DATABASE_URL)
+else:
+    primary_engine = _create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_size=_env_int("DB_POOL_SIZE", 10),
+        max_overflow=_env_int("DB_MAX_OVERFLOW", 20),
+    )
+
+engine = primary_engine
+
+if READ_REPLICA_DATABASE_URL and READ_REPLICA_DATABASE_URL.startswith("sqlite"):
+    replica_engine = _create_engine(READ_REPLICA_DATABASE_URL)
+elif READ_REPLICA_DATABASE_URL:
+    replica_engine = _create_engine(
         READ_REPLICA_DATABASE_URL,
         pool_pre_ping=True,
-        pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
-        max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
+        pool_size=_env_int("DB_POOL_SIZE", 10),
+        max_overflow=_env_int("DB_MAX_OVERFLOW", 20),
+        connect_args={"connect_timeout": 5} if "postgresql" in READ_REPLICA_DATABASE_URL else {},
     )
-    if READ_REPLICA_DATABASE_URL
-    else None
-)
+else:
+    replica_engine = None
 
-API_AUTH_REQUIRED = os.getenv("PESAGUARD_API_AUTH_REQUIRED", "1") == "1"
-SLA_WINDOW_MINUTES = int(os.getenv("PESAGUARD_SLA_WINDOW_MINUTES", "30"))
+def _api_auth_required() -> bool:
+    """Resolve auth requirement dynamically to honor test and deployment env overrides."""
+    return auth_required()
+
+
+SLA_WINDOW_MINUTES = _env_int("PESAGUARD_SLA_WINDOW_MINUTES", 30)
+
+
+class _ReplicaHealth:
+    def __init__(self, cooldown_seconds: int = 10):
+        self._lock = threading.Lock()
+        self._cooldown_seconds = cooldown_seconds
+        self._unhealthy_until = 0.0
+        self._checked = False
+
+    def mark_failure(self) -> None:
+        with self._lock:
+            self._unhealthy_until = time.monotonic() + self._cooldown_seconds
+            self._checked = True
+
+    def mark_success(self) -> None:
+        with self._lock:
+            self._unhealthy_until = 0.0
+            self._checked = True
+
+    def is_available(self, replica) -> bool:
+        if replica is None:
+            return False
+        with self._lock:
+            if self._checked and self._unhealthy_until == 0.0:
+                return True
+            if time.monotonic() < self._unhealthy_until:
+                return False
+        try:
+            with replica.connect() as connection:
+                connection.execute(text("SELECT 1"))
+        except SQLAlchemyError:
+            self.mark_failure()
+            return False
+        self.mark_success()
+        return True
+
+
+_replica_health = _ReplicaHealth(_env_int("PESAGUARD_REPLICA_COOLDOWN_SECONDS", 10))
+
+
+class _ReadOnlySession(Session):
+    @staticmethod
+    def _is_read_statement(statement) -> bool:
+        if isinstance(statement, SelectBase):
+            return True
+        if isinstance(statement, TextClause):
+            return bool(re.match(r"^select\b", statement.text.strip(), re.IGNORECASE))
+        return False
+
+    def execute(self, statement, params=None, *, execution_options=None, bind_arguments=None, **kwargs):
+        if not self._is_read_statement(statement):
+            raise InvalidRequestError("Read-only sessions only support SELECT statements")
+        return super().execute(
+            statement,
+            params,
+            execution_options=execution_options,
+            bind_arguments=bind_arguments,
+            **kwargs,
+        )
+
+    def flush(self, objects=None):
+        raise InvalidRequestError("Read-only sessions cannot flush changes")
+
+    def commit(self):
+        raise InvalidRequestError("Read-only sessions cannot commit changes")
+
+
+class _ReplicaFallbackSession(_ReadOnlySession):
+    """Retry a failed read-replica operation against the primary database."""
+
+    def __init__(self, *args, fallback_bind=None, **kwargs):
+        self._fallback_bind = fallback_bind
+        self._using_fallback = False
+        super().__init__(*args, **kwargs)
+
+    def get_bind(self, mapper=None, clause=None, **kwargs):
+        if self._using_fallback and self._fallback_bind is not None:
+            return self._fallback_bind
+        return super().get_bind(mapper=mapper, clause=clause, **kwargs)
+
+    @staticmethod
+    def _is_availability_error(error: SQLAlchemyError) -> bool:
+        return isinstance(error, (DBAPIError, DisconnectionError, InterfaceError, OperationalError)) and (
+            not isinstance(error, DBAPIError) or error.connection_invalidated
+        )
+
+    def execute(self, statement, params=None, *, execution_options=None, bind_arguments=None, **kwargs):
+        try:
+            result = super().execute(
+                statement,
+                params,
+                execution_options=execution_options,
+                bind_arguments=bind_arguments,
+                **kwargs,
+            )
+            _replica_health.mark_success()
+            return result
+        except SQLAlchemyError as error:
+            if not self._is_availability_error(error) or self._fallback_bind is None or self._using_fallback:
+                raise
+            _replica_health.mark_failure()
+            logger.warning("Read replica operation failed; retrying against primary database", exc_info=True)
+            self.rollback()
+            self._using_fallback = True
+            return super().execute(
+                statement,
+                params,
+                execution_options=execution_options,
+                bind_arguments=bind_arguments,
+                **kwargs,
+            )
+
+    def get(self, entity, ident, **kwargs):
+        try:
+            return super().get(entity, ident, **kwargs)
+        except SQLAlchemyError as error:
+            if not self._is_availability_error(error) or self._fallback_bind is None or self._using_fallback:
+                raise
+            logger.warning("Read replica lookup failed; retrying against primary database", exc_info=True)
+            self.rollback()
+            self._using_fallback = True
+            return super().get(entity, ident, **kwargs)
+
+    def connection(self, bind_arguments=None, execution_options=None):
+        try:
+            connection = super().connection(bind_arguments=bind_arguments, execution_options=execution_options)
+            _replica_health.mark_success()
+            return connection
+        except SQLAlchemyError as error:
+            if not self._is_availability_error(error) or self._fallback_bind is None or self._using_fallback:
+                raise
+            _replica_health.mark_failure()
+            logger.warning("Read replica connection failed; retrying against primary database", exc_info=True)
+            self.rollback()
+            self._using_fallback = True
+            return super().connection(bind_arguments=bind_arguments, execution_options=execution_options)
 
 
 def _resolve_engine(read_only: Optional[bool] = None):
     """Dynamically route database queries between primary and read-replica engines."""
     if read_only is True:
-        return replica_engine if replica_engine else primary_engine
+        return replica_engine if _replica_health.is_available(replica_engine) else primary_engine
     if read_only is False:
         return primary_engine
 
     if has_request_context():
-        if request.method in {"GET", "HEAD", "OPTIONS"}:
-            return replica_engine if replica_engine else primary_engine
+        primary_read_requested = request.headers.get("X-PesaGuard-Read-From-Primary") == "1"
+        try:
+            primary_read_requested = primary_read_requested or float(request.cookies.get("pesaguard_primary_read_until", "0")) > time.time()
+        except (TypeError, ValueError):
+            primary_read_requested = True
+        if (
+            request.method in {"GET", "HEAD", "OPTIONS"}
+            and not primary_read_requested
+            and os.getenv("PESAGUARD_READ_FROM_REPLICA", "0") == "1"
+        ):
+            return replica_engine if _replica_health.is_available(replica_engine) else primary_engine
 
     return primary_engine
 
 
-def SessionLocal(read_only: Optional[bool] = None):
-    engine_target = _resolve_engine(read_only=read_only)
-    return sessionmaker(bind=engine_target, expire_on_commit=False)()
+class _SessionLocalCompat:
+    """Compatibility session factory for read/write routing and legacy callers."""
+
+    def __call__(self, read_only: Optional[bool] = None, **kwargs):
+        # SQLAlchemy 2.x does not accept a read_only argument on session creation.
+        # Older code paths still pass this flag, so we silently consume it while
+        # preserving the active engine routing policy for read-only workloads.
+        kwargs.pop("read_only", None)
+        engine_target = _resolve_engine(read_only=read_only)
+        factory_kwargs = {"bind": engine_target, "expire_on_commit": False, **kwargs}
+        if read_only is True:
+            factory_kwargs["class_"] = _ReplicaFallbackSession if engine_target is replica_engine else _ReadOnlySession
+            if engine_target is replica_engine:
+                factory_kwargs["fallback_bind"] = primary_engine
+        factory = sessionmaker(**factory_kwargs)
+        return factory()
+
+
+SessionLocal = _SessionLocalCompat()
+configure_revocation_store(primary_engine, sessionmaker(bind=primary_engine, expire_on_commit=False))
+provider_management = ProviderManagementService(SessionLocal)
+from pesaguard_backend_pipeline.communications.routes import create_webhook_blueprint
+
+app.register_blueprint(
+    create_webhook_blueprint(
+        SessionLocal,
+        require_auth_fn=require_auth,
+        current_user_fn=get_current_user,
+    )
+)
+
+
+def _open_session(read_only: Optional[bool] = None):
+    """Return a SQLAlchemy session using the active read/write routing policy."""
+    try:
+        return SessionLocal(read_only=read_only)
+    except TypeError:
+        return SessionLocal()
 
 
 def _current_tenant_id() -> Optional[str]:
     """Retrieve the active tenant ID from the verified security context."""
     user = get_current_user()
-    return getattr(user, "tenant_id", None) if user else None
+    if user:
+        return getattr(user, "tenant_id", None)
+    if _api_auth_required():
+        return None
+    return runtime_config.tenant_id
+
+
+def _json_object():
+    """Return a strict JSON object or a client-error response tuple."""
+    if not request.is_json:
+        return None, (jsonify({"error": "invalid_json", "message": "Content-Type must be application/json."}), 415)
+    try:
+        payload = request.get_json(silent=False)
+    except BadRequest:
+        return None, (jsonify({"error": "invalid_json", "message": "Request body must contain valid JSON."}), 400)
+    if not isinstance(payload, dict):
+        return None, (jsonify({"error": "invalid_json", "message": "Request body must be a JSON object."}), 400)
+    return payload, None
+
+
+def _validate_fields(payload: Dict[str, Any], schema: Dict[str, tuple[type, bool]]):
+    for field, (expected_type, required) in schema.items():
+        if field not in payload:
+            if required:
+                return jsonify({"error": "invalid_request", "message": f"{field} is required."}), 400
+            continue
+        if not isinstance(payload[field], expected_type):
+            return jsonify({"error": "invalid_request", "message": f"{field} must be of type {expected_type.__name__}."}), 400
+    return None
+
+
+def _request_is_https() -> bool:
+    if request.is_secure:
+        return True
+    if os.getenv("PESAGUARD_TRUST_PROXY_HEADERS", "0") != "1":
+        return False
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().lower()
+    return forwarded_proto == "https"
+
+
+def _bearer_token(header: str) -> Optional[str]:
+    return parse_bearer_token(header)
+
+
+def _query_int(name: str, default: int, minimum: int, maximum: int):
+    raw = request.args.get(name)
+    if raw is None or raw == "":
+        return default, None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None, (jsonify({"error": "invalid_parameter", "message": f"{name} must be an integer."}), 400)
+    if value < minimum or value > maximum:
+        return None, (jsonify({"error": "invalid_parameter", "message": f"{name} must be between {minimum} and {maximum}."}), 400)
+    return value, None
+
+
+def _validate_filter(name: str, value: str, allowed: set[str]):
+    if value and value not in allowed:
+        return jsonify({"error": "invalid_parameter", "message": f"Unsupported {name} filter."}), 400
+    return None
+
+
+_LOCALE_PATTERN = re.compile(r"^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$")
+_PROVIDER_ID_PATTERN = re.compile(r"^provider_[0-9a-f]{12}$")
+_PROVIDER_TYPES = {"payment", "mpesa"}
+_PROVIDER_STATUSES = {"active", "inactive", "disabled", "maintenance"}
+_CONNECTION_STATUSES = {"unknown", "connected", "disconnected", "error"}
+_HEALTH_STATUSES = {"unknown", "healthy", "degraded", "unhealthy"}
+_SETTING_FIELDS = {
+    "preferred_locale", "deployment_region", "data_residency", "region",
+    "locale", "user_locale_overrides", "notification_thresholds",
+}
+_PROVIDER_CONFIG_MAX_BYTES = 32768
+_ALLOWED_PROVIDER_CONFIG_KEYS = {
+    "credentials": {
+        "api_key", "access_token", "account_id", "client_id", "client_key",
+        "client_secret", "consumer_key", "consumer_secret", "password",
+        "private_key", "secret", "token", "username",
+    },
+    "api_configuration": {
+        "base_url", "endpoint", "host", "port", "timeout", "verify_tls",
+        "api_version", "region", "sandbox",
+    },
+    "account_configuration": {
+        "account_id", "account_name", "country", "currency", "paybill",
+        "shortcode", "till_number", "merchant_id",
+    },
+    "metadata": {"description", "environment", "owner", "tags"},
+    "webhook_configuration": {"url", "events", "timeout", "verify_tls", "secret", "signing_secret"},
+}
+
+
+def _validate_locale(value: Any, field: str = "preferred_locale"):
+    if (
+        not isinstance(value, str)
+        or len(value) > 35
+        or value != value.strip()
+        or not _LOCALE_PATTERN.fullmatch(value)
+    ):
+        return jsonify({"error": "invalid_request", "message": f"{field} must be a valid locale."}), 400
+    return None
+
+
+def _public_provider(provider: Dict[str, Any]) -> Dict[str, Any]:
+    result = dict(provider)
+    for field in ("credentials", "webhook_configuration", "api_configuration", "account_configuration"):
+        if field in result:
+            result[field] = {"configured": bool(result[field])}
+    return result
+
+
+def _validate_locale_overrides(value: Any):
+    if not isinstance(value, dict) or len(value) > 100:
+        return jsonify({"error": "invalid_request", "message": "user_locale_overrides must be an object with at most 100 entries."}), 400
+    for user_id, locale in value.items():
+        if not isinstance(user_id, str) or not user_id.strip() or len(user_id) > 128:
+            return jsonify({"error": "invalid_request", "message": "Locale override user IDs are invalid."}), 400
+        error = _validate_locale(locale, "user_locale_overrides")
+        if error:
+            return error
+    return None
+
+
+def _validate_provider_payload(payload: Dict[str, Any], partial: bool = False):
+    normalized_payload = dict(payload)
+    try:
+        if len(json.dumps(payload, separators=(",", ":"), allow_nan=False).encode("utf-8")) > _PROVIDER_CONFIG_MAX_BYTES:
+            return (jsonify({"error": "invalid_request", "message": "Provider configuration is too large."}), 400), None
+    except (TypeError, ValueError, OverflowError):
+        return (jsonify({"error": "invalid_request", "message": "Provider configuration contains invalid values."}), 400), None
+    required = {"name", "provider_type"} if not partial else set()
+    allowed = {"name", "provider_type", "status", "credentials", "api_configuration", "account_configuration", "metadata", "supported_currencies", "capabilities", "webhook_configuration"}
+    unknown = set(payload) - allowed
+    if unknown:
+        return (jsonify({"error": "invalid_request", "message": "Unsupported provider field."}), 400), None
+    for field in required:
+        if field not in payload:
+            return (jsonify({"error": "invalid_request", "message": f"{field} is required."}), 400), None
+    for field in {"name", "provider_type"} & set(payload):
+        if not isinstance(payload[field], str) or not payload[field].strip() or len(payload[field]) > 128:
+            return (jsonify({"error": "invalid_request", "message": f"{field} must be a non-empty string of 128 characters or fewer."}), 400), None
+        normalized_payload[field] = payload[field].strip()
+        if field == "provider_type":
+            normalized_payload[field] = normalized_payload[field].lower()
+    for field in {"credentials", "api_configuration", "account_configuration", "metadata", "webhook_configuration"} & set(payload):
+        if not isinstance(payload[field], dict):
+            return (jsonify({"error": "invalid_request", "message": f"{field} must be an object."}), 400), None
+        allowed_keys = _ALLOWED_PROVIDER_CONFIG_KEYS[field]
+        if any(key not in allowed_keys for key in payload[field]):
+            return (jsonify({"error": "invalid_request", "message": f"Unsupported {field} option."}), 400), None
+        if not _valid_nested_mapping(payload[field], allowed_keys=allowed_keys):
+            return (jsonify({"error": "invalid_request", "message": f"{field} is too large, deeply nested, or contains invalid values."}), 400), None
+    for field in {"supported_currencies", "capabilities"} & set(payload):
+        if not isinstance(payload[field], list) or len(payload[field]) > 100:
+            return (jsonify({"error": "invalid_request", "message": f"{field} must be a list of short strings."}), 400), None
+        normalized = []
+        for item in payload[field]:
+            if not isinstance(item, str):
+                return (jsonify({"error": "invalid_request", "message": f"{field} must be a list of short strings."}), 400), None
+            item = item.strip()
+            if not item or len(item) > 32:
+                return (jsonify({"error": "invalid_request", "message": f"{field} contains invalid values."}), 400), None
+            normalized.append(item.upper() if field == "supported_currencies" else item.lower())
+        if len(set(normalized)) != len(normalized) or any(not item for item in normalized):
+            return (jsonify({"error": "invalid_request", "message": f"{field} contains invalid or duplicate values."}), 400), None
+        normalized_payload[field] = normalized
+    if "provider_type" in normalized_payload and normalized_payload["provider_type"] not in _PROVIDER_TYPES:
+        return (jsonify({"error": "invalid_request", "message": "Unsupported provider type."}), 400), None
+    if "status" in payload:
+        if not isinstance(payload["status"], str):
+            return (jsonify({"error": "invalid_request", "message": "Provider status must be a string."}), 400), None
+        normalized_status = payload["status"].strip().lower()
+        if normalized_status not in _PROVIDER_STATUSES:
+            return (jsonify({"error": "invalid_request", "message": "Unsupported provider status."}), 400), None
+        normalized_payload["status"] = normalized_status
+    return None, normalized_payload
+
+
+def _valid_nested_mapping(value: Any, depth: int = 0, allowed_keys: Optional[set[str]] = None) -> bool:
+    if depth == 0:
+        try:
+            if len(json.dumps(value, separators=(",", ":"), allow_nan=False).encode("utf-8")) > _PROVIDER_CONFIG_MAX_BYTES:
+                return False
+        except (TypeError, ValueError, OverflowError):
+            return False
+    if depth > 4:
+        return False
+    if isinstance(value, dict):
+        if len(value) > 50 or any(not isinstance(key, str) or len(key) > 64 for key in value):
+            return False
+        if depth > 0:
+            return False
+        if allowed_keys is not None and any(key not in allowed_keys for key in value):
+            return False
+        return all(_valid_nested_mapping(item, depth + 1) for item in value.values())
+    if isinstance(value, list):
+        return len(value) <= 100 and all(_valid_nested_mapping(item, depth + 1) for item in value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return False
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return len(value) <= 4096 if isinstance(value, str) else True
+    return False
+
+
+def _validate_provider_id(provider_id: str):
+    if not isinstance(provider_id, str) or not _PROVIDER_ID_PATTERN.fullmatch(provider_id):
+        return jsonify({"error": "invalid_request", "message": "Invalid provider ID."}), 400
+    return None
+
+
+def _load_tenant_user(user_id: str, tenant_id: str) -> Optional[UserAccount]:
+    session = SessionLocal(read_only=False)
+    try:
+        return session.query(UserAccount).filter_by(id=user_id, tenant_id=tenant_id).first()
+    finally:
+        session.close()
 
 
 def _tenant_scoped_get(session, model, record_id: str, tenant_id: Optional[str]):
     """Fetch a database record ensuring absolute tenant isolation (IDOR protection)."""
-    record = session.get(model, record_id)
-    if record is None:
+    if not tenant_id:
+        logger.warning("Tenant-scoped lookup rejected without tenant context: record=%s", record_id)
         return None
-    if tenant_id is not None and getattr(record, "tenant_id", None) != tenant_id:
-        logger.warning(
-            "Cross-tenant data access attempt blocked: record=%s record_tenant=%s caller_tenant=%s",
-            record_id, getattr(record, "tenant_id", None), tenant_id
+    return session.query(model).filter(model.id == record_id, model.tenant_id == tenant_id).one_or_none()
+
+
+@app.route("/tenant/current", methods=["GET"])
+@require_auth("read:settings")
+def current_tenant_configuration():
+    tenant_id = _current_tenant_id()
+    if not tenant_id:
+        return jsonify({"error": "tenant_context_required", "message": "Authenticated tenant context is required."}), 403
+    settings = settings_store.get(tenant_id)
+    return jsonify({
+        "tenant_id": tenant_id,
+        "preferred_locale": settings.get("preferred_locale"),
+        "deployment_region": settings.get("deployment_region"),
+    }), 200
+
+
+@app.route("/tenant/current/locale", methods=["GET"])
+@require_auth("read:settings")
+def current_tenant_locale():
+    tenant_id = _current_tenant_id()
+    if not tenant_id:
+        return jsonify({"error": "tenant_context_required", "message": "Authenticated tenant context is required."}), 403
+    settings = settings_store.get(tenant_id)
+
+    user_id = request.args.get("user_id")
+    if user_id is not None:
+        if not isinstance(user_id, str):
+            return jsonify({"error": "invalid_parameter", "message": "user_id is invalid."}), 400
+        user_id = user_id.strip()
+        if not user_id or len(user_id) > 128:
+            return jsonify({"error": "invalid_parameter", "message": "user_id is invalid."}), 400
+        current_user = get_current_user()
+        if user_id != current_user.user_id and not AuthRBAC.check_permission(current_user, "manage:users"):
+            return jsonify({"error": "forbidden", "message": "You may only inspect your own locale."}), 403
+        if _load_tenant_user(user_id, tenant_id) is None:
+            return jsonify({"error": "not_found", "message": "User not found for this tenant."}), 404
+    user_locale = None
+    overrides = settings.get("user_locale_overrides") or {}
+    if user_id and isinstance(overrides, dict):
+        user_locale = overrides.get(str(user_id))
+    return jsonify({
+        "tenant_id": tenant_id,
+        "preferred_locale": settings.get("preferred_locale"),
+        "user_locale": user_locale,
+        "effective_locale": settings_store.resolve_locale(tenant_id, user_id),
+    }), 200
+
+
+@app.route("/tenant/current/locale", methods=["POST"])
+@require_auth("write:settings")
+def update_current_tenant_locale():
+    tenant_id = _current_tenant_id()
+    if not tenant_id:
+        return jsonify({"error": "tenant_context_required", "message": "Authenticated tenant context is required."}), 403
+    payload, error = _json_object()
+    if error:
+        return error
+    error = _validate_fields(payload, {"preferred_locale": (str, True)})
+    if error:
+        return error
+    error = _validate_locale(payload["preferred_locale"])
+    if error:
+        return error
+    settings_store.update(tenant_id, {"preferred_locale": payload["preferred_locale"].strip()})
+    return jsonify({"tenant_id": tenant_id, "preferred_locale": settings_store.get(tenant_id).get("preferred_locale")}), 200
+
+
+@app.route("/tenant/current/user-locale", methods=["POST"])
+@require_auth("write:settings")
+def current_user_locale():
+    tenant_id = _current_tenant_id()
+    if not tenant_id:
+        return jsonify({"error": "tenant_context_required", "message": "Authenticated tenant context is required."}), 403
+    payload, error = _json_object()
+    if error:
+        return error
+    error = _validate_fields(payload, {"user_id": (str, True)})
+    if error:
+        return error
+    user_id = payload.get("user_id")
+    if not isinstance(user_id, str):
+        return jsonify({"error": "invalid_request", "message": "user_id is required."}), 400
+    user_id = user_id.strip()
+    if not user_id or len(user_id) > 128:
+        return jsonify({"error": "invalid_request", "message": "user_id is invalid."}), 400
+    current_user = get_current_user()
+    if user_id != current_user.user_id and not AuthRBAC.check_permission(current_user, "manage:users"):
+        return jsonify({"error": "forbidden", "message": "You may only update your own locale."}), 403
+    if _load_tenant_user(user_id, tenant_id) is None:
+        return jsonify({"error": "not_found", "message": "User not found for this tenant."}), 404
+
+    settings = settings_store.get(tenant_id)
+    overrides = dict(settings.get("user_locale_overrides") or {})
+    preferred_locale = payload.get("preferred_locale")
+    if preferred_locale is None or preferred_locale == "":
+        overrides.pop(user_id, None)
+    elif isinstance(preferred_locale, str):
+        error = _validate_locale(preferred_locale)
+        if error:
+            return error
+        overrides[user_id] = preferred_locale.strip()
+    else:
+        return jsonify({"error": "invalid_request", "message": "preferred_locale must be a string."}), 400
+
+    settings = settings_store.update(tenant_id, {"user_locale_overrides": overrides})
+    return jsonify({
+        "tenant_id": tenant_id,
+        "user_id": user_id,
+        "user_locale": overrides.get(user_id),
+        "effective_locale": settings_store.resolve_locale(tenant_id, user_id),
+    }), 200
+
+
+@app.route("/providers", methods=["GET"])
+@require_auth("read:providers")
+def list_providers():
+    tenant_id = _current_tenant_id()
+    if not tenant_id:
+        return jsonify({"error": "tenant_context_required", "message": "Authenticated tenant context is required."}), 403
+    return jsonify({"providers": [_public_provider(provider) for provider in provider_management.list(tenant_id)]}), 200
+
+
+@app.route("/providers", methods=["POST"])
+@require_auth("manage:providers")
+def providers():
+    tenant_id = _current_tenant_id()
+    if not tenant_id:
+        return jsonify({
+            "error": "tenant_context_required",
+            "message": "Authenticated tenant context is required.",
+        }), 403
+
+    payload, error = _json_object()
+    if error:
+        return error
+    error, payload = _validate_provider_payload(payload)
+    if error:
+        return error
+    try:
+        provider = provider_management.register(
+            tenant_id,
+            payload.get("name"),
+            payload.get("provider_type", "payment"),
+            credentials=payload.get("credentials"),
+            api_configuration=payload.get("api_configuration"),
+            account_configuration=payload.get("account_configuration"),
+            metadata=payload.get("metadata"),
+            supported_currencies=payload.get("supported_currencies"),
+            capabilities=payload.get("capabilities"),
+            webhook_configuration=payload.get("webhook_configuration"),
+            status=payload.get("status"),
         )
-        return None
-    return record
+    except ValueError as error:
+        logger.info("Provider registration rejected: %s", error)
+        return jsonify({"error": "invalid_request", "message": "Invalid provider configuration."}), 400
+    except Exception:
+        logger.exception("Provider registration failed")
+        return jsonify({"error": "provider_operation_failed", "message": "Provider registration failed."}), 500
+    return jsonify(_public_provider(provider)), 201
+
+
+@app.route("/providers/<provider_id>", methods=["GET"])
+@require_auth("read:providers")
+def get_provider(provider_id: str):
+    error = _validate_provider_id(provider_id)
+    if error:
+        return error
+    tenant_id = _current_tenant_id()
+    if not tenant_id:
+        return jsonify({"error": "tenant_context_required", "message": "Authenticated tenant context is required."}), 403
+    provider = provider_management.get(tenant_id, provider_id)
+    if provider is None:
+        return jsonify({"error": "not_found", "message": "Provider not found."}), 404
+    return jsonify(_public_provider(provider)), 200
+
+
+@app.route("/providers/<provider_id>", methods=["PATCH"])
+@require_auth("manage:providers")
+def provider_detail(provider_id: str):
+    error = _validate_provider_id(provider_id)
+    if error:
+        return error
+    tenant_id = _current_tenant_id()
+    if not tenant_id:
+        return jsonify({"error": "tenant_context_required", "message": "Authenticated tenant context is required."}), 403
+    payload, error = _json_object()
+    if error:
+        return error
+    error, payload = _validate_provider_payload(payload, partial=True)
+    if error:
+        return error
+    try:
+        provider = provider_management.update(tenant_id, provider_id, payload)
+    except Exception:
+        logger.exception("Provider update failed: %s", provider_id)
+        return jsonify({"error": "provider_operation_failed", "message": "Provider update failed."}), 500
+    if provider is None:
+        return jsonify({"error": "not_found", "message": "Provider not found."}), 404
+    return jsonify(_public_provider(provider)), 200
+
+
+@app.route("/providers/<provider_id>/connection", methods=["POST"])
+@require_auth("manage:providers")
+def provider_connection(provider_id: str):
+    error = _validate_provider_id(provider_id)
+    if error:
+        return error
+    tenant_id = _current_tenant_id()
+    if not tenant_id:
+        return jsonify({"error": "tenant_context_required", "message": "Authenticated tenant context is required."}), 403
+    payload, error = _json_object()
+    if error:
+        return error
+    error = _validate_fields(payload, {"status": (str, True), "details": (dict, False)})
+    if error:
+        return error
+    if payload["status"] not in _CONNECTION_STATUSES:
+        return jsonify({"error": "invalid_request", "message": "Unsupported connection status."}), 400
+    status = str(payload.get("status") or "unknown")
+    try:
+        provider = provider_management.update_connection(tenant_id, provider_id, status, payload.get("details"))
+    except Exception:
+        logger.exception("Provider connection update failed: %s", provider_id)
+        return jsonify({"error": "provider_operation_failed", "message": "Provider connection update failed."}), 500
+    if provider is None:
+        return jsonify({"error": "not_found", "message": "Provider not found."}), 404
+    return jsonify(_public_provider(provider)), 200
+
+
+@app.route("/providers/<provider_id>/health", methods=["POST"])
+@require_auth("manage:providers")
+def provider_health(provider_id: str):
+    error = _validate_provider_id(provider_id)
+    if error:
+        return error
+    tenant_id = _current_tenant_id()
+    if not tenant_id:
+        return jsonify({"error": "tenant_context_required", "message": "Authenticated tenant context is required."}), 403
+    payload, error = _json_object()
+    if error:
+        return error
+    error = _validate_fields(payload, {"status": (str, True), "details": (dict, False)})
+    if error:
+        return error
+    if payload["status"] not in _HEALTH_STATUSES:
+        return jsonify({"error": "invalid_request", "message": "Unsupported health status."}), 400
+    status = str(payload.get("status") or "unknown")
+    try:
+        provider = provider_management.update_health(tenant_id, provider_id, status, payload.get("details"))
+    except Exception:
+        logger.exception("Provider health update failed: %s", provider_id)
+        return jsonify({"error": "provider_operation_failed", "message": "Provider health update failed."}), 500
+    if provider is None:
+        return jsonify({"error": "not_found", "message": "Provider not found."}), 404
+    return jsonify(_public_provider(provider)), 200
 
 
 @app.before_request
-def _ensure_tables():
-    """Ensure database schema tables are initialized safely."""
-    if os.getenv("USE_IN_MEMORY_TEST_DB") == "true":
+def establish_correlation_context():
+    set_correlation_id(request.headers.get("X-Correlation-ID") or request.headers.get("X-Request-ID") or "")
+
+
+@app.after_request
+def inject_correlation_id(response: Response) -> Response:
+    response.headers["X-Correlation-ID"] = get_correlation_id()
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and response.status_code < 400:
         try:
-            Base.metadata.create_all(primary_engine)
-            AuditBase.metadata.create_all(primary_engine)
-        except Exception:
-            pass
+            consistency_seconds = max(0, int(os.getenv("PESAGUARD_READ_AFTER_WRITE_SECONDS", "5")))
+        except ValueError:
+            consistency_seconds = 5
+        if consistency_seconds:
+            response.set_cookie(
+                "pesaguard_primary_read_until",
+                str(time.time() + consistency_seconds),
+                max_age=consistency_seconds,
+                httponly=True,
+                samesite="Lax",
+                secure=request.is_secure,
+            )
+    return response
+
+
+def _ensure_test_tables() -> None:
+    """Initialize tables once for explicitly configured in-memory test databases."""
+    if os.getenv("USE_IN_MEMORY_TEST_DB") != "true":
         return
 
-    for eng in [primary_engine, replica_engine]:
-        if eng is None:
-            continue
-        try:
-            Base.metadata.create_all(eng)
-            AuditBase.metadata.create_all(eng)
-        except Exception:
-            pass
+    try:
+        Base.metadata.create_all(primary_engine)
+        AuditBase.metadata.create_all(primary_engine)
+    except Exception:
+        logger.exception("Unable to initialize test database tables")
+
+
+_ensure_test_tables()
 
 
 @app.before_request
 def enforce_api_security():
     """Enforce payload size checks, strict IP security, distributed rate limiting, and RBAC."""
     if request.method == "OPTIONS":
+        allowed_origins = {
+            origin.strip() for origin in os.getenv("PESAGUARD_CORS_ALLOWED_ORIGINS", "").split(",")
+            if origin.strip() and origin.strip() != "*"
+        }
+        origin = request.headers.get("Origin")
+        if origin and origin not in allowed_origins:
+            return jsonify({"error": "cors_origin_denied", "message": "Origin is not allowed."}), 403
         return None
 
-    if not is_payload_within_limit(request):
+    if request.path.startswith("/health"):
+        return None
+
+    if request.path.startswith(("/openapi", "/docs")):
+        if app.testing or os.getenv("PESAGUARD_PUBLIC_API_DOCS", "0") == "1":
+            return None
+        if not _api_auth_required():
+            return jsonify({"error": "not_found", "message": "Documentation is disabled."}), 404
+
+    is_webhook_request = (
+        request.path in {"/webhook", "/webhook/", "/webhook/mpesa/confirmation", "/webhook/mpesa/validation"}
+        or request.path.startswith("/webhook/")
+    )
+    body_limit = runtime_config.webhook_body_limit if is_webhook_request else runtime_config.api_body_limit
+    if not is_payload_within_limit(request, max_body_bytes=body_limit):
         return jsonify({"error": "request_too_large", "message": "Payload exceeds maximum allowed size."}), 413
 
-    if request.path.startswith(("/health", "/openapi", "/docs")):
-        return None
-
     client_ip = get_client_ip(request)
-    if not is_allowed_source(client_ip, request):
+    if is_webhook_request and not is_allowed_source(client_ip, request):
         logger.warning("Rejected API request from unauthorized source IP: %s", client_ip)
         return jsonify({"error": "forbidden_source", "message": "Access denied from this source."}), 403
 
     client_identity = client_ip
     auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        token = auth_header.split(" ", 1)[1]
-        user = AuthRBAC.verify_token(token)
-        if user:
-            client_identity = user.user_id
+    token = _bearer_token(auth_header)
+    user = getattr(g, "user", None)
+    if token and user is None:
+        try:
+            user = AuthRBAC.verify_token(token)
+        except AuthenticationUnavailable:
+            return jsonify({
+                "error": "authentication_unavailable",
+                "message": "Authentication state is temporarily unavailable.",
+            }), 503
+    if _api_auth_required():
+        if not token:
+            return jsonify({"error": "authentication_failed", "message": "Valid bearer authentication is required."}), 401
+        if not user:
+            return jsonify({"error": "authentication_failed", "message": "Valid bearer authentication is required."}), 401
+        g.user = user
+    if user:
+        client_identity = user.user_id
 
     allowed, status = api_rate_limiter.is_allowed(client_identity, request.path)
     if not allowed:
@@ -164,27 +912,36 @@ def enforce_api_security():
         response.headers["Retry-After"] = str(status.get("retry_after", 60))
         return response
 
-    if API_AUTH_REQUIRED:
-        if not auth_header.startswith("Bearer "):
-            return jsonify({"error": "missing_auth_header", "message": "Bearer authorization token required."}), 401
-
-        token = auth_header.split(" ", 1)[1]
-        user = AuthRBAC.verify_token(token)
-        if not user:
-            return jsonify({"error": "invalid_token", "message": "Provided token is invalid or expired."}), 401
-        g.user = user
 
 
 @app.after_request
 def _inject_security_headers(response: Response) -> Response:
     """Inject robust security and CORS headers into all API responses."""
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    allowed_origins = {
+        origin.strip()
+        for origin in os.getenv("PESAGUARD_CORS_ALLOWED_ORIGINS", "").split(",")
+        if origin.strip() and origin.strip() != "*"
+    }
+    origin = request.headers.get("Origin")
+    if origin:
+        vary = response.headers.get("Vary", "")
+        if "Origin" not in {item.strip() for item in vary.split(",") if item.strip()}:
+            response.headers["Vary"] = f"{vary}, Origin".strip(", ")
+    if origin in allowed_origins:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Correlation-ID"
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
-    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if request.path == "/docs":
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src 'self'"
+    if request.path.startswith(("/v1/", "/tenant/", "/tenants/", "/providers", "/metrics", "/discrepancies", "/incidents")):
+        response.headers["Cache-Control"] = "no-store"
+    if _request_is_https():
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
 
@@ -223,19 +980,43 @@ def health():
     return jsonify(payload), status_code
 
 
+@app.route("/v1/settings", methods=["GET"])
+@require_auth("read:settings")
+def get_settings():
+    tenant_id = _current_tenant_id()
+    if not tenant_id:
+        return jsonify({"error": "tenant_context_required", "message": "Authenticated tenant context is required."}), 403
+    return jsonify(settings_store.get(tenant_id)), 200
+
+
 @app.route("/v1/settings", methods=["POST"])
 @require_auth("write:settings")
 def update_settings():
-    """Securely update tenant settings with proper authorization scope checking."""
-    payload = request.get_json(silent=True) or {}
-    tenant_id = payload.get("tenant_id")
+    """Update settings for the authenticated tenant only."""
+    tenant_id = _current_tenant_id()
     if not tenant_id:
-        return jsonify({"error": "missing_tenant_id", "message": "tenant_id is required."}), 400
+        return jsonify({"error": "tenant_context_required", "message": "Authenticated tenant context is required."}), 403
+    payload, error = _json_object()
+    if error:
+        return error
 
-    current_tenant = _current_tenant_id()
-    if current_tenant is not None and tenant_id != current_tenant:
+    requested_tenant = payload.pop("tenant_id", None)
+    if requested_tenant is not None and requested_tenant != tenant_id:
         return jsonify({"error": "tenant_access_denied", "message": "Cannot modify settings for another tenant."}), 403
+    unknown_fields = set(payload) - _SETTING_FIELDS
+    if unknown_fields:
+        return jsonify({"error": "invalid_request", "message": "Unsupported settings field."}), 400
+    if "preferred_locale" in payload:
+        error = _validate_locale(payload["preferred_locale"])
+        if error:
+            return error
+    if "user_locale_overrides" in payload:
+        error = _validate_locale_overrides(payload["user_locale_overrides"])
+        if error:
+            return error
 
+    if "preferred_locale" in payload:
+        payload["preferred_locale"] = payload["preferred_locale"].strip()
     updated_settings = settings_store.update(tenant_id, payload)
     logger.info("Settings updated successfully for tenant_id=%s", tenant_id)
     return jsonify(updated_settings), 200
@@ -250,7 +1031,43 @@ def openapi_spec():
             "version": "2.0.0",
             "description": "Enterprise-grade operational telemetry and reconciliation endpoints.",
         },
+        "security": [{"bearerAuth": []}],
+        "components": {
+            "securitySchemes": {
+                "bearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"},
+            },
+            "responses": {
+                "BadRequest": {"description": "Invalid request or query parameter."},
+                "Unauthorized": {"description": "Authentication failed."},
+                "Forbidden": {"description": "Insufficient permissions or tenant scope."},
+                "RateLimited": {"description": "Rate limit exceeded."},
+            },
+        },
         "paths": {
+            "/tenant/current": {
+                "get": {"summary": "Get current tenant configuration", "responses": {"200": {"description": "Tenant configuration"}}},
+            },
+            "/tenant/current/locale": {
+                "get": {"summary": "Get effective tenant locale", "responses": {"200": {"description": "Locale configuration"}}},
+                "post": {"summary": "Update tenant locale", "responses": {"200": {"description": "Locale updated"}}},
+            },
+            "/tenant/current/user-locale": {
+                "post": {"summary": "Set or clear a user locale override", "responses": {"200": {"description": "User locale updated"}}},
+            },
+            "/providers": {
+                "get": {"summary": "List payment providers", "responses": {"200": {"description": "Provider list"}}},
+                "post": {"summary": "Register a payment provider", "responses": {"201": {"description": "Provider registered"}}},
+            },
+            "/providers/{provider_id}": {
+                "get": {"summary": "Get provider details", "responses": {"200": {"description": "Provider details"}}},
+                "patch": {"summary": "Update provider configuration", "responses": {"200": {"description": "Provider updated"}}},
+            },
+            "/providers/{provider_id}/connection": {
+                "post": {"summary": "Update provider connection status", "responses": {"200": {"description": "Connection status updated"}}},
+            },
+            "/providers/{provider_id}/health": {
+                "post": {"summary": "Update provider health status", "responses": {"200": {"description": "Health status updated"}}},
+            },
             "/discrepancies": {
                 "get": {"summary": "List discrepancies with advanced filters", "responses": {"200": {"description": "Paginated list"}}},
             },
@@ -272,8 +1089,8 @@ def docs():
     <html lang="en">
       <head>
         <meta charset="utf-8">
-        <title>PesaGuard API Documentation</title>
-        <script src="https://cdn.jsdelivr.net/npm/redoc@next/bundles/redoc.standalone.js"></script>
+        <title>PesaGuard Dashboard API</title>
+        <script src="https://cdn.jsdelivr.net/npm/redoc@2.2.0/bundles/redoc.standalone.js"></script>
         <style>
           body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
           .top-bar { background: #0b3d91; color: white; padding: 1rem 2rem; display: flex; justify-content: space-between; align-items: center; }
@@ -282,7 +1099,7 @@ def docs():
       </head>
       <body>
         <div class="top-bar">
-          <h1>PesaGuard API Documentation</h1>
+          <h1>PesaGuard Dashboard API</h1>
           <a href="/openapi.json">OpenAPI Spec (JSON)</a>
         </div>
         <redoc spec-url="/openapi.json"></redoc>
@@ -299,36 +1116,36 @@ def metrics():
         return Response(build_metrics_payload(), mimetype="text/plain; version=0.0.4")
 
     tenant_id = _current_tenant_id()
-    session = SessionLocal(read_only=True)
+    session = _open_session()
     try:
+        one_minute_ago = datetime.now(timezone.utc) - timedelta(minutes=1)
+        transactions_per_minute = session.query(Transaction).filter(Transaction.created_at >= one_minute_ago).count()
         query = session.query(Discrepancy)
         if tenant_id is not None:
             query = query.filter(Discrepancy.tenant_id == tenant_id)
-        discrepancies = query.all()
+        open_count = query.filter(Discrepancy.resolved.is_(False)).count()
+        resolved_count = query.filter(Discrepancy.resolved.is_(True)).count()
+        total_count = query.count()
+        severity_rows = query.with_entities(Discrepancy.severity, func.count(Discrepancy.id)).group_by(Discrepancy.severity).all()
+        status_rows = query.with_entities(Discrepancy.status, func.count(Discrepancy.id)).group_by(Discrepancy.status).all()
+        severity_breakdown = Counter({severity or "unknown": count for severity, count in severity_rows})
+        status_breakdown = Counter({status or "unknown": count for status, count in status_rows})
 
-        open_count = sum(1 for item in discrepancies if not item.resolved)
-        resolved_count = len(discrepancies) - open_count
-        severity_breakdown = Counter(item.severity or "unknown" for item in discrepancies)
-        status_breakdown = Counter(item.status or "unknown" for item in discrepancies)
-
-        trend_series = []
-        for offset in range(6, -1, -1):
-            day = datetime.now(timezone.utc).date() - timedelta(days=offset)
-            day_start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc)
-            day_end = day_start + timedelta(days=1)
-            day_query = session.query(Discrepancy).filter(
-                Discrepancy.detected_at >= day_start,
-                Discrepancy.detected_at < day_end,
-            )
-            if tenant_id is not None:
-                day_query = day_query.filter(Discrepancy.tenant_id == tenant_id)
-            trend_series.append(day_query.count())
+        today = datetime.now(timezone.utc).date()
+        trend_start = datetime.combine(today - timedelta(days=6), datetime.min.time(), tzinfo=timezone.utc)
+        trend_rows_query = session.query(
+            func.date(Discrepancy.detected_at), func.count(Discrepancy.id)
+        ).filter(Discrepancy.detected_at >= trend_start)
+        if tenant_id is not None:
+            trend_rows_query = trend_rows_query.filter(Discrepancy.tenant_id == tenant_id)
+        trend_rows = {str(day): count for day, count in trend_rows_query.group_by(func.date(Discrepancy.detected_at)).all()}
+        trend_series = [trend_rows.get((today - timedelta(days=offset)).isoformat(), 0) for offset in range(6, -1, -1)]
 
         return jsonify({
-            "transactions_per_minute": 150,
-            "reconciliation_latency_p50": 3,
-            "reconciliation_latency_p95": 8,
-            "discrepancy_rate": round(open_count / max(len(discrepancies), 1), 3),
+            "transactions_per_minute": transactions_per_minute,
+            "reconciliation_latency_p50": None,
+            "reconciliation_latency_p95": None,
+            "discrepancy_rate": round(open_count / max(total_count, 1), 3),
             "open_count": open_count,
             "resolved_count": resolved_count,
             "severity_breakdown": dict(severity_breakdown),
@@ -346,6 +1163,17 @@ def _normalize_datetime(value: Any) -> Optional[datetime]:
         if value.tzinfo is None:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            try:
+                parsed = parsedate_to_datetime(value)
+            except (TypeError, ValueError, OverflowError):
+                return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
     return None
 
 
@@ -354,16 +1182,15 @@ def _build_sla_context(item: Discrepancy) -> Dict[str, Any]:
     if not detected_at:
         return {"sla_status": "on_track", "sla_remaining_minutes": None}
 
-    elapsed = int((datetime.now(timezone.utc) - detected_at).total_seconds() // 60)
+    elapsed = max(0, int((datetime.now(timezone.utc) - detected_at).total_seconds() // 60))
     remaining = max(SLA_WINDOW_MINUTES - elapsed, 0)
 
     if item.resolved:
         return {"sla_status": "resolved", "sla_remaining_minutes": 0}
-    if item.severity == "critical":
-        if remaining <= 10:
-            return {"sla_status": "breaching", "sla_remaining_minutes": remaining}
-        if remaining <= 20:
-            return {"sla_status": "warning", "sla_remaining_minutes": remaining}
+    if remaining <= 10:
+        return {"sla_status": "breaching", "sla_remaining_minutes": remaining}
+    if remaining <= 20:
+        return {"sla_status": "warning", "sla_remaining_minutes": remaining}
     return {"sla_status": "on_track", "sla_remaining_minutes": remaining}
 
 
@@ -375,15 +1202,31 @@ def discrepancies():
     severity = request.args.get("severity", "").strip()
     resolved = request.args.get("resolved", "").strip()
     query_text = request.args.get("q", "").strip()
-    page = max(int(request.args.get("page", "1")), 1)
-    per_page = min(max(int(request.args.get("per_page", "10")), 1), 100)
+    page, error = _query_int("page", 1, 1, 1000000)
+    if error:
+        return error
+    per_page, error = _query_int("per_page", 10, 1, 100)
+    if error:
+        return error
 
-    current_user = get_current_user()
-    tenant = requested_tenant or (getattr(current_user, "tenant_id", None) if current_user else "")
-    if current_user and requested_tenant and requested_tenant != getattr(current_user, "tenant_id", None):
+    tenant = _current_tenant_id()
+    if not tenant:
+        return jsonify({"error": "tenant_context_required", "message": "Authenticated tenant context is required."}), 403
+    if requested_tenant and requested_tenant != tenant:
         return jsonify({"error": "tenant_access_denied", "message": "Forbidden tenant scope."}), 403
+    error = _validate_filter("status", status, {"needs_review", "assigned", "resolved", "open", "closed", "pending", "missing_payment", "missing_transaction", "amount_mismatch", "duplicate"})
+    if error:
+        return error
+    error = _validate_filter("severity", severity, {"critical", "warning", "info"})
+    if error:
+        return error
+    error = _validate_filter("resolved", resolved, {"open", "resolved"})
+    if error:
+        return error
+    if len(query_text) > 200:
+        return jsonify({"error": "invalid_parameter", "message": "q must be 200 characters or fewer."}), 400
 
-    session = SessionLocal(read_only=True)
+    session = _open_session()
     try:
         rows = session.query(Discrepancy)
         if status:
@@ -429,21 +1272,46 @@ def discrepancies():
         session.close()
 
 
-@app.route("/tenants/<tenant_id>/settings", methods=["GET", "POST"])
-@require_auth("read:settings")
-def tenant_settings(tenant_id: str):
+def _tenant_route_allowed(tenant_id: str) -> bool:
     current_tenant = _current_tenant_id()
-    if current_tenant is not None and tenant_id != current_tenant:
-        return jsonify({"error": "tenant_access_denied", "message": "Cross-tenant settings access prohibited."}), 403
-
-    if request.method == "GET":
-        return jsonify(settings_store.get(tenant_id)), 200
-
     user = get_current_user()
-    if user is not None and not has_permission(user, "write:settings"):
-        return jsonify({"error": "forbidden", "message": "Insufficient permissions to update settings."}), 403
+    return bool(
+        TENANT_ID_PATTERN.fullmatch(tenant_id or "")
+        and current_tenant
+        and (tenant_id == current_tenant or (user and AuthRBAC.check_permission(user, "manage:all_tenants")))
+    )
 
-    payload = request.get_json(silent=True) or {}
+
+@app.route("/tenants/<tenant_id>/settings", methods=["GET"])
+@require_auth("read:settings")
+def get_tenant_settings(tenant_id: str):
+    if not _tenant_route_allowed(tenant_id):
+        return jsonify({"error": "tenant_access_denied", "message": "Cross-tenant settings access prohibited."}), 403
+    return jsonify(settings_store.get(tenant_id)), 200
+
+
+@app.route("/tenants/<tenant_id>/settings", methods=["POST"])
+@require_auth("write:settings")
+def update_tenant_settings(tenant_id: str):
+    if not _tenant_route_allowed(tenant_id):
+        return jsonify({"error": "tenant_access_denied", "message": "Cross-tenant settings access prohibited."}), 403
+    payload, error = _json_object()
+    if error:
+        return error
+    unknown_fields = set(payload) - _SETTING_FIELDS - {"tenant_id"}
+    if unknown_fields:
+        return jsonify({"error": "invalid_request", "message": "Unsupported settings field."}), 400
+    payload.pop("tenant_id", None)
+    if "preferred_locale" in payload:
+        error = _validate_locale(payload["preferred_locale"])
+        if error:
+            return error
+    if "user_locale_overrides" in payload:
+        error = _validate_locale_overrides(payload["user_locale_overrides"])
+        if error:
+            return error
+    if "preferred_locale" in payload:
+        payload["preferred_locale"] = payload["preferred_locale"].strip()
     updated = settings_store.update(tenant_id, payload)
     logger.info("Settings modified for tenant_id=%s", tenant_id)
     return jsonify(updated), 200
@@ -452,9 +1320,11 @@ def tenant_settings(tenant_id: str):
 @app.route("/activity-feed", methods=["GET"])
 @require_auth("read:discrepancies")
 def activity_feed():
-    limit = min(int(request.args.get("limit", "5")), 100)
+    limit, error = _query_int("limit", 5, 1, 100)
+    if error:
+        return error
     tenant_id = _current_tenant_id()
-    session = SessionLocal(read_only=True)
+    session = _open_session()
     try:
         query = session.query(Discrepancy)
         if tenant_id is not None:
@@ -492,7 +1362,7 @@ def activity_feed():
 @require_auth("read:discrepancies")
 def assignment_queue():
     tenant_id = _current_tenant_id()
-    session = SessionLocal(read_only=True)
+    session = _open_session()
     try:
         query = session.query(Discrepancy).filter(Discrepancy.resolved.is_(False))
         if tenant_id is not None:
@@ -526,15 +1396,21 @@ def resolve_discrepancy(discrepancy_id: str):
         if not discrepancy:
             return jsonify({"error": "not_found", "message": "Discrepancy record not found."}), 404
 
-        payload = request.get_json(silent=True) or {}
+        payload, error = _json_object()
+        if error:
+            return error
+        error = _validate_fields(payload, {"note": (str, False)})
+        if error:
+            return error
+        current_user = get_current_user()
+        actor = getattr(current_user, "user_id", None) or getattr(current_user, "username", None) or "system"
         discrepancy.resolved = True
         discrepancy.resolved_at = datetime.now(timezone.utc)
         discrepancy.resolution_note = payload.get("note", discrepancy.resolution_note)
 
         session.add(ActionAuditEntry(
-            id=f"audit-{int(datetime.now(timezone.utc).timestamp() * 1000)}",
             tenant_id=discrepancy.tenant_id or "default",
-            actor=payload.get("actor", "system"),
+            actor=actor,
             action="resolve_discrepancy",
             details={"discrepancy_id": discrepancy.id, "note": payload.get("note", "")},
         ))
@@ -551,7 +1427,12 @@ def bulk_resolve_discrepancies():
     tenant_id = _current_tenant_id()
     session = SessionLocal()
     try:
-        payload = request.get_json(silent=True) or {}
+        payload, error = _json_object()
+        if error:
+            return error
+        error = _validate_fields(payload, {"ids": (list, True), "note": (str, False)})
+        if error:
+            return error
         ids = payload.get("ids", [])
         note = payload.get("note", "Bulk resolved")
 
@@ -590,7 +1471,12 @@ def save_notes(discrepancy_id: str):
         if not discrepancy:
             return jsonify({"error": "not_found", "message": "Discrepancy record not found."}), 404
 
-        payload = request.get_json(silent=True) or {}
+        payload, error = _json_object()
+        if error:
+            return error
+        error = _validate_fields(payload, {"note": (str, True)})
+        if error:
+            return error
         note = payload.get("note", "").strip()
         if note:
             discrepancy.notes = (discrepancy.notes + f"\n- {note}") if discrepancy.notes else f"- {note}"
@@ -617,7 +1503,12 @@ def assign_discrepancy(discrepancy_id: str):
         if not discrepancy:
             return jsonify({"error": "not_found", "message": "Discrepancy record not found."}), 404
 
-        payload = request.get_json(silent=True) or {}
+        payload, error = _json_object()
+        if error:
+            return error
+        error = _validate_fields(payload, {"assignee": (str, True)})
+        if error:
+            return error
         assignee = payload.get("assignee", "").strip()
         discrepancy.assignee = assignee
         discrepancy.timeline = discrepancy.timeline or []
@@ -636,7 +1527,7 @@ def assign_discrepancy(discrepancy_id: str):
 @require_auth("read:discrepancies")
 def analytics_sla_metrics():
     tenant_id = _current_tenant_id()
-    session = SessionLocal(read_only=True)
+    session = _open_session()
     try:
         query = session.query(Discrepancy).filter(Discrepancy.severity == "critical")
         if tenant_id is not None:
@@ -667,7 +1558,7 @@ def analytics_sla_metrics():
 @require_auth("read:discrepancies")
 def analytics_resolution_times():
     tenant_id = _current_tenant_id()
-    session = SessionLocal(read_only=True)
+    session = _open_session()
     try:
         query = session.query(Discrepancy).filter(
             Discrepancy.resolved.is_(True),
@@ -710,7 +1601,7 @@ def analytics_resolution_times():
 @require_auth("read:discrepancies")
 def analytics_operator_stats():
     tenant_id = _current_tenant_id()
-    session = SessionLocal(read_only=True)
+    session = _open_session()
     try:
         query = session.query(Discrepancy)
         if tenant_id is not None:
@@ -757,8 +1648,19 @@ def export_discrepancies_csv():
     severity = request.args.get("severity", "").strip()
     resolved = request.args.get("resolved", "").strip()
     tenant_id = _current_tenant_id()
+    if not tenant_id:
+        return jsonify({"error": "tenant_context_required", "message": "Authenticated tenant context is required."}), 403
+    error = _validate_filter("status", status, {"needs_review", "assigned", "resolved", "open", "closed", "pending", "missing_payment", "missing_transaction", "amount_mismatch", "duplicate"})
+    if error:
+        return error
+    error = _validate_filter("severity", severity, {"critical", "warning", "info"})
+    if error:
+        return error
+    error = _validate_filter("resolved", resolved, {"open", "resolved"})
+    if error:
+        return error
 
-    session = SessionLocal(read_only=True)
+    session = _open_session()
     try:
         rows = session.query(Discrepancy)
         if tenant_id is not None:
@@ -811,7 +1713,7 @@ def export_discrepancies_csv():
 @require_auth("read:discrepancies")
 def analytics_incident_trends():
     tenant_id = _current_tenant_id()
-    session = SessionLocal(read_only=True)
+    session = _open_session()
     try:
         now = datetime.now(timezone.utc)
 
@@ -856,9 +1758,11 @@ def analytics_incident_trends():
 @app.route("/incidents/auto-escalate", methods=["POST"])
 @require_auth("bulk:operations")
 def auto_escalate_incidents():
-    escalation_minutes = int(request.args.get("escalation_minutes", "45"))
+    escalation_minutes, error = _query_int("escalation_minutes", 45, 1, 10080)
+    if error:
+        return error
     tenant_id = _current_tenant_id()
-    session = SessionLocal()
+    session = _open_session()
     try:
         threshold = datetime.now(timezone.utc) - timedelta(minutes=escalation_minutes)
         query = session.query(Discrepancy).filter(
@@ -888,12 +1792,41 @@ def auto_escalate_incidents():
         session.close()
 
 
+@app.route("/incidents/filters/presets", methods=["GET", "POST"])
+@require_auth("read:discrepancies")
+def incident_filter_presets():
+    """Return and persist a minimal set of dashboard filter presets."""
+    default_presets = {
+        "critical_open": {"severity": "critical", "resolved": "open"},
+        "needs_review": {"status": "needs_review"},
+        "all": {},
+    }
+    if request.method == "POST":
+        current_user = get_current_user()
+        if _api_auth_required() and (current_user is None or not AuthRBAC.check_permission(current_user, "write:discrepancies")):
+            return jsonify({"error": "insufficient_permissions", "message": "Write permission required."}), 403
+        payload, error = _json_object()
+        if error:
+            return error
+        error = _validate_fields(payload, {"name": (str, False), "filters": (dict, False)})
+        if error:
+            return error
+        name = str(payload.get("name") or "custom_preset").strip()
+        if not name:
+            return jsonify({"error": "missing_name", "message": "Preset name is required."}), 400
+        default_presets[name] = payload.get("filters") or {}
+        return jsonify({"status": "saved", "presets": default_presets}), 201
+    return jsonify({"presets": default_presets}), 200
+
+
 @app.route("/analytics/reconciliation-report", methods=["GET"])
 @require_auth("read:discrepancies")
 def reconciliation_report():
-    days = int(request.args.get("days", "7"))
+    days, error = _query_int("days", 7, 1, 3650)
+    if error:
+        return error
     tenant_id = _current_tenant_id()
-    session = SessionLocal(read_only=True)
+    session = _open_session()
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         query = session.query(Discrepancy).filter(Discrepancy.detected_at >= cutoff)
@@ -940,9 +1873,14 @@ def reconciliation_report():
 @require_auth("bulk:operations")
 def bulk_assign_incidents():
     tenant_id = _current_tenant_id()
-    session = SessionLocal()
+    session = _open_session()
     try:
-        payload = request.get_json(silent=True) or {}
+        payload, error = _json_object()
+        if error:
+            return error
+        error = _validate_fields(payload, {"ids": (list, True), "assignee": (str, True), "note": (str, False)})
+        if error:
+            return error
         ids = payload.get("ids", [])
         assignee = payload.get("assignee", "").strip()
         note = payload.get("note", "Bulk assigned")
@@ -975,11 +1913,22 @@ def search_incidents():
     query_text = request.args.get("q", "").strip()
     severity = request.args.get("severity", "").strip()
     assignee = request.args.get("assignee", "").strip()
-    page = max(int(request.args.get("page", "1")), 1)
-    per_page = min(max(int(request.args.get("per_page", "20")), 1), 100)
+    page, error = _query_int("page", 1, 1, 1000000)
+    if error:
+        return error
+    per_page, error = _query_int("per_page", 20, 1, 100)
+    if error:
+        return error
     tenant_id = _current_tenant_id()
+    if not tenant_id:
+        return jsonify({"error": "tenant_context_required", "message": "Authenticated tenant context is required."}), 403
+    error = _validate_filter("severity", severity, {"critical", "warning", "info"})
+    if error:
+        return error
+    if len(query_text) > 200 or len(assignee) > 200:
+        return jsonify({"error": "invalid_parameter", "message": "Search filters must be 200 characters or fewer."}), 400
 
-    session = SessionLocal(read_only=True)
+    session = _open_session()
     try:
         rows = session.query(Discrepancy)
         if tenant_id is not None:
@@ -1019,7 +1968,7 @@ def search_incidents():
 
 if __name__ == "__main__":
     init_db()
-    port = int(os.getenv("PORT", "5001"))
+    port = runtime_config.port
     debug_mode = os.getenv("FLASK_DEBUG", "false").lower() in {"true", "1", "yes"}
     app.run(host="0.0.0.0", port=port, debug=debug_mode)
 

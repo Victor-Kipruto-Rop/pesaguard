@@ -249,10 +249,10 @@ class AdvancedSearchEngine:
             Discrepancy.tenant_id == (tenant_id or "default")
         )
 
-        severities = {r[0] for r in base_query.select_from(Discrepancy).distinct(Discrepancy.severity).values(Discrepancy.severity) if r[0]}
-        statuses = {r[0] for r in base_query.select_from(Discrepancy).distinct(Discrepancy.status).values(Discrepancy.status) if r[0]}
-        anomaly_types = {r[0] for r in base_query.select_from(Discrepancy).distinct(Discrepancy.anomaly_type).values(Discrepancy.anomaly_type) if r[0]}
-        assignees = {r[0] for r in base_query.select_from(Discrepancy).distinct(Discrepancy.assignee).values(Discrepancy.assignee) if r[0]}
+        severities = {r[0] for r in base_query.with_entities(Discrepancy.severity).distinct().all() if r[0]}
+        statuses = {r[0] for r in base_query.with_entities(Discrepancy.status).distinct().all() if r[0]}
+        anomaly_types = {r[0] for r in base_query.with_entities(Discrepancy.anomaly_type).distinct().all() if r[0]}
+        assignees = {r[0] for r in base_query.with_entities(Discrepancy.assignee).distinct().all() if r[0]}
 
         return {
             "severities": sorted(list(severities)),

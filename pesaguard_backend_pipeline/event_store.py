@@ -70,14 +70,21 @@ class EventStore:
             if "postgresql" in self.database_url:
                 connect_args["connect_timeout"] = int(os.getenv("DB_CONNECT_TIMEOUT", "5"))
 
-            self.engine = create_engine(
-                self.database_url,
-                pool_pre_ping=True,
-                pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
-                max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
-                isolation_level=self.isolation_level if "postgresql" in self.database_url else None,
-                connect_args=connect_args,
-            )
+            if self.database_url.startswith("sqlite"):
+                self.engine = create_engine(
+                    self.database_url,
+                    connect_args={"check_same_thread": False},
+                    isolation_level=self.isolation_level if "postgresql" in self.database_url else None,
+                )
+            else:
+                self.engine = create_engine(
+                    self.database_url,
+                    pool_pre_ping=True,
+                    pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
+                    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "20")),
+                    isolation_level=self.isolation_level if "postgresql" in self.database_url else None,
+                    connect_args=connect_args,
+                )
             Base.metadata.create_all(self.engine)
             self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
             self._initialized = True
@@ -162,7 +169,7 @@ class EventStore:
                     source_ip=source_ip,
                     signature_verified=signature_verified,
                     webhook_attempt_number=int(payload.get("retry_count", 1)),
-                    created_at=datetime.now(timezone.utc),
+                    received_at=datetime.now(timezone.utc),
                 )
                 session.add(pt_record)
 
@@ -239,7 +246,7 @@ class EventStore:
                 source_ip=source_ip,
                 signature_verified=signature_verified,
                 webhook_attempt_number=int(payload.get("retry_count", 1)),
-                created_at=datetime.now(timezone.utc),
+                received_at=datetime.now(timezone.utc),
             )
             session.add(pt_record)
 

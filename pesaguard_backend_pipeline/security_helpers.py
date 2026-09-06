@@ -57,7 +57,7 @@ def _parse_allowed_ips() -> List[str]:
     return [ip.strip() for ip in raw.split(",") if ip.strip()]
 
 
-def is_payload_within_limit(request: Request) -> bool:
+def is_payload_within_limit(request: Request, max_body_bytes: int | None = None) -> bool:
     """Guard against oversized HTTP request payloads prior to parsing.
 
     Args:
@@ -66,12 +66,8 @@ def is_payload_within_limit(request: Request) -> bool:
     Returns:
         True if request body is within limit, False otherwise
     """
-    max_body_bytes = int(
-        os.getenv(
-            "PESAGUARD_API_MAX_BODY_BYTES",
-            os.getenv("PESAGUARD_WEBHOOK_MAX_BODY_BYTES", "1048576"),  # 1MB default
-        )
-    )
+    if max_body_bytes is None:
+        max_body_bytes = int(os.getenv("PESAGUARD_API_MAX_BODY_BYTES", "1048576"))
     content_length = request.content_length
     if content_length is not None:
         return content_length <= max_body_bytes
@@ -97,16 +93,8 @@ def is_allowed_source(client_ip: str, request: Request) -> bool:
     shared_secret = os.getenv("DARAJA_SHARED_SECRET", "").strip()
     configured_ips = _parse_allowed_ips()
 
-    # Fail closed if security parameters are completely unconfigured
+    # Fail closed if security parameters are completely unconfigured.
     if not shared_secret and not configured_ips:
-        if os.getenv("PESAGUARD_ALLOW_UNRESTRICTED_WEBHOOK_SOURCE") == "1":
-            logger.warning(
-                "Webhook source validation is fully unconfigured and "
-                "PESAGUARD_ALLOW_UNRESTRICTED_WEBHOOK_SOURCE=1 is set. "
-                "Accepting requests from ALL sources. NEVER enable in production!"
-            )
-            return True
-
         logger.error(
             "Webhook source validation is fully unconfigured (missing DARAJA_SHARED_SECRET "
             "and DARAJA_ALLOWED_IPS). Rejecting all incoming webhook requests."

@@ -288,7 +288,7 @@ class EscalationEngine:
         }
 
         try:
-            response = requests.post(webhook_url, data=body_bytes, headers=headers, timeout=10)
+            response = requests.post(webhook_url, json=payload, headers=headers, timeout=10)
             return {
                 "status": "webhook_triggered",
                 "url": webhook_url,

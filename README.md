@@ -1,4 +1,4 @@
-# PesaGuard 🛡️
+# PesaGuard
 
 **Real-time M-Pesa reconciliation and anomaly detection for SACCOs, e-commerce operators, and small fintechs.**
 

@@ -12,6 +12,7 @@ rq==2.1.0
 
 # Security, Networking & Utilities
 PyJWT==2.13.0
+cryptography==46.0.5
 requests==2.33.0
 python-dotenv==1.2.2
 python-dateutil==2.9.0.post0

@@ -35,6 +35,8 @@ def dashboard_client(monkeypatch):
 
         app_2 = importlib.reload(app_2)
         app_2.Base.metadata.create_all(app_2.engine)
+        from auth_rbac import _RevocationBase
+        _RevocationBase.metadata.create_all(app_2.primary_engine)
         app_2.app.config.update(TESTING=False)
         with app_2.app.test_client() as client:
             yield client, app_2

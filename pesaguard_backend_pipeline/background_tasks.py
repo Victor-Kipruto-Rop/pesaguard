@@ -21,12 +21,18 @@ RQ_QUEUE_NAME = os.getenv("RQ_QUEUE_NAME", "transaction_events")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@localhost:5432/pesaguard")
 
 # Global thread-safe engine for task-level database persistence
-_task_db_engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,
-    pool_size=int(os.getenv("DB_POOL_SIZE", "5")),
-    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "10")),
-)
+if DATABASE_URL.startswith("sqlite"):
+    _task_db_engine = create_engine(
+        DATABASE_URL,
+        connect_args={"check_same_thread": False},
+    )
+else:
+    _task_db_engine = create_engine(
+        DATABASE_URL,
+        pool_pre_ping=True,
+        pool_size=int(os.getenv("DB_POOL_SIZE", "5")),
+        max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "10")),
+    )
 TaskSessionLocal = sessionmaker(bind=_task_db_engine, expire_on_commit=False)
 
 
@@ -82,27 +88,42 @@ def enqueue_transaction_event(topic: str, payload: dict) -> Dict[str, Any]:
 
     try:
         import redis
-        from rq import Queue, Retry
+        import rq
     except ImportError as exc:
         logger.error("RQ or Redis dependencies missing in runtime environment: %s", exc)
         return {
             "status": "failed",
-            "error": "rq_or_redis_not_installed",
+            "error": "rq or redis package not installed",
+            "details": str(exc),
+        }
+
+    try:
+        Queue = rq.Queue
+    except (AttributeError, ImportError) as exc:
+        logger.error("RQ dependency missing or incompatible in runtime environment: %s", exc)
+        return {
+            "status": "failed",
+            "error": "rq or redis package not installed",
             "details": str(exc),
         }
 
     try:
         redis_conn = redis.from_url(REDIS_URL, socket_connect_timeout=5, socket_timeout=5)
         queue = Queue(name=RQ_QUEUE_NAME, connection=redis_conn)
-        
-        # Enqueue with 3 retries (10s, 30s, 60s delays) and job failure handler
+
+        enqueue_kwargs = {
+            "job_timeout": 30,
+        }
+        Retry = getattr(rq, "Retry", None)
+        if Retry is not None:
+            enqueue_kwargs["retry"] = Retry(max=3, interval=[10, 30, 60])
+            enqueue_kwargs["on_failure"] = handle_job_failure
+
         job = queue.enqueue(
             _publish_transaction_event,
             topic,
             payload,
-            job_timeout=30,
-            retry=Retry(max=3, interval=[10, 30, 60]),
-            on_failure=handle_job_failure,
+            **enqueue_kwargs,
         )
         
         trans_id = payload.get("TransID", "unknown")
@@ -122,6 +143,39 @@ def _publish_transaction_event(topic: str, payload: dict) -> None:
     """Worker job function that wraps synchronous Kafka publishing."""
     from producer import publish_transaction_event
     publish_transaction_event(topic, payload)
+
+
+def enqueue_notification_event(event: dict) -> Dict[str, Any]:
+    """Queue a notification command without coupling business workers to providers."""
+    if not isinstance(event, dict) or not event.get("event") or not event.get("tenant_id"):
+        return {"status": "failed", "error": "invalid_notification_event"}
+    try:
+        import redis
+        import rq
+
+        queue = rq.Queue(name=os.getenv("NOTIFICATION_RQ_QUEUE_NAME", "notification_events"), connection=redis.from_url(REDIS_URL))
+        job = queue.enqueue(
+            _process_notification_event,
+            event,
+            job_timeout=30,
+            retry=rq.Retry(max=3, interval=[10, 30, 60]),
+            on_failure=handle_job_failure,
+        )
+        return {"status": "queued", "job_id": job.id, "queue": queue.name}
+    except Exception as exc:
+        logger.exception("Failed to enqueue notification event: %s", exc)
+        return {"status": "failed", "error": "notification_queue_unavailable"}
+
+
+def _process_notification_event(event: dict) -> None:
+    """Worker-owned compatibility adapter for the existing alerting service."""
+    from alerting_service import AlertingService
+    from tenant_settings import TenantSettingsStore
+
+    tenant_id = str(event["tenant_id"])
+    context = dict(event.get("context") or {})
+    context["tenant_id"] = tenant_id
+    AlertingService(tenant_settings=TenantSettingsStore().get(tenant_id)).handle_discrepancy(context)
 
 
 def _list_tenant_ids(store: Any) -> List[str]:

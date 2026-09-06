@@ -74,7 +74,7 @@ class AlertingService:
                 deliveries.append({"channel": channel, "status": "failed", "error": str(exc)})
 
         self._store_delivery_log(alert_id, discrepancy, deliveries)
-        return {"status": "dispatched", "alert_id": alert_id, "deliveries": deliveries, "delivery_mode": delivery_mode}
+        return {"status": "queued", "alert_id": alert_id, "deliveries": deliveries, "delivery_mode": delivery_mode}
 
     def _resolve_channels(self, severity: str) -> List[str]:
         """Determine valid notification channels based on severity level and tenant settings."""
