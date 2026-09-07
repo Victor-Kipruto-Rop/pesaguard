@@ -1,0 +1,90 @@
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import or_
+from sqlalchemy.orm import Session
+
+from .models import CommunicationNotification, CommunicationOutboxEntry
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def enqueue_notification(session: Session, notification: CommunicationNotification) -> CommunicationOutboxEntry:
+    existing = session.query(CommunicationOutboxEntry).filter_by(notification_id=notification.id).one_or_none()
+    if existing is not None:
+        return existing
+    entry = CommunicationOutboxEntry(
+        id=f"comm_outbox_{uuid.uuid4().hex}",
+        notification_id=notification.id,
+        tenant_id=notification.tenant_id,
+    )
+    session.add(entry)
+    notification.status = "queued"
+    session.flush()
+    return entry
+
+
+def claim_entries(session: Session, *, worker_id: str, limit: int = 50, lease_seconds: int = 60) -> list[CommunicationOutboxEntry]:
+    now = utc_now()
+    query = session.query(CommunicationOutboxEntry).filter(
+        CommunicationOutboxEntry.status.in_(("pending", "retrying", "leased")),
+        CommunicationOutboxEntry.available_at <= now,
+        or_(CommunicationOutboxEntry.lease_expires_at.is_(None), CommunicationOutboxEntry.lease_expires_at <= now),
+    ).order_by(CommunicationOutboxEntry.available_at.asc(), CommunicationOutboxEntry.created_at.asc()).limit(limit)
+    try:
+        query = query.with_for_update(skip_locked=True)
+    except TypeError:
+        query = query.with_for_update()
+    entries = query.all()
+    expiry = now + timedelta(seconds=lease_seconds)
+    for entry in entries:
+        entry.status = "leased"
+        entry.leased_by = worker_id
+        entry.lease_expires_at = expiry
+        entry.attempt_count += 1
+    session.flush()
+    return entries
+
+
+def complete_entry(session: Session, entry: CommunicationOutboxEntry, *, worker_id: str) -> None:
+    _assert_lease(entry, worker_id)
+    entry.status = "completed"
+    entry.completed_at = utc_now()
+    entry.lease_expires_at = None
+    entry.leased_by = None
+    session.query(CommunicationNotification).filter_by(id=entry.notification_id).update({"status": "submitted", "updated_at": utc_now()})
+
+
+def fail_entry(session: Session, entry: CommunicationOutboxEntry, *, worker_id: str, error: str, retry_delay_seconds: int = 60) -> None:
+    _assert_lease(entry, worker_id)
+    entry.last_error = error[:4000]
+    entry.lease_expires_at = None
+    entry.leased_by = None
+    if entry.attempt_count >= entry.max_attempts:
+        entry.status = "dead_letter"
+        notification_status = "dead_letter"
+    else:
+        entry.status = "retrying"
+        entry.available_at = utc_now() + timedelta(seconds=max(1, retry_delay_seconds))
+        notification_status = "retrying"
+    session.query(CommunicationNotification).filter_by(id=entry.notification_id).update({"status": notification_status, "failure_reason": entry.last_error, "updated_at": utc_now()})
+
+
+def replay_dead_letter(session: Session, entry_id: str) -> CommunicationOutboxEntry:
+    entry = session.query(CommunicationOutboxEntry).filter_by(id=entry_id, status="dead_letter").one()
+    entry.status = "pending"
+    entry.attempt_count = 0
+    entry.available_at = utc_now()
+    entry.last_error = None
+    session.query(CommunicationNotification).filter_by(id=entry.notification_id).update({"status": "queued", "failure_reason": None, "updated_at": utc_now()})
+    session.flush()
+    return entry
+
+
+def _assert_lease(entry: CommunicationOutboxEntry, worker_id: str) -> None:
+    if entry.status != "leased" or entry.leased_by != worker_id or not entry.lease_expires_at or entry.lease_expires_at <= utc_now():
+        raise RuntimeError("communication outbox lease is not owned by this worker")

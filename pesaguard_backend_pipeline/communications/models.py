@@ -41,6 +41,31 @@ class CommunicationNotification(Base):
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, server_default="now()")
 
 
+class CommunicationOutboxEntry(Base):
+    __tablename__ = "communication_outbox_entries"
+    __table_args__ = (
+        UniqueConstraint("notification_id", name="uq_communication_outbox_notification"),
+        CheckConstraint("status IN ('pending', 'leased', 'retrying', 'completed', 'dead_letter')", name="ck_communication_outbox_status"),
+        CheckConstraint("attempt_count >= 0 AND max_attempts > 0", name="ck_communication_outbox_attempt_counts"),
+        Index("ix_communication_outbox_due", "status", "available_at"),
+        Index("ix_communication_outbox_lease", "lease_expires_at"),
+        Index("ix_communication_outbox_tenant_status", "tenant_id", "status", "created_at"),
+    )
+
+    id = Column(String(64), primary_key=True)
+    notification_id = Column(String(64), ForeignKey("communication_notifications.id"), nullable=False)
+    tenant_id = Column(String(128), nullable=False)
+    status = Column(String(32), nullable=False, default="pending", server_default="pending")
+    attempt_count = Column(Integer, nullable=False, default=0, server_default="0")
+    max_attempts = Column(Integer, nullable=False, default=5, server_default="5")
+    available_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, server_default="now()")
+    leased_by = Column(String(128), nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, server_default="now()")
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+
 class CommunicationAttempt(Base):
     __tablename__ = "communication_attempts"
     __table_args__ = (

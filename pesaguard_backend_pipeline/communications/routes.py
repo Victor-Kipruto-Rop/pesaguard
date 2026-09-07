@@ -41,7 +41,7 @@ def create_webhook_blueprint(
             notification = NotificationService(
                 session,
                 provider_factory(),
-            ).send(
+            ).enqueue(
                 NotificationRequest(
                     tenant_id=tenant_id,
                     recipient=recipient,

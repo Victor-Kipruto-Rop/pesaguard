@@ -16,6 +16,10 @@ echo "  - Redis URL: ${REDIS_URL}"
 echo "  - Queues   : ${RQ_QUEUES}"
 echo "  - Python Path: ${PYTHONPATH}"
 
+if [ "${COMMUNICATION_WORKER_MODE:-0}" = "1" ]; then
+  exec python -m pesaguard_backend_pipeline.communications.worker
+fi
+
 # Execute RQ worker with graceful shutdown timeout (e.g., 60 seconds)
 exec rq worker \
   --path /app \

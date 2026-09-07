@@ -9,6 +9,7 @@ from ..core.interfaces import CommunicationProvider, NotificationRequest
 from ..core.exceptions import CommunicationError
 from ..core.enums import NotificationStatus
 from ..models import CommunicationAttempt, CommunicationNotification
+from ..outbox import enqueue_notification
 
 
 class NotificationService:
@@ -17,6 +18,37 @@ class NotificationService:
     def __init__(self, session: Session, provider: CommunicationProvider):
         self.session = session
         self.provider = provider
+
+    def enqueue(self, request: NotificationRequest) -> CommunicationNotification:
+        """Persist a notification and outbox entry without contacting a provider."""
+        if not request.idempotency_key:
+            raise ValueError("idempotency_key is required for notification delivery")
+        existing = self.session.query(CommunicationNotification).filter_by(
+            tenant_id=request.tenant_id,
+            idempotency_key=request.idempotency_key,
+        ).one_or_none()
+        if existing is not None:
+            enqueue_notification(self.session, existing)
+            return existing
+        notification = CommunicationNotification(
+            id=request.notification_id or f"notification_{uuid.uuid4().hex}",
+            tenant_id=request.tenant_id,
+            channel=request.channel.value,
+            recipient=self.provider.validate_recipient(request.channel, request.recipient),
+            message=request.message,
+            template_id=request.template_id,
+            priority=request.priority.value,
+            status=NotificationStatus.QUEUED.value,
+            idempotency_key=request.idempotency_key,
+            provider=self.provider.name,
+            correlation_id=request.correlation_id,
+            trace_id=request.trace_id,
+            metadata_json=dict(request.variables),
+        )
+        self.session.add(notification)
+        self.session.flush()
+        enqueue_notification(self.session, notification)
+        return notification
 
     def send(self, request: NotificationRequest) -> CommunicationNotification:
         if not request.idempotency_key:
