@@ -20,7 +20,7 @@ python-dotenv==1.2.2
 PyYAML==6.0.2
 
 # HTTP Networking & Security
-requests==2.33.0
+requests==2.34.2
 PyJWT==2.13.0
 cryptography==46.0.5
 python-dateutil==2.9.0.post0
