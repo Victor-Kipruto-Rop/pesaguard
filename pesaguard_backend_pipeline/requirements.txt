@@ -26,7 +26,7 @@ cryptography==46.0.5
 python-dateutil==2.9.0.post0
 
 # Telemetry & Observability
-prometheus-client==0.21.1
+prometheus-client==0.26.0
 
 # Testing & CI Suite
 pytest==9.0.3

@@ -21,4 +21,4 @@ PyJWT==2.13.0
 cryptography==46.0.5
 requests==2.33.0
 python-dateutil==2.9.0.post0
-prometheus-client==0.21.1
+prometheus-client==0.26.0
