@@ -28,4 +28,4 @@ python-dateutil==2.9.0.post0
 prometheus-client==0.21.1
 
 # Testing & CI Suite
-pytest==9.0.3
+pytest==9.1.1
