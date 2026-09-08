@@ -121,7 +121,7 @@ class EmailProviderHealth:
     """Health object for provider health snapshots without making claims."""
 
     def __init__(self, score: float = 100.0):
-        self.score = float(score)
+        self.score = score
 
     def register_result(self, provider: str, failed: bool = False, latency_ms: int = 0) -> None:
         if failed:

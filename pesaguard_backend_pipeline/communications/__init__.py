@@ -9,6 +9,14 @@ from .events import (
     security_notification_event,
     transaction_notification_event,
 )
+from .providers.email import (
+    EmailProviderConfig,
+    EmailProviderFactory,
+    EmailProviderHealth,
+    EmailProviderRegistry,
+    EmailRouter,
+    MockEmailProvider,
+)
 
 __all__ = [
     "CommunicationChannel",
@@ -20,6 +28,12 @@ __all__ = [
     "PermanentCommunicationError",
     "ProviderMessage",
     "TransientCommunicationError",
+    "EmailProviderConfig",
+    "EmailProviderFactory",
+    "EmailProviderHealth",
+    "EmailProviderRegistry",
+    "EmailRouter",
+    "MockEmailProvider",
     "fraud_notification_event",
     "reconciliation_notification_event",
     "security_notification_event",
