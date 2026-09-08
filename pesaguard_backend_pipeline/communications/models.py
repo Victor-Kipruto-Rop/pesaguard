@@ -15,8 +15,8 @@ class CommunicationNotification(Base):
     __tablename__ = "communication_notifications"
     __table_args__ = (
         UniqueConstraint("tenant_id", "idempotency_key", name="uq_communication_notification_idempotency"),
-        CheckConstraint("status IN ('created', 'queued', 'processing', 'accepted', 'submitted', 'sent', 'delivered', 'failed', 'rejected', 'expired', 'cancelled', 'retrying', 'dead_letter')", name="ck_communication_notification_status"),
-        CheckConstraint("priority IN ('critical', 'high', 'normal', 'low')", name="ck_communication_notification_priority"),
+        CheckConstraint("status IN ('created', 'queued', 'processing', 'accepted', 'submitted', 'sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained', 'failed', 'rejected', 'expired', 'cancelled', 'retrying', 'dead_letter')", name="ck_communication_notification_status"),
+        CheckConstraint("priority IN ('critical', 'high', 'normal', 'low', 'bulk')", name="ck_communication_notification_priority"),
         Index("ix_communication_notification_tenant_status_created", "tenant_id", "status", "created_at"),
         Index("ix_communication_notification_tenant_correlation", "tenant_id", "correlation_id"),
     )
@@ -62,7 +62,7 @@ class CommunicationOutboxEntry(Base):
     status = Column(String(32), nullable=False, default="pending", server_default="pending")
     attempt_count = Column(Integer, nullable=False, default=0, server_default="0")
     max_attempts = Column(Integer, nullable=False, default=5, server_default="5")
-    available_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, server_default="now()")
+    available_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     leased_by = Column(String(128), nullable=True)
     lease_expires_at = Column(DateTime(timezone=True), nullable=True)
     last_error = Column(Text, nullable=True)

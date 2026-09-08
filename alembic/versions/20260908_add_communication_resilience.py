@@ -12,6 +12,20 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Align notification status/priority check constraints with the extended
+    # lifecycle (email opens/clicks/bounces) and the BULK priority.
+    with op.batch_alter_table("communication_notifications") as batch:
+        batch.drop_constraint("ck_communication_notification_status", type_="check")
+        batch.create_check_constraint(
+            "ck_communication_notification_status",
+            "status IN ('created', 'queued', 'processing', 'accepted', 'submitted', 'sent', 'delivered', 'opened', 'clicked', 'bounced', 'complained', 'failed', 'rejected', 'expired', 'cancelled', 'retrying', 'dead_letter')",
+        )
+        batch.drop_constraint("ck_communication_notification_priority", type_="check")
+        batch.create_check_constraint(
+            "ck_communication_notification_priority",
+            "priority IN ('critical', 'high', 'normal', 'low', 'bulk')",
+        )
+
     op.add_column("communication_notifications", sa.Column("queued_at", sa.DateTime(timezone=True)))
     op.add_column("communication_notifications", sa.Column("submitted_at", sa.DateTime(timezone=True)))
     op.add_column("communication_notifications", sa.Column("delivered_at", sa.DateTime(timezone=True)))
@@ -106,6 +120,18 @@ def downgrade() -> None:
     op.drop_column("communication_attempts", "cost")
     op.drop_column("communication_attempts", "latency_ms")
     op.drop_column("communication_attempts", "error_category")
+
+    with op.batch_alter_table("communication_notifications") as batch:
+        batch.drop_constraint("ck_communication_notification_status", type_="check")
+        batch.create_check_constraint(
+            "ck_communication_notification_status",
+            "status IN ('created', 'queued', 'processing', 'accepted', 'submitted', 'sent', 'delivered', 'failed', 'rejected', 'expired', 'cancelled', 'retrying', 'dead_letter')",
+        )
+        batch.drop_constraint("ck_communication_notification_priority", type_="check")
+        batch.create_check_constraint(
+            "ck_communication_notification_priority",
+            "priority IN ('critical', 'high', 'normal', 'low')",
+        )
 
     op.drop_column("communication_notifications", "failed_at")
     op.drop_column("communication_notifications", "delivered_at")

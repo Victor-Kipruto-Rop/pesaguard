@@ -16,6 +16,7 @@ class CommunicationPriority(StrEnum):
     HIGH = "high"
     NORMAL = "normal"
     LOW = "low"
+    BULK = "bulk"
 
 
 class NotificationStatus(StrEnum):
@@ -23,9 +24,14 @@ class NotificationStatus(StrEnum):
     QUEUED = "queued"
     PROCESSING = "processing"
     ACCEPTED = "accepted"
+    PROVIDER_ACCEPTED = "accepted"
     SUBMITTED = "submitted"
     SENT = "sent"
     DELIVERED = "delivered"
+    OPENED = "opened"
+    CLICKED = "clicked"
+    BOUNCED = "bounced"
+    COMPLAINED = "complained"
     FAILED = "failed"
     REJECTED = "rejected"
     EXPIRED = "expired"

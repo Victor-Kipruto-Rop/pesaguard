@@ -78,3 +78,81 @@ def security_notification_event(details: Mapping[str, Any], tenant_id: str, even
 
 def reconciliation_notification_event(evaluation: Mapping[str, Any], tenant_id: str, resolved: bool = False) -> dict[str, Any]:
     return discrepancy_notification_event({**evaluation, "status": "resolved" if resolved else evaluation.get("status")}, tenant_id)
+
+
+# --- notification lifecycle event sourcing -----------------------------------
+
+NOTIFICATION_LIFECYCLE_EVENTS = frozenset({
+    "notification.created",
+    "notification.queued",
+    "notification.provider_accepted",
+    "notification.submitted",
+    "notification.delivered",
+    "notification.opened",
+    "notification.clicked",
+    "notification.failed",
+    "notification.expired",
+    "notification.rejected",
+    "notification.cancelled",
+    "notification.retrying",
+    "notification.dead_lettered",
+})
+
+
+def build_status_event(
+    status: str,
+    *,
+    notification_id: str,
+    tenant_id: str,
+    provider: str | None = None,
+    provider_message_id: str | None = None,
+    correlation_id: str | None = None,
+    trace_id: str | None = None,
+) -> dict[str, Any]:
+    """Build a `notification.*` lifecycle event for downstream subscribers."""
+    event_name = f"notification.{status}"
+    if event_name == "notification.accepted":
+        event_name = "notification.provider_accepted"
+    elif event_name == "notification.dead_letter":
+        event_name = "notification.dead_lettered"
+    if event_name not in NOTIFICATION_LIFECYCLE_EVENTS:
+        event_name = f"notification.{status}"
+    return {
+        "event": event_name,
+        "notification_id": notification_id,
+        "tenant_id": tenant_id,
+        "provider": provider,
+        "provider_message_id": provider_message_id,
+        "status": status,
+        "correlation_id": correlation_id,
+        "trace_id": trace_id,
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "schema_version": 1,
+    }
+
+
+def publish_status_event(payload: Mapping[str, Any], topic: str = NOTIFICATION_STATUS_TOPIC) -> bool:
+    """Best-effort Kafka publication; communications never block on Kafka.
+
+    Returns True when the event was published. Failures are logged and
+    swallowed so financial processing and webhook handling stay healthy even
+    when the event bus is down.
+    """
+    try:
+        import logging
+
+        from ..producer import _producer_manager
+
+        producer = _producer_manager.get_producer()
+        tenant_id = str(payload.get("tenant_id") or "default")
+        key = str(payload.get("notification_id") or "").encode("utf-8") or None
+        producer.send(topic, key=key, value=dict(payload), headers=[("tenant_id", tenant_id.encode("utf-8"))])
+        return True
+    except Exception:
+        try:
+            logging.getLogger("pesaguard.communications").debug(
+                "notification status event not published (Kafka unavailable)", exc_info=True
+            )
+        except Exception:
+            pass
+        return False

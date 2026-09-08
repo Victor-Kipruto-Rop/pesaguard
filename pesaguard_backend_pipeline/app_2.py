@@ -306,6 +306,7 @@ configure_revocation_store(primary_engine, sessionmaker(bind=primary_engine, exp
 provider_management = ProviderManagementService(SessionLocal)
 from pesaguard_backend_pipeline.communications.routes import create_webhook_blueprint
 from pesaguard_backend_pipeline.communications.product_routes import create_product_blueprint
+from pesaguard_backend_pipeline.communications.operations_routes import create_operations_blueprint
 
 app.register_blueprint(
     create_webhook_blueprint(
@@ -316,6 +317,13 @@ app.register_blueprint(
 )
 app.register_blueprint(
     create_product_blueprint(
+        SessionLocal,
+        require_auth_fn=require_auth,
+        current_user_fn=get_current_user,
+    )
+)
+app.register_blueprint(
+    create_operations_blueprint(
         SessionLocal,
         require_auth_fn=require_auth,
         current_user_fn=get_current_user,

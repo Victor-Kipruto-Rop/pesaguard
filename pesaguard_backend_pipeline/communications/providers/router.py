@@ -24,7 +24,7 @@ class CircuitBreaker:
     def __init__(self, name: str, *, failure_threshold: int = 5, recovery_seconds: int = 60, half_open_max_calls: int = 3):
         self.name = name
         self.failure_threshold = max(1, failure_threshold)
-        self.recovery_seconds = max(1, recovery_seconds)
+        self.recovery_seconds = max(0, recovery_seconds)
         self.half_open_max_calls = max(1, half_open_max_calls)
         self.state = CircuitState.CLOSED
         self.consecutive_failures = 0
@@ -36,9 +36,10 @@ class CircuitBreaker:
     def allow(self) -> bool:
         with self._lock:
             if self.state == CircuitState.OPEN:
-                if self.opened_at is not None and time.monotonic() - self.opened_at >= self.recovery_seconds:
+                if self.opened_at is not None and time.monotonic() - self.opened_at > self.recovery_seconds:
                     self.state = CircuitState.HALF_OPEN
                     self.half_open_calls = 0
+                    return False
                 else:
                     return False
             if self.state == CircuitState.HALF_OPEN:
