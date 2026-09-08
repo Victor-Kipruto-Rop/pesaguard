@@ -125,5 +125,8 @@ def replay_dead_letter(session: Session, entry_id: str) -> CommunicationOutboxEn
 
 
 def _assert_lease(entry: CommunicationOutboxEntry, worker_id: str) -> None:
-    if entry.status != "leased" or entry.leased_by != worker_id or not entry.lease_expires_at or entry.lease_expires_at <= utc_now():
+    expires = entry.lease_expires_at
+    if expires is not None and expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    if entry.status != "leased" or entry.leased_by != worker_id or expires is None or expires <= utc_now():
         raise RuntimeError("communication outbox lease is not owned by this worker")
