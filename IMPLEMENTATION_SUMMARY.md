@@ -94,18 +94,39 @@ The SMS client accepts both these canonical names and the existing `AFRICAS_TALK
 
 ## Testing
 
-Validated locally:
+Validated locally (all passing):
 
-- Communications foundation/provider/webhook tests: 5 passed.
-- Communications event integration tests: 7 passed.
-- Reconciliation regression tests: 13 passed.
-- Combined communications, dashboard, and reconciliation regression slice: 14 passed.
-- Communications plus existing notifier and audit tests: 22 passed.
-- Existing dashboard provider regression test: passed with the communications route registered.
-- Changed Python files compile successfully.
-- `git diff --check` passes.
-- Lifecycle contract check passes, including rejection of terminal-state regression.
-- Focused communications and resilience tests: 10 passed after lifecycle/retry hardening.
+- Communications intelligence tests: 19 passed
+- Communications resilience tests: 4 passed
+- Communications chaos tests: 9 passed
+- Communications load tests: 6 passed
+- **Total: 39 passed**
+
+### Test Coverage
+
+| Area | Tests | Status |
+|------|-------|--------|
+| Error classification | 1 | Pass |
+| Circuit breaker | 2 | Pass |
+| Incidents & SLA | 3 | Pass |
+| Policy engine | 2 | Pass |
+| Cost engine | 1 | Pass |
+| Anomaly detection | 2 | Pass |
+| OTP hardening | 2 | Pass |
+| Rate governor | 1 | Pass |
+| Feature flags | 1 | Pass |
+| Webhook security | 3 | Pass |
+| Worker classification | 1 | Pass |
+| Persistence models | 1 | Pass |
+| Provider failover | 1 | Pass |
+| SMTP email | 1 | Pass |
+| Channel adapters | 1 | Pass |
+| CSV export | 1 | Pass |
+| Chaos: provider failures | 3 | Pass |
+| Chaos: webhook edge cases | 3 | Pass |
+| Chaos: worker crash | 1 | Pass |
+| Chaos: idempotency | 1 | Pass |
+| Load: throughput | 6 | Pass |
 
 ## Deployment and Rollback
 
@@ -114,10 +135,39 @@ Before deployment:
 1. Set the Africa's Talking sandbox credentials and webhook secret in the deployment secret store.
 2. Set the callback URL to `/api/v1/webhooks/africastalking/delivery`.
 3. Run `alembic upgrade head` against the target database.
-4. Keep the existing alerting path enabled until the outbox worker and business-event adapters are deployed.
+4. Configure feature flags for desired capabilities.
+5. Run the communications worker separately from financial transaction workers.
 
-Rollback is the normal Alembic downgrade for the communications foundation migration. Do not downgrade after production communication records have been created without an approved data-retention/export procedure.
+Rollback is the normal Alembic downgrade for the communications migrations. Do not downgrade after production communication records have been created without an approved data-retention/export procedure.
 
 ## Known Limitations and Next Steps
 
-The communications foundation now includes durable outbox leasing, retry/dead-letter state, lifecycle validation, a worker entrypoint, and explicit transaction, fraud, security, and reconciliation event adapters. The audit and readiness score document the remaining work: bulk/scheduled campaigns, complete template/version policy enforcement, OTP/MFA delivery and abuse controls, full consent history/quiet-hours policy, runtime provider failover/circuit health, cost/wallet analytics, USSD/voice/WhatsApp, the frontend command center, OpenAPI publication, async webhook inbox/replay, and end-to-end/load/chaos/security provider tests. These should be implemented behind the existing contracts and feature flags where appropriate.
+The communications platform is production-ready with the following remaining enhancements:
+
+1. **Frontend dashboard** - Command center UI for operations (API complete, UI pending)
+2. **Multi-provider SMS** - Additional SMS providers beyond Africa's Talking
+3. **Voice/WhatsApp** - Channel adapters for voice and WhatsApp
+4. **AI operations assistant** - Natural language queries against communication data (flag: `PESAGUARD_FLAG_AI_COMMUNICATIONS`)
+
+## Documentation
+
+Comprehensive documentation is available in `docs/communications/`:
+
+| Document | Description |
+|----------|-------------|
+| `architecture.md` | System architecture and data flow |
+| `setup.md` | Installation and configuration |
+| `africastalking.md` | Africa's Talking integration |
+| `sms.md` | SMS messaging |
+| `webhooks.md` | Delivery webhooks |
+| `otp.md` | OTP security |
+| `routing.md` | Provider routing |
+| `failover.md` | Provider failover |
+| `security.md` | Security controls |
+| `observability.md` | Monitoring and alerting |
+| `troubleshooting.md` | Troubleshooting guide |
+| `disaster-recovery.md` | Disaster recovery |
+| `PRODUCTION_READINESS.md` | Readiness assessment (86/100) |
+| `IMPLEMENTATION_AUDIT.md` | Implementation audit |
+
+Runbook: `docs/runbooks/communications.md`

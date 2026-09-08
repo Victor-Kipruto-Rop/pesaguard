@@ -76,6 +76,28 @@ def test_email_provider_abstraction_layer_is_exposed_and_compatible():
     assert health.score >= 0
 
 
+def test_email_provider_factory_supports_mock_provider_and_provider_registry_forms():
+    class Gate:
+        def send_message(self, message):
+            return {"message_id": "mock-sent-1"}
+
+    config = EmailProviderConfig(provider="mock_email", from_email="noreply@pesaguard.example")
+    factory = EmailProviderFactory(gateway_client=Gate(), config=config)
+    provider = factory.create()
+    assert provider.name == "mock_email"
+
+    result = provider.send(NotificationRequest(
+        tenant_id="tenant-a",
+        recipient="ops@example.com",
+        message="hello",
+        channel=CommunicationChannel.EMAIL,
+        idempotency_key="email-3",
+        variables={"subject": "Daily report"},
+    ))
+    assert result.provider == "mock_email"
+    assert result.provider_message_id == "mock-sent-1"
+
+
 def test_export_sanitizes_formula_cells():
     assert _csv_cell("=HYPERLINK('https://evil.example')").startswith("'=")
     assert _csv_cell("normal") == "normal"
