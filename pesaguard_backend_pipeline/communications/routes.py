@@ -69,7 +69,7 @@ def create_webhook_blueprint(
 
     @blueprint.post("/api/v1/webhooks/africastalking/delivery")
     def africastalking_delivery():
-        secret = os.getenv("AFRICAS_TALKING_WEBHOOK_SECRET", "")
+        secret = os.getenv("AFRICASTALKING_WEBHOOK_SECRET") or os.getenv("AFRICAS_TALKING_WEBHOOK_SECRET", "")
         if not secret:
             return jsonify({"error": {"code": "WEBHOOK_NOT_CONFIGURED", "message": "Webhook authentication is not configured."}}), 503
 

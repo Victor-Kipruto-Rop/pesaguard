@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PesaGuard Communications</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="#">PesaGuard <span>Communications</span></a><button id="refresh" class="icon-button" title="Refresh dashboard" aria-label="Refresh dashboard">↻</button></header>
+  <main>
+    <section class="hero"><div><p class="eyebrow">Tenant operations</p><h1>Message control room</h1><p class="lede">Track delivery, manage approved content, and keep customer contact policy visible.</p></div><div class="connection"><label for="api">API URL</label><input id="api" value="http://localhost:5001"><label for="token">Bearer token</label><input id="token" type="password" placeholder="Paste a dashboard token"><button id="connect">Connect</button></div></section>
+    <section class="metrics" aria-label="Communication analytics"><article><span>Total sent</span><strong id="total">--</strong></article><article><span>Delivered</span><strong id="delivered">--</strong></article><article><span>Failed</span><strong id="failed">--</strong></article><article><span>Channels</span><strong id="channels">--</strong></article></section>
+    <section class="workspace"><div class="panel wide"><div class="panel-head"><div><p class="eyebrow">Delivery ledger</p><h2>Recent notifications</h2></div><div class="actions"><input id="search" placeholder="Search recipient"><select id="status"><option value="">All statuses</option><option>delivered</option><option>accepted</option><option>queued</option><option>failed</option></select><button id="export">Export CSV</button></div></div><div id="table" class="table-wrap"><p class="empty">Connect to load communications.</p></div></div><aside class="panel"><p class="eyebrow">Governance</p><h2>Approved content</h2><div id="templates" class="template-list"><p class="empty">No templates loaded.</p></div><button id="load-templates" class="secondary">Load templates</button></aside></section>
+  </main>
+  <div id="toast" role="status"></div><script src="app.js"></script>
+</body>
+</html>

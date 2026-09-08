@@ -9,7 +9,10 @@ from ..core.interfaces import CommunicationProvider, NotificationRequest
 from ..core.exceptions import CommunicationError
 from ..core.enums import NotificationStatus
 from ..models import CommunicationAttempt, CommunicationNotification
+from ..models import CommunicationConsent, CommunicationPreference
+from ..domain import is_allowed_now
 from ..outbox import enqueue_notification
+from ..core.state_machine import transition
 
 
 class NotificationService:
@@ -23,6 +26,18 @@ class NotificationService:
         """Persist a notification and outbox entry without contacting a provider."""
         if not request.idempotency_key:
             raise ValueError("idempotency_key is required for notification delivery")
+        purpose = str(request.variables.get("purpose", "transactional"))
+        if purpose == "marketing":
+            consent = self.session.query(CommunicationConsent).filter_by(
+                tenant_id=request.tenant_id, recipient=request.recipient, channel=request.channel.value, granted=1,
+            ).one_or_none()
+            if consent is None:
+                raise ValueError("marketing consent is required for this recipient")
+            preference = self.session.query(CommunicationPreference).filter_by(
+                tenant_id=request.tenant_id, recipient=request.recipient,
+            ).one_or_none()
+            if not is_allowed_now(preference):
+                raise ValueError("recipient is currently in quiet hours")
         existing = self.session.query(CommunicationNotification).filter_by(
             tenant_id=request.tenant_id,
             idempotency_key=request.idempotency_key,
@@ -47,6 +62,7 @@ class NotificationService:
         )
         self.session.add(notification)
         self.session.flush()
+        notification.status = transition(notification.status, NotificationStatus.QUEUED)
         enqueue_notification(self.session, notification)
         return notification
 
@@ -68,7 +84,7 @@ class NotificationService:
             message=request.message,
             template_id=request.template_id,
             priority=request.priority.value,
-            status=NotificationStatus.PROCESSING.value,
+            status=NotificationStatus.CREATED.value,
             idempotency_key=request.idempotency_key,
             provider=self.provider.name,
             correlation_id=request.correlation_id,
@@ -77,6 +93,8 @@ class NotificationService:
         )
         self.session.add(notification)
         self.session.flush()
+        notification.status = transition(notification.status, NotificationStatus.QUEUED)
+        notification.status = transition(notification.status, NotificationStatus.PROCESSING)
         attempt = CommunicationAttempt(
             id=f"attempt_{uuid.uuid4().hex}",
             notification_id=notification.id,
@@ -88,14 +106,15 @@ class NotificationService:
         try:
             result = self.provider.send(request)
         except CommunicationError as exc:
-            notification.status = NotificationStatus.RETRYING.value if exc.retryable else NotificationStatus.FAILED.value
+            target_status = NotificationStatus.RETRYING if exc.retryable else NotificationStatus.FAILED
+            notification.status = transition(notification.status, target_status)
             notification.failure_code = exc.code
             notification.failure_reason = str(exc)
             attempt.status = notification.status
             attempt.error_code = exc.code
             attempt.error_detail = str(exc)
         else:
-            notification.status = result.status
+            notification.status = transition(notification.status, result.status)
             notification.provider_message_id = result.provider_message_id
             attempt.status = result.status
             attempt.provider_message_id = result.provider_message_id

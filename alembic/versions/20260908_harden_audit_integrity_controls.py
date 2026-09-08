@@ -27,6 +27,10 @@ def upgrade() -> None:
     )
     for name, column_type, kwargs in audit_columns:
         _add_column("action_audit_entries", name, column_type, **kwargs)
+    # SQLite is used for migration smoke tests; these constraints and triggers
+    # are PostgreSQL-specific and remain enforced by the production database.
+    if op.get_bind().dialect.name == "sqlite":
+        return
     op.create_unique_constraint("uq_audit_id_tenant", "action_audit_entries", ["id", "tenant_id"])
     op.create_unique_constraint("uq_audit_tenant_sequence", "action_audit_entries", ["tenant_id", "tenant_sequence"])
     op.create_check_constraint("ck_audit_category", "action_audit_entries", "category IN ('access', 'authentication', 'compliance', 'configuration', 'data', 'operations', 'security', 'system')")

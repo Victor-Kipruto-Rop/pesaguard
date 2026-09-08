@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from .core.enums import NotificationStatus
 from .models import CommunicationDeliveryReport, CommunicationNotification, CommunicationWebhookEvent
+from .core.state_machine import transition
 
 
 def verify_signature(raw_body: bytes, signature: str | None, secret: str) -> None:
@@ -83,7 +84,7 @@ def process_delivery_webhook(
         received_at=now,
         delivered_at=now if status == NotificationStatus.DELIVERED else None,
     )
-    notification.status = status.value
+    notification.status = transition(notification.status, status)
     notification.updated_at = now
     session.add_all([event, report])
     session.flush()

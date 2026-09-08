@@ -305,9 +305,17 @@ SessionLocal = _SessionLocalCompat()
 configure_revocation_store(primary_engine, sessionmaker(bind=primary_engine, expire_on_commit=False))
 provider_management = ProviderManagementService(SessionLocal)
 from pesaguard_backend_pipeline.communications.routes import create_webhook_blueprint
+from pesaguard_backend_pipeline.communications.product_routes import create_product_blueprint
 
 app.register_blueprint(
     create_webhook_blueprint(
+        SessionLocal,
+        require_auth_fn=require_auth,
+        current_user_fn=get_current_user,
+    )
+)
+app.register_blueprint(
+    create_product_blueprint(
         SessionLocal,
         require_auth_fn=require_auth,
         current_user_fn=get_current_user,
@@ -1076,6 +1084,37 @@ def openapi_spec():
             },
             "/discrepancies/bulk-resolve": {
                 "post": {"summary": "Bulk resolve discrepancies", "responses": {"200": {"description": "Batch operation completed"}}},
+            },
+            "/api/v1/communications/templates": {
+                "get": {"summary": "List tenant communication templates", "responses": {"200": {"description": "Template versions"}}},
+                "post": {"summary": "Create a draft communication template", "responses": {"201": {"description": "Template created"}}},
+            },
+            "/api/v1/communications/templates/{template_id}/approve": {
+                "post": {"summary": "Approve a communication template version", "responses": {"200": {"description": "Template approved"}}},
+            },
+            "/api/v1/communications/preferences/{recipient}": {
+                "put": {"summary": "Update recipient preferences and quiet hours", "responses": {"200": {"description": "Preferences updated"}}},
+            },
+            "/api/v1/communications/consent/{recipient}": {
+                "put": {"summary": "Grant or revoke channel consent", "responses": {"200": {"description": "Consent updated"}}},
+            },
+            "/api/v1/communications/otp": {
+                "post": {"summary": "Issue an OTP challenge", "responses": {"202": {"description": "Challenge queued"}}},
+            },
+            "/api/v1/communications/otp/{challenge_id}/verify": {
+                "post": {"summary": "Verify an OTP challenge", "responses": {"200": {"description": "OTP verified"}, "401": {"description": "OTP rejected"}}},
+            },
+            "/api/v1/communications/campaigns": {
+                "post": {"summary": "Create a bulk or scheduled campaign", "responses": {"202": {"description": "Campaign queued"}}},
+            },
+            "/api/v1/communications/analytics": {
+                "get": {"summary": "Get tenant communication delivery analytics", "responses": {"200": {"description": "Status and channel counts"}}},
+            },
+            "/api/v1/communications/search": {
+                "get": {"summary": "Search tenant notifications", "responses": {"200": {"description": "Matching notifications"}}},
+            },
+            "/api/v1/communications/export": {
+                "get": {"summary": "Export tenant communications as CSV", "responses": {"200": {"description": "CSV export"}}},
             },
         },
     }

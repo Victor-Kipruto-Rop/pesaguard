@@ -15,6 +15,7 @@ from pesaguard_backend_pipeline.communications.models import CommunicationAttemp
 from pesaguard_backend_pipeline.communications.providers.africas_talking import AfricasTalkingProvider
 from pesaguard_backend_pipeline.communications.webhooks import process_delivery_webhook
 from pesaguard_backend_pipeline.communications.events import build_notification_event, discrepancy_notification_event
+from pesaguard_backend_pipeline.communications.core.state_machine import InvalidNotificationTransition, transition
 from pesaguard_backend_pipeline.models import Base
 
 
@@ -174,3 +175,13 @@ def test_discrepancy_event_maps_review_outcomes():
 
     assert event["event"] == "reconciliation.exception_created"
     assert event["correlation_id"] == "tx-1"
+
+
+def test_notification_state_machine_rejects_terminal_regression():
+    assert transition("queued", "processing") == "processing"
+    try:
+        transition("delivered", "processing")
+    except InvalidNotificationTransition:
+        pass
+    else:
+        raise AssertionError("terminal notification transition was accepted")

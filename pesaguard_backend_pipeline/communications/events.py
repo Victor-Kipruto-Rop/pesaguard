@@ -62,3 +62,19 @@ def discrepancy_notification_event(evaluation: Mapping[str, Any], tenant_id: str
         context=dict(evaluation),
         correlation_id=str(evaluation.get("trans_id") or ""),
     )
+
+
+def transaction_notification_event(transaction: Mapping[str, Any], tenant_id: str, event: str = "transaction.received") -> dict[str, Any]:
+    return build_notification_event(event, tenant_id=tenant_id, context=dict(transaction), correlation_id=str(transaction.get("trans_id") or ""))
+
+
+def fraud_notification_event(finding: Mapping[str, Any], tenant_id: str, event: str = "fraud.suspected") -> dict[str, Any]:
+    return build_notification_event(event, tenant_id=tenant_id, context=dict(finding), correlation_id=str(finding.get("transaction_id") or finding.get("trans_id") or ""))
+
+
+def security_notification_event(details: Mapping[str, Any], tenant_id: str, event: str = "security.mfa_required") -> dict[str, Any]:
+    return build_notification_event(event, tenant_id=tenant_id, context=dict(details), recipient=details.get("recipient"))
+
+
+def reconciliation_notification_event(evaluation: Mapping[str, Any], tenant_id: str, resolved: bool = False) -> dict[str, Any]:
+    return discrepancy_notification_event({**evaluation, "status": "resolved" if resolved else evaluation.get("status")}, tenant_id)

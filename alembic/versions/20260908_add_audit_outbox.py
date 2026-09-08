@@ -24,11 +24,11 @@ def upgrade() -> None:
         ("signature_algorithm", 32),
     ):
         op.add_column("action_audit_entries", sa.Column(name, sa.String(length=length), nullable=True))
-    op.create_unique_constraint(
-        "uq_audit_tenant_idempotency_key",
-        "action_audit_entries",
-        ["tenant_id", "idempotency_key"],
-    )
+    with op.batch_alter_table("action_audit_entries") as batch_op:
+        batch_op.create_unique_constraint(
+            "uq_audit_tenant_idempotency_key",
+            ["tenant_id", "idempotency_key"],
+        )
     op.create_index("ix_audit_tenant_event_hash", "action_audit_entries", ["tenant_id", "event_hash"])
     op.create_table(
         "audit_outbox_entries",
@@ -71,7 +71,8 @@ def downgrade() -> None:
     op.drop_index("ix_audit_outbox_due", table_name="audit_outbox_entries")
     op.drop_table("audit_outbox_entries")
     op.drop_index("ix_audit_tenant_event_hash", table_name="action_audit_entries")
-    op.drop_constraint("uq_audit_tenant_idempotency_key", "action_audit_entries", type_="unique")
+    with op.batch_alter_table("action_audit_entries") as batch_op:
+        batch_op.drop_constraint("uq_audit_tenant_idempotency_key", type_="unique")
     for name in ("signature_algorithm", "signature_key_id", "signature", "event_hash", "previous_hash"):
         op.drop_column("action_audit_entries", name)
     op.drop_column("action_audit_entries", "idempotency_key")

@@ -7,6 +7,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from .models import CommunicationNotification, CommunicationOutboxEntry
+from .core.state_machine import transition
 
 
 def utc_now() -> datetime:
@@ -56,22 +57,37 @@ def complete_entry(session: Session, entry: CommunicationOutboxEntry, *, worker_
     entry.completed_at = utc_now()
     entry.lease_expires_at = None
     entry.leased_by = None
-    session.query(CommunicationNotification).filter_by(id=entry.notification_id).update({"status": "submitted", "updated_at": utc_now()})
+    notification = session.query(CommunicationNotification).filter_by(id=entry.notification_id).one()
+    notification.updated_at = utc_now()
 
 
-def fail_entry(session: Session, entry: CommunicationOutboxEntry, *, worker_id: str, error: str, retry_delay_seconds: int = 60) -> None:
+def fail_entry(
+    session: Session,
+    entry: CommunicationOutboxEntry,
+    *,
+    worker_id: str,
+    error: str,
+    retry_delay_seconds: int = 60,
+    retryable: bool = True,
+) -> None:
     _assert_lease(entry, worker_id)
     entry.last_error = error[:4000]
     entry.lease_expires_at = None
     entry.leased_by = None
-    if entry.attempt_count >= entry.max_attempts:
+    if not retryable:
+        entry.status = "dead_letter"
+        notification_status = "failed"
+    elif entry.attempt_count >= entry.max_attempts:
         entry.status = "dead_letter"
         notification_status = "dead_letter"
     else:
         entry.status = "retrying"
         entry.available_at = utc_now() + timedelta(seconds=max(1, retry_delay_seconds))
         notification_status = "retrying"
-    session.query(CommunicationNotification).filter_by(id=entry.notification_id).update({"status": notification_status, "failure_reason": entry.last_error, "updated_at": utc_now()})
+    notification = session.query(CommunicationNotification).filter_by(id=entry.notification_id).one()
+    notification.status = transition(notification.status, notification_status)
+    notification.failure_reason = entry.last_error
+    notification.updated_at = utc_now()
 
 
 def replay_dead_letter(session: Session, entry_id: str) -> CommunicationOutboxEntry:

@@ -2,7 +2,7 @@
 
 ## Scope Delivered
 
-This increment establishes the production foundation for a provider-independent communications platform without replacing the existing PesaGuard alerting path.
+This increment establishes and hardens the production foundation for a provider-independent communications platform while documenting the remaining migration away from the existing PesaGuard alerting path.
 
 ### Architecture Changes
 
@@ -10,6 +10,8 @@ This increment establishes the production foundation for a provider-independent 
 - Added `AfricasTalkingProvider`, which wraps the existing robust SMS client rather than spreading provider calls through business services.
 - Added tenant-scoped notification idempotency and provider-attempt persistence.
 - Added authenticated and idempotent delivery callback processing.
+- Added a shared notification lifecycle validator so invalid terminal and out-of-order transitions are rejected.
+- Added standardized provider error categories and bounded configurable jittered outbox backoff; permanent communication errors are dead-lettered without retry.
 - Registered the delivery endpoint with the existing Flask dashboard service.
 - Added authenticated tenant-scoped SMS submission at `POST /api/v1/communications/sms`.
 - Added structured notification events for reconciliation and fraud/security-compatible workflows.
@@ -24,6 +26,10 @@ This increment establishes the production foundation for a provider-independent 
 - `alembic/versions/20260908_add_communications_foundation.py`
 - `pesaguard_backend_pipeline/communications/events.py`
 - `pesaguard_backend_pipeline/communications/routes.py`
+- `pesaguard_backend_pipeline/communications/core/state_machine.py`
+- `pesaguard_backend_pipeline/communications/core/error_categories.py`
+- `docs/communications/`
+- `docs/runbooks/communications.md`
 
 ### Files Modified
 
@@ -53,7 +59,7 @@ Constraints include tenant/idempotency uniqueness, provider event uniqueness, li
 - `POST /api/v1/webhooks/africastalking/delivery`
 - `POST /api/v1/communications/sms`
 
-The endpoint requires `X-Africa-Talking-Signature` or `X-Webhook-Signature`, verifies HMAC-SHA256 using `AFRICASTALKING_WEBHOOK_SECRET`, enforces the configured body limit, processes duplicate callbacks safely, and returns standardized JSON errors.
+The endpoint requires `X-Africa-Talking-Signature` or `X-Webhook-Signature`, verifies HMAC-SHA256 using `AFRICASTALKING_WEBHOOK_SECRET` (with historical underscore spelling compatibility), enforces the configured body limit, processes duplicate callbacks safely, and returns standardized JSON errors.
 
 The SMS endpoint requires JWT permission `send:communications`, derives tenant identity from the authenticated principal, requires an idempotency key, and persists/submits through `NotificationService` and the provider abstraction.
 
@@ -98,7 +104,8 @@ Validated locally:
 - Existing dashboard provider regression test: passed with the communications route registered.
 - Changed Python files compile successfully.
 - `git diff --check` passes.
-- Alembic reports `20260908_add_communications_foundation` as the current head.
+- Lifecycle contract check passes, including rejection of terminal-state regression.
+- Focused communications and resilience tests: 10 passed after lifecycle/retry hardening.
 
 ## Deployment and Rollback
 
@@ -113,4 +120,4 @@ Rollback is the normal Alembic downgrade for the communications foundation migra
 
 ## Known Limitations and Next Steps
 
-This is not the full enterprise communications roadmap. The following are intentionally not yet delivered: durable communication outbox leasing, bulk/scheduled campaigns, template/version management, OTP/MFA, preferences/consent/quiet hours, provider failover, cost/wallet analytics, USSD, voice, WhatsApp, frontend dashboard, full transaction/fraud event adapters, and end-to-end provider tests. These should be implemented behind the contracts added here and feature flags where appropriate.
+The communications foundation now includes durable outbox leasing, retry/dead-letter state, lifecycle validation, a worker entrypoint, and explicit transaction, fraud, security, and reconciliation event adapters. The audit and readiness score document the remaining work: bulk/scheduled campaigns, complete template/version policy enforcement, OTP/MFA delivery and abuse controls, full consent history/quiet-hours policy, runtime provider failover/circuit health, cost/wallet analytics, USSD/voice/WhatsApp, the frontend command center, OpenAPI publication, async webhook inbox/replay, and end-to-end/load/chaos/security provider tests. These should be implemented behind the existing contracts and feature flags where appropriate.

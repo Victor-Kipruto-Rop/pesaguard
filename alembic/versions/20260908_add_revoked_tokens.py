@@ -17,6 +17,24 @@ depends_on = None
 
 
 def upgrade() -> None:
+    if not sa.inspect(op.get_bind()).has_table("user_accounts"):
+        op.create_table(
+            "user_accounts",
+            sa.Column("id", sa.String(), nullable=False),
+            sa.Column("tenant_id", sa.String(), nullable=False, server_default="default"),
+            sa.Column("username", sa.String(), nullable=False),
+            sa.Column("email", sa.String(), nullable=True),
+            sa.Column("password_hash", sa.String(), nullable=True),
+            sa.Column("password_salt", sa.String(), nullable=True),
+            sa.Column("roles", sa.JSON(), nullable=False),
+            sa.Column("permissions", sa.JSON(), nullable=False),
+            sa.Column("attributes", sa.JSON(), nullable=True),
+            sa.Column("mfa_enabled", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+            sa.Column("status", sa.String(), nullable=False, server_default="active"),
+            sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+            sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+            sa.PrimaryKeyConstraint("id"),
+        )
     op.add_column(
         "user_accounts",
         sa.Column("authorization_version", sa.Integer(), nullable=False, server_default="1"),

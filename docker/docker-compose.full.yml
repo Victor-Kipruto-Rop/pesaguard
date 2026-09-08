@@ -54,12 +54,12 @@ services:
 
   frontend:
     build:
-      context: ./frontend
-    command: npm run dev
+      context: ../frontend
+      dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      - "3000:80"
     environment:
-      NEXT_PUBLIC_API_URL: http://dashboard:5001
+      NEXT_PUBLIC_API_URL: http://localhost:5001
     depends_on:
       - dashboard
 
