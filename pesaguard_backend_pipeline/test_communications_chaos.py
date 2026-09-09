@@ -225,6 +225,17 @@ def test_webhook_timestamp_in_future_rejected():
         raise AssertionError("future-dated webhook was accepted")
 
 
+def test_webhook_malformed_timestamp_rejected():
+    db = _session()
+    body = b'{"id":"event-malformed-time","messageId":"AT-MALFORMED","status":"Delivered","timestamp":"not-a-timestamp"}'
+    try:
+        process_delivery_webhook(db, body, signature=_signed(body), secret="webhook-secret")
+    except ValueError as exc:
+        assert str(exc) == "webhook timestamp is invalid"
+    else:
+        raise AssertionError("malformed webhook timestamp was accepted")
+
+
 # --- Worker crash recovery ----------------------------------------------------------
 
 def test_worker_crash_releases_lease_for_retry():

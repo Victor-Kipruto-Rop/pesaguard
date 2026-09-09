@@ -14,7 +14,11 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from observability import capture_exception, init_sentry
+
 logger = logging.getLogger("pesaguard.background_tasks")
+
+init_sentry(service="background_worker", provider="redis_rq")
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 RQ_QUEUE_NAME = os.getenv("RQ_QUEUE_NAME", "transaction_events")
@@ -75,6 +79,12 @@ def handle_job_failure(job, connection, type, value, traceback) -> None:
             session.close()
     except Exception as exc:
         logger.error("Could not import DeadLetter model for failure handling: %s", exc)
+
+    capture_exception(value, operation="background_job_failure", extra={
+        "job_id": job_id,
+        "func_name": func_name,
+        "queue": RQ_QUEUE_NAME,
+    })
 
 
 def enqueue_transaction_event(topic: str, payload: dict) -> Dict[str, Any]:

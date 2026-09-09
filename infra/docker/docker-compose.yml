@@ -1,0 +1,186 @@
+# Data residency (Addendum III): set DEPLOYMENT_REGION, BACKUP_REGION, and LOG_REGION
+# to the chosen hosting jurisdiction before go-live. See docs/product/DATA_RESIDENCY.md.
+# Pilot default: ke-1 (Kenya / East Africa). Backups must stay in BACKUP_REGION.
+
+x-residency-env: &residency-env
+  DEPLOYMENT_REGION: ${DEPLOYMENT_REGION:-ke-1}
+  BACKUP_REGION: ${BACKUP_REGION:-ke-1}
+  LOG_REGION: ${LOG_REGION:-ke-1}
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+  otel_collector:
+    image: otel/opentelemetry-collector:latest
+    command: ["--config=/etc/otel-collector.yaml"]
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8888:8888"
+      - "8889:8889"
+    volumes:
+      - ../monitoring/otel-collector.yaml:/etc/otel-collector.yaml:ro
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      <<: *residency-env
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_LOG_RETENTION_BYTES: 10737418240
+
+  postgres:
+    image: postgres:16
+    environment:
+      <<: *residency-env
+      POSTGRES_USER: pesaguard
+      POSTGRES_PASSWORD: pesaguard
+      POSTGRES_DB: pesaguard
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  webhook_receiver:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ["python", "pesaguard_backend_pipeline/app.py"]
+    ports:
+      - "5000:5000"
+    env_file:
+      - ../.env
+    environment:
+      <<: *residency-env
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://pesaguard:pesaguard@postgres:5432/pesaguard}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS_DOCKER:-kafka:9092}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-development}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.1}
+      SENTRY_PROFILES_SAMPLE_RATE: ${SENTRY_PROFILES_SAMPLE_RATE:-0.0}
+      SENTRY_SEND_DEFAULT_PII: ${SENTRY_SEND_DEFAULT_PII:-false}
+    depends_on:
+      - kafka
+
+  reconciliation_job:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ["python", "pesaguard_backend_pipeline/reconciliation_job.py"]
+    env_file:
+      - ../.env
+    environment:
+      <<: *residency-env
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://pesaguard:pesaguard@postgres:5432/pesaguard}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS_DOCKER:-kafka:9092}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-development}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.1}
+      SENTRY_PROFILES_SAMPLE_RATE: ${SENTRY_PROFILES_SAMPLE_RATE:-0.0}
+      SENTRY_SEND_DEFAULT_PII: ${SENTRY_SEND_DEFAULT_PII:-false}
+    depends_on:
+      - kafka
+      - postgres
+
+  dashboard_api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ["python", "-m", "pesaguard_backend_pipeline.canonical_app"]
+    ports:
+      - "5001:5001"
+    env_file:
+      - ../.env
+    environment:
+      <<: *residency-env
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://pesaguard:pesaguard@postgres:5432/pesaguard}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-development}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.1}
+      SENTRY_PROFILES_SAMPLE_RATE: ${SENTRY_PROFILES_SAMPLE_RATE:-0.0}
+      SENTRY_SEND_DEFAULT_PII: ${SENTRY_SEND_DEFAULT_PII:-false}
+    depends_on:
+      - postgres
+
+  rq_worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: ["/bin/sh", "pesaguard_backend_pipeline/worker_entrypoint.sh"]
+    env_file:
+      - ../.env
+    environment:
+      <<: *residency-env
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://pesaguard:pesaguard@postgres:5432/pesaguard}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS_DOCKER:-kafka:9092}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      RQ_QUEUE_NAME: ${RQ_QUEUE_NAME:-transaction_events}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-development}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.1}
+      SENTRY_PROFILES_SAMPLE_RATE: ${SENTRY_PROFILES_SAMPLE_RATE:-0.0}
+      SENTRY_SEND_DEFAULT_PII: ${SENTRY_SEND_DEFAULT_PII:-false}
+    depends_on:
+      - redis
+      - postgres
+      - kafka
+
+  communications_worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    command: ["python", "-m", "pesaguard_backend_pipeline.communications.worker"]
+    env_file:
+      - ../.env
+    environment:
+      <<: *residency-env
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgresql://pesaguard:pesaguard@postgres:5432/pesaguard}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS_DOCKER:-kafka:9092}
+      PESAGUARD_NOTIFICATION_TOPIC: ${PESAGUARD_NOTIFICATION_TOPIC:-notification.events}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-development}
+      SENTRY_RELEASE: ${SENTRY_RELEASE:-}
+      SENTRY_TRACES_SAMPLE_RATE: ${SENTRY_TRACES_SAMPLE_RATE:-0.1}
+      SENTRY_PROFILES_SAMPLE_RATE: ${SENTRY_PROFILES_SAMPLE_RATE:-0.0}
+      SENTRY_SEND_DEFAULT_PII: ${SENTRY_SEND_DEFAULT_PII:-false}
+    depends_on:
+      - kafka
+      - postgres
+
+volumes:
+  pgdata:

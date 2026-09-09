@@ -8,6 +8,7 @@ webhooks, escalation rules, on-call schedules, email audits, and dead-letter que
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import uuid
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import (
@@ -32,13 +33,17 @@ class Transaction(Base):
 
     __tablename__ = "transactions"
     __table_args__ = (
-        UniqueConstraint("trans_id", name="uq_transaction_trans_id"),
+        UniqueConstraint("tenant_id", "provider_account_id", "trans_id", name="uq_transaction_scope_trans_id"),
+        Index("ix_transaction_scope_trans_id", "tenant_id", "provider_account_id", "trans_id"),
         Index("ix_transaction_trans_id", "trans_id"),
         Index("ix_transaction_created_at", "created_at"),
         Index("ix_transaction_msisdn", "msisdn"),
     )
 
-    trans_id = Column(String, primary_key=True)
+    id = Column(String, primary_key=True, default=lambda: f"txn_{uuid.uuid4().hex}")
+    trans_id = Column(String, nullable=False)
+    tenant_id = Column(String, nullable=False, default="default", server_default="default")
+    provider_account_id = Column(String, nullable=False, default="legacy-default", server_default="legacy-default")
     trans_amount = Column(Float, nullable=False)
     msisdn = Column(String, nullable=False)
     business_short_code = Column(String, nullable=False)
@@ -57,15 +62,16 @@ class ProcessedTransaction(Base):
 
     __tablename__ = "processed_transactions"
     __table_args__ = (
-        UniqueConstraint("daraja_trans_id", name="uq_daraja_trans_id"),
+        UniqueConstraint("tenant_id", "provider_account_id", "daraja_trans_id", name="uq_processed_scope_trans_id"),
         Index("ix_processed_daraja_id", "daraja_trans_id"),
-        Index("ix_processed_tenant_id", "tenant_id"),
+        Index("ix_processed_scope", "tenant_id", "provider_account_id"),
         Index("ix_processed_received_at", "received_at"),
     )
 
     id = Column(String, primary_key=True)
     daraja_trans_id = Column(String, nullable=False)
-    tenant_id = Column(String, nullable=True, default="default")
+    tenant_id = Column(String, nullable=False, default="default", server_default="default")
+    provider_account_id = Column(String, nullable=False, default="legacy-default", server_default="legacy-default")
     status = Column(String, nullable=False, default="received")  # received, validated, stored, failed
     processing_time_ms = Column(Integer, nullable=True)
     received_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
@@ -80,6 +86,7 @@ class Discrepancy(Base):
 
     __tablename__ = "discrepancies"
     __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_discrepancy_tenant_id"),
         Index("ix_discrepancy_trans_id", "trans_id"),
         Index("ix_discrepancy_tenant_id", "tenant_id"),
         Index("ix_discrepancy_detected_at", "detected_at"),
@@ -88,7 +95,7 @@ class Discrepancy(Base):
 
     id = Column(String, primary_key=True)  # Format: f"{trans_id}-{anomaly_type}"
     trans_id = Column(String, nullable=False)
-    tenant_id = Column(String, nullable=True, default="default")
+    tenant_id = Column(String, nullable=False, default="default", server_default="default")
     anomaly_type = Column(String, nullable=False)
     status = Column(String, nullable=False, default="needs_review")
     severity = Column(String, nullable=False, default="warning")
@@ -108,11 +115,13 @@ class InternalRecord(Base):
 
     __tablename__ = "internal_records"
     __table_args__ = (
+        Index("ix_internal_records_tenant_phone", "tenant_id", "phone_number"),
         Index("ix_internal_records_phone", "phone_number"),
         Index("ix_internal_records_synced", "synced_at"),
     )
 
     internal_ref = Column(String, primary_key=True)
+    tenant_id = Column(String, nullable=False, default="default", server_default="default")
     amount = Column(Float, nullable=False)
     phone_number = Column(String, nullable=False)
     status = Column(String, nullable=False)
@@ -513,8 +522,14 @@ class ApiKeyRecord(Base):
 
     id = Column(String, primary_key=True)
     tenant_id = Column(String, nullable=False, default="default")
-    key_value = Column(String, nullable=False)
+    key_hash = Column(String(128), nullable=False, unique=True, index=True)
+    key_prefix = Column(String(32), nullable=False)
     role = Column(String, nullable=False, default="read-only")
+    scopes = Column(JSON, nullable=False, default=list, server_default="[]")
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_at = Column(DateTime(timezone=True), nullable=True)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    rotated_from_id = Column(String, nullable=True)
     api_metadata = Column("api_metadata", JSON, nullable=True, default=dict)
     active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)

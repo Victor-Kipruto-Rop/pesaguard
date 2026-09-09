@@ -200,7 +200,11 @@ def customer_transactions(tenant_id: str):
     since_str = request.args.get("since", "").strip()
     session = _get_db_session()
     try:
-        query = session.query(Transaction).order_by(Transaction.created_at.desc())
+        query = (
+            session.query(Transaction)
+            .filter(Transaction.tenant_id == tenant_id)
+            .order_by(Transaction.created_at.desc())
+        )
 
         if since_str:
             try:
@@ -233,14 +237,21 @@ def customer_transaction_detail(tenant_id: str, trans_id: str):
     """Return complete record for a transaction including raw payload and matched internal ledger record."""
     session = _get_db_session()
     try:
-        txn = session.query(Transaction).filter(Transaction.trans_id == trans_id).first()
+        txn = (
+            session.query(Transaction)
+            .filter(Transaction.tenant_id == tenant_id, Transaction.trans_id == trans_id)
+            .first()
+        )
         if not txn:
             return jsonify({"error": "not_found", "message": "Transaction record not found."}), 404
 
         matched_record = None
         candidate = (
             session.query(InternalRecord)
-            .filter(InternalRecord.phone_number == txn.msisdn)
+            .filter(
+                InternalRecord.tenant_id == tenant_id,
+                InternalRecord.phone_number == txn.msisdn,
+            )
             .order_by(InternalRecord.synced_at.desc())
             .first()
         )

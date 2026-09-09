@@ -34,7 +34,7 @@ def _tenant_scope() -> Optional[str]:
     user = get_current_user()
     if user and getattr(user, "tenant_id", None):
         return str(user.tenant_id)
-    return request.args.get("tenant_id") or request.headers.get("X-Tenant-ID") or "default"
+    raise PermissionError("authenticated tenant context is required")
 
 
 @bp.route("/organizations", methods=["GET"])
@@ -61,7 +61,7 @@ def list_organizations():
 @require_auth("manage:organizations")
 def create_organization():
     payload = request.get_json(silent=True) or {}
-    tenant_id = payload.get("tenant_id") or _tenant_scope()
+    tenant_id = _tenant_scope()
     org = _get_service().create_organization(
         name=payload.get("name"),
         tenant_id=tenant_id,
@@ -76,7 +76,7 @@ def create_organization():
 def organization_detail(organization_id: str):
     session = _resolve_session_factory()()
     try:
-        org = session.query(Organization).filter_by(id=organization_id).first()
+        org = session.query(Organization).filter_by(id=organization_id, tenant_id=_tenant_scope()).first()
         if org is None:
             return jsonify({"error": "not_found"}), 404
         if request.method == "PATCH":
@@ -188,10 +188,10 @@ def create_approval(organization_id: str):
     try:
         approval = OrganizationApproval(
             id=f"approval_{__import__('uuid').uuid4().hex[:12]}",
-            tenant_id=payload.get("tenant_id") or _tenant_scope(),
+            tenant_id=_tenant_scope(),
             organization_id=organization_id,
             request_type=payload.get("request_type", "create"),
-            requested_by=payload.get("requested_by") or str(get_current_user().user_id),
+            requested_by=str(get_current_user().user_id),
             reason=payload.get("reason"),
             approval_metadata=payload.get("metadata") or payload.get("approval_metadata") or {},
             status="pending",
@@ -215,11 +215,13 @@ def review_approval(organization_id: str, approval_id: str):
     payload = request.get_json(silent=True) or {}
     session = _resolve_session_factory()()
     try:
-        approval = session.query(OrganizationApproval).filter_by(id=approval_id, organization_id=organization_id).first()
+        approval = session.query(OrganizationApproval).filter_by(
+            id=approval_id, organization_id=organization_id, tenant_id=_tenant_scope()
+        ).first()
         if approval is None:
             return jsonify({"error": "not_found"}), 404
         approval.status = payload.get("status", "approved")
-        approval.approver_id = payload.get("approver_id") or str(get_current_user().user_id)
+        approval.approver_id = str(get_current_user().user_id)
         approval.reason = payload.get("reason") or approval.reason
         approval.reviewed_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
         session.commit()

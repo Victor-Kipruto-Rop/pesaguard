@@ -14,21 +14,21 @@ import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
-from sqlalchemy import create_engine, delete, func, select
+from sqlalchemy import and_, create_engine, delete, func, or_, select
 from sqlalchemy.orm import sessionmaker
 
 # Resilient import handling across package layouts
 try:
     from models import Base, DeadLetter, Discrepancy, ProcessedTransaction, Transaction
-    from action_audit import ActionAuditEntry
+    from action_audit import ActionAuditEntry, AuditLegalHold
 except ImportError:
     try:
         from pesaguard_backend_pipeline.models import Base, DeadLetter, Discrepancy, ProcessedTransaction, Transaction
-        from pesaguard_backend_pipeline.action_audit import ActionAuditEntry
+        from pesaguard_backend_pipeline.action_audit import ActionAuditEntry, AuditLegalHold
     except ImportError:
         sys.path.append(os.path.join(os.path.dirname(__file__), ".."))
         from models import Base, DeadLetter, Discrepancy, ProcessedTransaction, Transaction
-        from action_audit import ActionAuditEntry
+        from action_audit import ActionAuditEntry, AuditLegalHold
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -98,6 +98,26 @@ def _delete_in_batches(session, model, time_column, cutoff_dt: datetime, tenant_
     return total_deleted
 
 
+def _count_audit_archival_candidates(session, cutoff_dt: datetime, tenant_id: Optional[str] = None) -> int:
+    """Count expired audit rows eligible for archival without mutating append-only logs."""
+    base_filter = [
+        ActionAuditEntry.created_at < cutoff_dt,
+        ~select(AuditLegalHold.id).where(
+            AuditLegalHold.tenant_id == ActionAuditEntry.tenant_id,
+            AuditLegalHold.active.is_(True),
+            or_(AuditLegalHold.expires_at.is_(None), AuditLegalHold.expires_at > datetime.now(timezone.utc)),
+            or_(
+                AuditLegalHold.scope_type == "tenant",
+                and_(AuditLegalHold.scope_type == ActionAuditEntry.resource_type, AuditLegalHold.scope_id == ActionAuditEntry.resource_id),
+            ),
+        ).correlate(ActionAuditEntry).exists(),
+    ]
+    if tenant_id:
+        base_filter.append(ActionAuditEntry.tenant_id == tenant_id)
+
+    return session.scalar(select(func.count()).select_from(ActionAuditEntry).where(*base_filter)) or 0
+
+
 def cleanup_retention(tenant_id: Optional[str] = None, dry_run: bool = False) -> Dict[str, Any]:
     """Execute retention policy cleanup across operational tables.
 
@@ -135,6 +155,9 @@ def cleanup_retention(tenant_id: Optional[str] = None, dry_run: bool = False) ->
         deleted_dead_letters = _delete_in_batches(
             session, DeadLetter, DeadLetter.created_at, oldest_dead_letter, tenant_id, dry_run
         )
+        eligible_audit_entries = _count_audit_archival_candidates(session, oldest_audit, tenant_id)
+        # Audit rows are append-only by database policy. A separate archival
+        # exporter must move eligible rows before any future purge capability.
         deleted_audit = 0
 
         metrics = {
@@ -147,6 +170,7 @@ def cleanup_retention(tenant_id: Optional[str] = None, dry_run: bool = False) ->
             "deleted_dead_letters": deleted_dead_letters,
             "deleted_audit_entries": deleted_audit,
             "deleted_audit": deleted_audit,
+            "eligible_audit_entries": eligible_audit_entries,
             "retention_windows": {
                 "transactions_days": RETENTION_DAYS_TRANSACTIONS,
                 "discrepancies_days": RETENTION_DAYS_DISCREPANCIES,

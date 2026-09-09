@@ -15,8 +15,8 @@ from pathlib import Path
 # Add project root directory dynamically to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sqlalchemy import create_engine
-from models import Base
+from alembic import command
+from alembic.config import Config
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -28,18 +28,13 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://pesaguard:pesaguard@local
 
 
 def main():
-    connect_args = {}
-    if DATABASE_URL.startswith("sqlite"):
-        connect_args["check_same_thread"] = False
-    elif DATABASE_URL.startswith("postgresql"):
-        connect_args["connect_timeout"] = int(os.getenv("DB_CONNECT_TIMEOUT", "5"))
-
-    logger.info("Initializing database schema on %s...", DATABASE_URL.split("@")[-1])
+    logger.info("Applying Alembic migrations on %s...", DATABASE_URL.split("@")[-1])
 
     try:
-        engine = create_engine(DATABASE_URL, connect_args=connect_args)
-        Base.metadata.create_all(engine)
-        logger.info("Database tables created successfully.")
+        config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+        config.set_main_option("sqlalchemy.url", DATABASE_URL)
+        command.upgrade(config, "head")
+        logger.info("Database migrations applied successfully.")
     except Exception as exc:
         logger.error("Failed to initialize database tables: %s", exc)
         sys.exit(1)

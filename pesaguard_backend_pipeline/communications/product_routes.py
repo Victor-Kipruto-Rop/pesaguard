@@ -11,6 +11,14 @@ from .core.enums import CommunicationChannel
 from .domain import approve_template, create_template, issue_otp, set_consent, verify_otp
 from .models import CommunicationCampaign, CommunicationConsent, CommunicationNotification, CommunicationOtpChallenge, CommunicationPreference, CommunicationTemplate
 
+# Mirrors CommunicationNotification.ck_communication_notification_status so the
+# API rejects unknown filter/export values instead of leaking query behavior.
+NOTIFICATION_STATUSES = frozenset({
+    "created", "queued", "processing", "accepted", "submitted", "sent",
+    "delivered", "opened", "clicked", "bounced", "complained", "failed",
+    "rejected", "expired", "cancelled", "retrying", "dead_letter",
+})
+
 
 def create_product_blueprint(session_factory, require_auth_fn, current_user_fn):
     blueprint = Blueprint("communications_product", __name__, url_prefix="/api/v1/communications")
@@ -153,20 +161,26 @@ def create_product_blueprint(session_factory, require_auth_fn, current_user_fn):
     @blueprint.get("/search")
     @require_auth_fn("read:communications")
     def search_route():
+        requested_status = (request.args.get("status") or "").strip()
+        if requested_status and requested_status not in NOTIFICATION_STATUSES:
+            return jsonify({"error": "unknown_status"}), 400
+        raw_query = (request.args.get("q") or "").strip()
+        if len(raw_query) > 255:
+            return jsonify({"error": "query_too_long"}), 400
         session = session_factory()
         try:
             query = session.query(CommunicationNotification).filter_by(tenant_id=tenant_id())
-            if request.args.get("status"):
-                query = query.filter_by(status=request.args["status"])
-            if request.args.get("q"):
-                query = query.filter(CommunicationNotification.recipient.contains(request.args["q"]))
+            if requested_status:
+                query = query.filter_by(status=requested_status)
+            if raw_query:
+                query = query.filter(CommunicationNotification.recipient.contains(raw_query))
             rows = query.order_by(CommunicationNotification.created_at.desc()).limit(500).all()
             return jsonify([{"id": row.id, "channel": row.channel, "recipient": row.recipient, "status": row.status, "created_at": row.created_at.isoformat()} for row in rows])
         finally:
             session.close()
 
     @blueprint.get("/export")
-    @require_auth_fn("read:communications")
+    @require_auth_fn("export:communications")
     def export_route():
         session = session_factory()
         try:

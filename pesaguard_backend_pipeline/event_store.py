@@ -24,6 +24,16 @@ from models import Base, ProcessedTransaction, Transaction
 logger = logging.getLogger("pesaguard.event_store")
 
 
+def provider_account_id(payload: Dict[str, Any]) -> str:
+    """Resolve the stable Daraja account identity used for idempotency scope."""
+    return str(
+        payload.get("provider_account_id")
+        or payload.get("BusinessShortCode")
+        or payload.get("business_short_code")
+        or "legacy-default"
+    ).strip()
+
+
 class ProcessResult(str, Enum):
     """Outcome of attempting to record a webhook callback.
 
@@ -85,11 +95,20 @@ class EventStore:
                     isolation_level=self.isolation_level if "postgresql" in self.database_url else None,
                     connect_args=connect_args,
                 )
-            Base.metadata.create_all(self.engine)
+            # Production PostgreSQL schemas are owned by Alembic. SQLite is
+            # retained as an explicit test/development convenience only.
+            if self.database_url.startswith("sqlite"):
+                Base.metadata.create_all(self.engine)
             self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
             self._initialized = True
 
-    def already_processed(self, trans_id: str, source_ip: Optional[str] = None) -> bool:
+    def already_processed(
+        self,
+        trans_id: str,
+        tenant_id: Optional[str] = None,
+        provider_account: Optional[str] = None,
+        source_ip: Optional[str] = None,
+    ) -> bool:
         """Check if a webhook callback has already been processed (idempotency gate).
 
         This is an optimization only — the real guarantee is the unique constraint
@@ -110,7 +129,9 @@ class EventStore:
             self._ensure_ready()
             with self.Session() as session:
                 existing = session.query(ProcessedTransaction).filter(
-                    ProcessedTransaction.daraja_trans_id == str(trans_id)
+                    ProcessedTransaction.daraja_trans_id == str(trans_id),
+                    ProcessedTransaction.tenant_id == (tenant_id or "default"),
+                    ProcessedTransaction.provider_account_id == (provider_account or "legacy-default"),
                 ).first()
                 return existing is not None
         except SQLAlchemyError:
@@ -148,6 +169,8 @@ class EventStore:
             ProcessResult.ERROR     — genuine failure, caller should signal retry
         """
         trans_id = str(payload.get("TransID", "")).strip()
+        tenant_id = tenant_id or "default"
+        account_id = provider_account_id(payload)
         idempotency_key = derive_idempotency_key(payload)
         if not trans_id:
             logger.error("mark_processed() called with missing TransID in payload")
@@ -164,7 +187,8 @@ class EventStore:
                 pt_record = ProcessedTransaction(
                     id=f"pt_{uuid.uuid4().hex[:12]}",
                     daraja_trans_id=trans_id,
-                    tenant_id=tenant_id or "default",
+                    tenant_id=tenant_id,
+                    provider_account_id=account_id,
                     status="received",
                     source_ip=source_ip,
                     signature_verified=signature_verified,
@@ -175,6 +199,8 @@ class EventStore:
 
                 t_record = Transaction(
                     trans_id=trans_id,
+                    tenant_id=tenant_id,
+                    provider_account_id=account_id,
                     trans_amount=float(payload.get("TransAmount", 0)),
                     msisdn=str(payload.get("MSISDN", "")),
                     business_short_code=str(payload.get("BusinessShortCode", "")),
@@ -222,13 +248,17 @@ class EventStore:
             ProcessResult.ERROR     — payload was invalid or unrecoverable error occurred
         """
         trans_id = str(payload.get("TransID", "")).strip()
+        tenant_id = tenant_id or "default"
+        account_id = provider_account_id(payload)
         idempotency_key = derive_idempotency_key(payload)
         if not trans_id:
             logger.error("mark_processed_in_session() called with missing TransID in payload")
             return ProcessResult.ERROR
 
         existing = session.query(ProcessedTransaction).filter(
-            ProcessedTransaction.daraja_trans_id == trans_id
+            ProcessedTransaction.daraja_trans_id == trans_id,
+            ProcessedTransaction.tenant_id == tenant_id,
+            ProcessedTransaction.provider_account_id == account_id,
         ).first()
         if existing is not None:
             logger.info("Duplicate trans_id=%s detected in pre-flight session check", trans_id)
@@ -241,7 +271,8 @@ class EventStore:
             pt_record = ProcessedTransaction(
                 id=f"pt_{uuid.uuid4().hex[:12]}",
                 daraja_trans_id=trans_id,
-                tenant_id=tenant_id or "default",
+                tenant_id=tenant_id,
+                provider_account_id=account_id,
                 status="received",
                 source_ip=source_ip,
                 signature_verified=signature_verified,
@@ -252,6 +283,8 @@ class EventStore:
 
             t_record = Transaction(
                 trans_id=trans_id,
+                tenant_id=tenant_id,
+                provider_account_id=account_id,
                 trans_amount=float(payload.get("TransAmount", 0)),
                 msisdn=str(payload.get("MSISDN", "")),
                 business_short_code=str(payload.get("BusinessShortCode", "")),
@@ -285,6 +318,8 @@ class EventStore:
         self,
         trans_id: str,
         status: str,
+        tenant_id: Optional[str] = None,
+        provider_account: Optional[str] = None,
         error_reason: Optional[str] = None,
         processing_time_ms: Optional[int] = None,
     ) -> None:
@@ -296,7 +331,9 @@ class EventStore:
             self._ensure_ready()
             with self.Session() as session:
                 pt_record = session.query(ProcessedTransaction).filter(
-                    ProcessedTransaction.daraja_trans_id == str(trans_id)
+                    ProcessedTransaction.daraja_trans_id == str(trans_id),
+                    ProcessedTransaction.tenant_id == (tenant_id or "default"),
+                    ProcessedTransaction.provider_account_id == (provider_account or "legacy-default"),
                 ).first()
                 if pt_record:
                     pt_record.status = status

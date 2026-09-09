@@ -68,7 +68,12 @@ class DiscrepancyDAO:
         if not id or not trans_id:
             raise ValueError("Both 'id' and 'trans_id' must be provided to save_discrepancy.")
 
-        existing = session.get(Discrepancy, id)
+        scoped_id = f"{tenant_id or 'default'}:{id}"
+        existing = (
+            session.query(Discrepancy)
+            .filter(Discrepancy.id == scoped_id, Discrepancy.tenant_id == (tenant_id or "default"))
+            .first()
+        )
         serialized_details = _serialize_details(details)
 
         if existing is not None:
@@ -87,7 +92,7 @@ class DiscrepancyDAO:
 
         now = datetime.now(timezone.utc)
         record = Discrepancy(
-            id=id,
+            id=scoped_id,
             trans_id=trans_id,
             tenant_id=tenant_id or "default",
             anomaly_type=anomaly_type,

@@ -266,9 +266,10 @@ def reconcile_with_idempotency(
     together or roll back entirely.
     """
     trans_id = str(event.get("TransID") or event.get("trans_id") or "unknown").strip()
+    account_id = str(event.get("provider_account_id") or event.get("BusinessShortCode") or event.get("business_short_code") or "legacy-default")
 
     # Pre-flight duplicate check optimization
-    if event_store and event_store.already_processed(trans_id):
+    if event_store and event_store.already_processed(trans_id, tenant_id=tenant_id, provider_account=account_id):
         logger.info("Idempotency: duplicate trans_id=%s detected prior to evaluation, skipping", trans_id)
         return {
             "trans_id": trans_id,

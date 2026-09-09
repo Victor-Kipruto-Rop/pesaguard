@@ -19,6 +19,7 @@ class CommunicationNotification(Base):
         CheckConstraint("priority IN ('critical', 'high', 'normal', 'low', 'bulk')", name="ck_communication_notification_priority"),
         Index("ix_communication_notification_tenant_status_created", "tenant_id", "status", "created_at"),
         Index("ix_communication_notification_tenant_correlation", "tenant_id", "correlation_id"),
+        {"extend_existing": True},
     )
 
     id = Column(String(64), primary_key=True)
@@ -54,6 +55,7 @@ class CommunicationOutboxEntry(Base):
         Index("ix_communication_outbox_due", "status", "available_at"),
         Index("ix_communication_outbox_lease", "lease_expires_at"),
         Index("ix_communication_outbox_tenant_status", "tenant_id", "status", "created_at"),
+        {"extend_existing": True},
     )
 
     id = Column(String(64), primary_key=True)
@@ -75,6 +77,7 @@ class CommunicationAttempt(Base):
     __table_args__ = (
         UniqueConstraint("notification_id", "attempt_number", name="uq_communication_attempt_number"),
         Index("ix_communication_attempt_notification_started", "notification_id", "started_at"),
+        {"extend_existing": True},
     )
 
     id = Column(String(64), primary_key=True)
@@ -98,6 +101,7 @@ class CommunicationDeliveryReport(Base):
         UniqueConstraint("provider", "provider_event_id", name="uq_communication_delivery_provider_event"),
         Index("ix_communication_delivery_notification_received", "notification_id", "received_at"),
         Index("ix_communication_delivery_tenant_status_received", "tenant_id", "status", "received_at"),
+        {"extend_existing": True},
     )
 
     id = Column(String(64), primary_key=True)
@@ -118,6 +122,7 @@ class CommunicationWebhookEvent(Base):
         CheckConstraint("processing_status IN ('pending', 'processed', 'unprocessed', 'ignored')", name="ck_communication_webhook_processing_status"),
         Index("ix_communication_webhook_tenant_received", "tenant_id", "received_at"),
         Index("ix_communication_webhook_processing_status", "processing_status", "received_at"),
+        {"extend_existing": True},
     )
 
     id = Column(String(64), primary_key=True)
@@ -141,6 +146,7 @@ class CommunicationTemplate(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "slug", "version", name="uq_communication_template_version"),
         Index("ix_communication_template_tenant_slug", "tenant_id", "slug", "status"),
+        {"extend_existing": True},
     )
 
     id = Column(String(64), primary_key=True)
@@ -158,7 +164,10 @@ class CommunicationTemplate(Base):
 
 class CommunicationPreference(Base):
     __tablename__ = "communication_preferences"
-    __table_args__ = (UniqueConstraint("tenant_id", "recipient", name="uq_communication_preference_recipient"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "recipient", name="uq_communication_preference_recipient"),
+        {"extend_existing": True},
+    )
 
     id = Column(String(64), primary_key=True)
     tenant_id = Column(String(128), nullable=False)
@@ -173,7 +182,10 @@ class CommunicationPreference(Base):
 
 class CommunicationConsent(Base):
     __tablename__ = "communication_consents"
-    __table_args__ = (UniqueConstraint("tenant_id", "recipient", "channel", name="uq_communication_consent"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "recipient", "channel", name="uq_communication_consent"),
+        {"extend_existing": True},
+    )
 
     id = Column(String(64), primary_key=True)
     tenant_id = Column(String(128), nullable=False)
@@ -187,7 +199,10 @@ class CommunicationConsent(Base):
 
 class CommunicationOtpChallenge(Base):
     __tablename__ = "communication_otp_challenges"
-    __table_args__ = (Index("ix_communication_otp_recipient_active", "tenant_id", "recipient", "expires_at"),)
+    __table_args__ = (
+        Index("ix_communication_otp_recipient_active", "tenant_id", "recipient", "expires_at"),
+        {"extend_existing": True},
+    )
 
     id = Column(String(64), primary_key=True)
     tenant_id = Column(String(128), nullable=False)
@@ -208,6 +223,7 @@ class CommunicationCampaign(Base):
     __table_args__ = (
         CheckConstraint("status IN ('draft', 'queued', 'scheduled', 'running', 'paused', 'completed', 'cancelled')", name="ck_communication_campaign_status"),
         Index("ix_communication_campaign_tenant_schedule", "tenant_id", "status", "scheduled_at"),
+        {"extend_existing": True},
     )
 
     id = Column(String(64), primary_key=True)
@@ -230,7 +246,10 @@ class CommunicationCampaign(Base):
 
 class CommunicationCampaignRecipient(Base):
     __tablename__ = "communication_campaign_recipients"
-    __table_args__ = (UniqueConstraint("campaign_id", "recipient", name="uq_communication_campaign_recipient"),)
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "recipient", name="uq_communication_campaign_recipient"),
+        {"extend_existing": True},
+    )
 
     id = Column(String(64), primary_key=True)
     campaign_id = Column(String(64), ForeignKey("communication_campaigns.id"), nullable=False)
@@ -242,7 +261,10 @@ class CommunicationCampaignRecipient(Base):
 
 class CommunicationProviderRoute(Base):
     __tablename__ = "communication_provider_routes"
-    __table_args__ = (UniqueConstraint("tenant_id", "channel", "provider", name="uq_communication_provider_route"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "channel", "provider", name="uq_communication_provider_route"),
+        {"extend_existing": True},
+    )
 
     id = Column(String(64), primary_key=True)
     tenant_id = Column(String(128), nullable=False)
@@ -262,6 +284,7 @@ class CommunicationIncident(Base):
         UniqueConstraint("fingerprint", name="uq_communication_incident_fingerprint"),
         Index("ix_communication_incident_status_opened", "status", "opened_at"),
         Index("ix_communication_incident_tenant_opened", "tenant_id", "opened_at"),
+        {"extend_existing": True},
     )
 
     id = Column(String(64), primary_key=True)
@@ -285,7 +308,10 @@ class CommunicationIncident(Base):
 
 class CommunicationSavedFilter(Base):
     __tablename__ = "communication_saved_filters"
-    __table_args__ = (UniqueConstraint("tenant_id", "name", name="uq_communication_saved_filter_name"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "name", name="uq_communication_saved_filter_name"),
+        {"extend_existing": True},
+    )
 
     id = Column(String(64), primary_key=True)
     tenant_id = Column(String(128), nullable=False)
@@ -297,7 +323,10 @@ class CommunicationSavedFilter(Base):
 
 class CommunicationTenantQuota(Base):
     __tablename__ = "communication_tenant_quotas"
-    __table_args__ = (UniqueConstraint("tenant_id", "scope", name="uq_communication_tenant_quota_scope"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "scope", name="uq_communication_tenant_quota_scope"),
+        {"extend_existing": True},
+    )
 
     id = Column(String(64), primary_key=True)
     tenant_id = Column(String(128), nullable=False)

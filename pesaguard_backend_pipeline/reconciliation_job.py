@@ -30,7 +30,7 @@ except ImportError:
 from action_audit import ActionAuditEntry
 from anomaly_rules import check_for_anomalies
 from base_connector import ConnectorRegistry
-from event_store import EventStore, ProcessResult
+from event_store import EventStore, ProcessResult, provider_account_id
 from logging_utils import configure_logging
 from models import Base
 from reconciliation_engine import evaluate_transaction
@@ -166,7 +166,11 @@ def _process_message(event: Dict[str, Any], consumer: Any, producer: Any, connec
     tenant_id = str(event.get("tenant_id") or event.get("TenantID") or DEFAULT_TENANT_ID)
 
     try:
-        if event_store.already_processed(trans_id):
+        if event_store.already_processed(
+            trans_id,
+            tenant_id=tenant_id,
+            provider_account=provider_account_id(event),
+        ):
             logger.info("Idempotency: skipping duplicate trans_id=%s for tenant_id=%s", trans_id, tenant_id)
             if hasattr(consumer, "commit"):
                 consumer.commit()

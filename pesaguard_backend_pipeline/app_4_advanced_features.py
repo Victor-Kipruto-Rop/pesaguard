@@ -11,8 +11,9 @@ import hmac
 import json
 import logging
 import os
+import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -1276,21 +1277,125 @@ def issue_api_key_route():
     """Issue a tenant-scoped API key."""
     data = request.json or {}
     tenant_id = data.get("tenant_id") or get_current_user().tenant_id
+    if tenant_id != get_current_user().tenant_id:
+        return _api_success({"error": "tenant_access_denied"}, 403)
     role = data.get("role") or "read_only"
-    key_value = f"pk_{uuid.uuid4().hex}"
+    key_value = f"pk_{secrets.token_urlsafe(32)}"
+    key_hash = hashlib.sha256(key_value.encode("utf-8")).hexdigest()
+    scopes = data.get("scopes") or []
+    expires_at = None
+    if data.get("expires_in_days") is not None:
+        try:
+            expires_in_days = int(data["expires_in_days"])
+        except (TypeError, ValueError):
+            return _api_success({"error": "invalid_expiry"}, 400)
+        if not 1 <= expires_in_days <= 3650:
+            return _api_success({"error": "invalid_expiry"}, 400)
+        expires_at = datetime.now(timezone.utc) + timedelta(days=expires_in_days)
     session = SessionLocal()
     try:
         record = ApiKeyRecord(
             id=f"key_{uuid.uuid4().hex[:12]}",
             tenant_id=tenant_id,
-            key_value=key_value,
+            key_hash=key_hash,
+            key_prefix=key_value[:16],
             role=AuthRBAC.normalize_role_name(role),
+            scopes=scopes,
+            expires_at=expires_at,
             api_metadata=data.get("metadata") or {},
             active=True,
         )
         session.add(record)
+        session.add(ActionAuditEntry(
+            tenant_id=tenant_id,
+            actor=get_current_user().user_id,
+            action="api_key.issued",
+            category="authentication",
+            resource_type="api_key",
+            resource_id=record.id,
+            details={"scopes": scopes, "expires_at": expires_at.isoformat() if expires_at else None},
+        ))
         session.commit()
-        return _api_success({"api_key": key_value, "tenant_id": tenant_id, "role": record.role}, 201)
+        return _api_success({"api_key": key_value, "tenant_id": tenant_id, "role": record.role, "scopes": scopes, "expires_at": expires_at.isoformat() if expires_at else None}, 201)
+    finally:
+        session.close()
+
+
+@_idempotent_route("/auth/api-keys/<key_id>/revoke", methods=["POST"])
+@require_auth("manage:api_keys")
+def revoke_api_key_route(key_id: str):
+    """Revoke a tenant-scoped machine credential."""
+    session = SessionLocal()
+    try:
+        record = session.query(ApiKeyRecord).filter(
+            ApiKeyRecord.id == key_id,
+            ApiKeyRecord.tenant_id == get_current_user().tenant_id,
+        ).first()
+        if record is None:
+            return _api_success({"error": "not_found"}, 404)
+        record.active = False
+        record.revoked_at = datetime.now(timezone.utc)
+        session.add(ActionAuditEntry(
+            tenant_id=record.tenant_id,
+            actor=get_current_user().user_id,
+            action="api_key.revoked",
+            category="authentication",
+            resource_type="api_key",
+            resource_id=record.id,
+            details={},
+        ))
+        session.commit()
+        return _api_success({"id": record.id, "status": "revoked"}, 200)
+    finally:
+        session.close()
+
+
+@_idempotent_route("/auth/api-keys/<key_id>/rotate", methods=["POST"])
+@require_auth("manage:api_keys")
+def rotate_api_key_route(key_id: str):
+    """Revoke an existing key and issue a replacement in one transaction."""
+    session = SessionLocal()
+    try:
+        current_user = get_current_user()
+        old_record = session.query(ApiKeyRecord).filter(
+            ApiKeyRecord.id == key_id,
+            ApiKeyRecord.tenant_id == current_user.tenant_id,
+            ApiKeyRecord.active.is_(True),
+        ).first()
+        if old_record is None:
+            return _api_success({"error": "not_found"}, 404)
+        replacement_value = f"pk_{secrets.token_urlsafe(32)}"
+        replacement = ApiKeyRecord(
+            id=f"key_{uuid.uuid4().hex[:12]}",
+            tenant_id=old_record.tenant_id,
+            key_hash=hashlib.sha256(replacement_value.encode("utf-8")).hexdigest(),
+            key_prefix=replacement_value[:16],
+            role=old_record.role,
+            scopes=old_record.scopes or [],
+            expires_at=old_record.expires_at,
+            api_metadata=old_record.api_metadata or {},
+            rotated_from_id=old_record.id,
+            active=True,
+        )
+        old_record.active = False
+        old_record.revoked_at = datetime.now(timezone.utc)
+        session.add(replacement)
+        session.add(ActionAuditEntry(
+            tenant_id=old_record.tenant_id,
+            actor=current_user.user_id,
+            action="api_key.rotated",
+            category="authentication",
+            resource_type="api_key",
+            resource_id=replacement.id,
+            details={"rotated_from_id": old_record.id},
+        ))
+        session.commit()
+        return _api_success({
+            "api_key": replacement_value,
+            "id": replacement.id,
+            "rotated_from_id": old_record.id,
+            "expires_at": replacement.expires_at.isoformat() if replacement.expires_at else None,
+        }, 201)
     finally:
         session.close()
 

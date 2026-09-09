@@ -46,8 +46,8 @@ def _validate_timestamp(payload: Mapping[str, Any], *, now: datetime | None = No
     value = str(raw).strip()
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return
+    except ValueError as exc:
+        raise ValueError("webhook timestamp is invalid") from exc
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     skew_seconds = 60

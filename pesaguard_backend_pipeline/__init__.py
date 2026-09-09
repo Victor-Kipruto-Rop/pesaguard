@@ -19,6 +19,7 @@ for module_name in [
     "init_db",
     "logging_utils",
     "models",
+    "observability",
     "producer",
     "rate_limiter",
     "security_helpers",
@@ -33,3 +34,13 @@ for module_name in [
     except ImportError:
         continue
     sys.modules.setdefault(module_name, module)
+
+try:
+    sys.modules.setdefault("communications", importlib.import_module("pesaguard_backend_pipeline.communications"))
+except ImportError:
+    pass
+
+try:
+    sys.modules.setdefault("app_2", importlib.import_module("pesaguard_backend_pipeline.app_2"))
+except ImportError:
+    pass

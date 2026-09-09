@@ -102,23 +102,17 @@ class _ProducerManager:
                     "request_timeout_ms": PRODUCER_SEND_TIMEOUT_SECONDS * 1000,
                     "batch_size": 16384,
                     "linger_ms": 10,
+                    "enable_idempotence": True,
                 }
                 try:
-                    KafkaProducer(**producer_kwargs, enable_idempotence=True)
+                    self._producer = KafkaProducer(**producer_kwargs)
                 except TypeError:
+                    # Older kafka-python releases do not accept idempotence.
+                    # Keep the compatible safety settings rather than creating
+                    # and discarding a probe producer.
+                    producer_kwargs.pop("enable_idempotence", None)
                     producer_kwargs.pop("max_in_flight_requests_per_connection", None)
-                    KafkaProducer(**producer_kwargs)
-                self._producer = KafkaProducer(
-                    bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-                    value_serializer=lambda v: json.dumps(v, ensure_ascii=False).encode("utf-8"),
-                    retries=5,
-                    acks="all",
-                    compression_type="gzip",
-                    max_in_flight_requests_per_connection=1,
-                    request_timeout_ms=PRODUCER_SEND_TIMEOUT_SECONDS * 1000,
-                    batch_size=16384,
-                    linger_ms=10,
-                )
+                    self._producer = KafkaProducer(**producer_kwargs)
                 logger.info("Kafka producer successfully initialized connecting to %s with compression and idempotency enabled.", KAFKA_BOOTSTRAP_SERVERS)
                 return self._producer
             except Exception as exc:

@@ -70,6 +70,22 @@ cp .env.example .env
 
 PesaGuard uses a shield-and-"PG" mark in forest green — reflecting trust, security, and financial stewardship.
 
+## Observability & Code Quality
+
+PesaGuard ships with an optional Sentry-backed observability bootstrap and a Sourcery-enabled developer workflow.
+
+Sentry:
+- Production error tracking and exception monitoring
+- Performance sampling and release/environment tagging
+- Safe context enrichment and structured service tags
+
+Sourcery:
+- AI-powered code review on pull requests
+- Repository-level quality configuration in `.sourcery.yaml`
+- GitHub Actions workflow under `.github/workflows/sourcery.yml`
+
+These integrations operate around the existing Flask and worker architecture and do not replace the repository’s business logic.
+
 ## License
 
 MIT License — see [LICENSE](LICENSE) for details.

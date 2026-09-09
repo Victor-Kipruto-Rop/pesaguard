@@ -373,6 +373,7 @@ class AuthRBAC:
             "read:metrics",
             "send:communications",
             "read:communications",
+            "export:communications",
         ],
         "platform-admin": [
             "read:discrepancies",
@@ -397,6 +398,7 @@ class AuthRBAC:
             "read:metrics",
             "send:communications",
             "read:communications",
+            "export:communications",
             "manage:all_tenants",
         ],
         "operator": [

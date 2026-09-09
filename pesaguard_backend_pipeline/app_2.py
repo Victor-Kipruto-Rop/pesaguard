@@ -1,4 +1,17 @@
-"""Enterprise-grade, highly optimized, production-ready PesaGuard dashboard API service."""
+"""Compatibility import for the canonical dashboard API.
+
+The implementation lives in :mod:`pesaguard_backend_pipeline.api.dashboard_app`.
+This module remains so existing tests, WSGI settings, and operator commands keep
+the same import path while the package is reorganized.
+"""
+
+from __future__ import annotations
+
+import sys
+
+from pesaguard_backend_pipeline.api import dashboard_app as _dashboard_app
+
+sys.modules[__name__] = _dashboard_app"""Enterprise-grade, highly optimized, production-ready PesaGuard dashboard API service."""
 
 from __future__ import annotations
 
@@ -19,14 +32,13 @@ from typing import Any, Dict, List, Optional
 from flask import Flask, Response, g, has_request_context, jsonify, request, send_file
 from werkzeug.exceptions import BadRequest, HTTPException
 
-from action_audit import ActionAuditEntry, Base as AuditBase
+from action_audit import ActionAuditEntry, AuditOutboxEntry, Base as AuditBase
 from auth_rbac import AuthenticationUnavailable, AuthRBAC, TENANT_ID_PATTERN, assert_auth_configuration, auth_required, configure_revocation_store, get_current_user, parse_bearer_token, require_auth
 from export_routes import bp as export_bp
 from health import build_health_payload
-from init_db import main as init_db
 from logging_utils import configure_logging, get_correlation_id, set_correlation_id
 from metrics import build_metrics_payload
-from models import Base, Discrepancy, Transaction, UserAccount
+from models import Base, DeadLetter, Discrepancy, Transaction, UserAccount
 from provider_management_service import ProviderManagementService
 from rate_limiter import RateLimiter
 from runtime_config import RuntimeConfig
@@ -67,7 +79,16 @@ app.config["PESAGUARD_WEBHOOK_MAX_BODY_BYTES"] = runtime_config.webhook_body_lim
 app.config["JSON_SORT_KEYS"] = False
 
 app.register_blueprint(export_bp)
+app.register_blueprint(export_bp, name="export_routes_api_v1", url_prefix="/api/v1")
 settings_store = TenantSettingsStore()
+
+def create_app() -> Flask:
+    """Return the canonical dashboard application.
+
+    Routes and extensions are registered once at module load for compatibility
+    with existing WSGI deployments; callers should use this factory entry point.
+    """
+    return app
 
 api_rate_limiter = RateLimiter()
 api_rate_limiter.set_limits(runtime_config.api_rate_limit_per_minute)
@@ -1203,6 +1224,63 @@ def metrics():
         session.close()
 
 
+@app.route("/api/v1/operations/outbox", methods=["GET"])
+@require_auth(required_permission="read:analytics")
+def operations_outbox():
+    """Return tenant-scoped outbox lag, retry, and dead-letter counts."""
+    tenant_id = get_current_user().tenant_id
+    session = _open_session(read_only=True)
+    try:
+        rows = (
+            session.query(AuditOutboxEntry.status, func.count(AuditOutboxEntry.id))
+            .filter(AuditOutboxEntry.tenant_id == tenant_id)
+            .group_by(AuditOutboxEntry.status)
+            .all()
+        )
+        counts = {status: count for status, count in rows}
+        oldest_pending = (
+            session.query(func.min(AuditOutboxEntry.created_at))
+            .filter(
+                AuditOutboxEntry.tenant_id == tenant_id,
+                AuditOutboxEntry.status.in_(("pending", "in_progress", "failed")),
+            )
+            .scalar()
+        )
+        lag_seconds = max(0, int((datetime.now(timezone.utc) - oldest_pending).total_seconds())) if oldest_pending else 0
+        return jsonify({
+            "tenant_id": tenant_id,
+            "pending": counts.get("pending", 0),
+            "in_progress": counts.get("in_progress", 0),
+            "failed": counts.get("failed", 0),
+            "dead_letter": counts.get("dead_letter", 0),
+            "oldest_pending_lag_seconds": lag_seconds,
+        }), 200
+    finally:
+        session.close()
+
+
+@app.route("/api/v1/operations/dead-letters/<dead_letter_id>/replay", methods=["POST"])
+@require_auth(required_permission="resolve:discrepancies")
+def replay_dead_letter(dead_letter_id: str):
+    """Requeue one tenant dead-letter entry for worker processing."""
+    tenant_id = get_current_user().tenant_id
+    session = _open_session()
+    try:
+        entry = session.query(DeadLetter).filter(
+            DeadLetter.id == dead_letter_id,
+            DeadLetter.tenant_id == tenant_id,
+        ).first()
+        if entry is None:
+            return jsonify({"error": "not_found", "message": "Dead-letter entry not found."}), 404
+        entry.processed = False
+        entry.processed_at = None
+        entry.attempts = (entry.attempts or 0) + 1
+        session.commit()
+        return jsonify({"id": entry.id, "status": "requeued", "attempts": entry.attempts}), 200
+    finally:
+        session.close()
+
+
 def _normalize_datetime(value: Any) -> Optional[datetime]:
     if value is None:
         return None
@@ -2014,7 +2092,7 @@ def search_incidents():
 
 
 if __name__ == "__main__":
-    init_db()
+    logger.info("Starting canonical dashboard API; database schema must be managed by Alembic.")
     port = runtime_config.port
     debug_mode = os.getenv("FLASK_DEBUG", "false").lower() in {"true", "1", "yes"}
     app.run(host="0.0.0.0", port=port, debug=debug_mode)

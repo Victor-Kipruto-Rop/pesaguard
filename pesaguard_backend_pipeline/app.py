@@ -10,8 +10,10 @@ import redis
 from flask import Flask, Response, abort, jsonify, request
 from werkzeug.exceptions import HTTPException
 
+from observability import init_sentry
+
 from background_tasks import enqueue_transaction_event
-from event_store import EventStore, ProcessResult
+from event_store import EventStore, ProcessResult, provider_account_id
 from health import build_health_payload
 from idempotency import derive_idempotency_key
 from logging_utils import configure_logging, get_correlation_id, set_correlation_id
@@ -32,6 +34,7 @@ configure_logging()
 logger = logging.getLogger("pesaguard.webhook")
 
 app = Flask(__name__)
+init_sentry(service="webhook", provider="mpesa")
 app.config["MAX_CONTENT_LENGTH"] = int(os.getenv("PESAGUARD_WEBHOOK_MAX_BODY_BYTES", "1048576"))
 
 event_store = EventStore()
@@ -283,8 +286,9 @@ def mpesa_confirmation():
 
     trans_id = payload.get("TransID")
     idempotency_key = derive_idempotency_key(payload)
+    account_id = provider_account_id(payload)
 
-    if event_store.already_processed(str(trans_id)):
+    if event_store.already_processed(str(trans_id), tenant_id=tenant_id, provider_account=account_id):
         logger.info(
             "Duplicate transaction (pre-check)",
             extra={"tenant_id": tenant_id, "trans_id": trans_id, "idempotency_key": idempotency_key},
