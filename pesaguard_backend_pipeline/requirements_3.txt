@@ -30,4 +30,4 @@ prometheus-client==0.21.1
 sentry-sdk[flask]==2.19.2
 
 # Testing & CI Suite
-pytest==9.0.3
+pytest==9.1.1
