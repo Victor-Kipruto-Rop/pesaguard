@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from .api.dashboard_app import create_app
+from .app_2 import create_app
 
 app = create_app()
 

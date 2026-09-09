@@ -39,8 +39,3 @@ try:
     sys.modules.setdefault("communications", importlib.import_module("pesaguard_backend_pipeline.communications"))
 except ImportError:
     pass
-
-try:
-    sys.modules.setdefault("app_2", importlib.import_module("pesaguard_backend_pipeline.app_2"))
-except ImportError:
-    pass

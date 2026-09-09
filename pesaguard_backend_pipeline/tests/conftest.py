@@ -1,8 +1,12 @@
 import os
 import sys
 
-ROOT = os.path.dirname(__file__)
-PACKAGE_DIR = os.path.join(ROOT, "pesaguard_backend_pipeline")
+TESTS_DIR = os.path.dirname(__file__)
+PACKAGE_DIR = os.path.dirname(TESTS_DIR)
+REPOSITORY_ROOT = os.path.dirname(PACKAGE_DIR)
 
-if PACKAGE_DIR not in sys.path:
-    sys.path.insert(0, PACKAGE_DIR)
+for path in (REPOSITORY_ROOT, PACKAGE_DIR):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-with-at-least-32-bytes")

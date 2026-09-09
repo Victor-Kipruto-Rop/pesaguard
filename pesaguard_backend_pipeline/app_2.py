@@ -1,9 +1,4 @@
-"""Compatibility import for the canonical dashboard API.
-
-The implementation lives in :mod:`pesaguard_backend_pipeline.api.dashboard_app`.
-This module remains so existing tests, WSGI settings, and operator commands keep
-the same import path while the package is reorganized.
-"""
+"""Compatibility import for the canonical dashboard API."""
 
 from __future__ import annotations
 
