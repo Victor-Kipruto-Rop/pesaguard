@@ -27,6 +27,7 @@ from .models import (
 )
 from .outbox import replay_dead_letter
 from .policy import NotificationPolicyEngine
+from .providers.email import EmailProviderAnalytics
 from .providers.health import all_provider_health
 from .webhooks import ignore_webhook_event, replay_webhook_event
 
@@ -163,9 +164,11 @@ def create_operations_blueprint(session_factory, require_auth_fn, current_user_f
     def provider_health_route():
         session = session_factory()
         try:
+            analytics = EmailProviderAnalytics(session=session)
             payload = {
                 "providers": all_provider_health(session),
                 "feature_flags": flags_snapshot(),
+                "analytics": analytics.snapshot(session=session),
             }
             if provider_router is not None and hasattr(provider_router, "snapshot"):
                 payload["circuits"] = provider_router.snapshot()

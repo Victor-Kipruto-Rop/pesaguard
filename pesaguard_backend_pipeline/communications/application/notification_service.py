@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -22,7 +23,7 @@ class NotificationService:
         self.session = session
         self.provider = provider
 
-    def enqueue(self, request: NotificationRequest) -> CommunicationNotification:
+    def enqueue(self, request: NotificationRequest, *, cost: dict[str, Any] | None = None, latency_ms: int | None = None) -> CommunicationNotification:
         """Persist a notification and outbox entry without contacting a provider."""
         if not request.idempotency_key:
             raise ValueError("idempotency_key is required for notification delivery")
@@ -45,6 +46,11 @@ class NotificationService:
         if existing is not None:
             enqueue_notification(self.session, existing)
             return existing
+        metadata = dict(request.variables)
+        if cost is not None:
+            metadata.setdefault("email_cost", cost)
+        if latency_ms is not None:
+            metadata.setdefault("email_latency_ms", latency_ms)
         notification = CommunicationNotification(
             id=request.notification_id or f"notification_{uuid.uuid4().hex}",
             tenant_id=request.tenant_id,
@@ -58,7 +64,7 @@ class NotificationService:
             provider=self.provider.name,
             correlation_id=request.correlation_id,
             trace_id=request.trace_id,
-            metadata_json=dict(request.variables),
+            metadata_json=metadata,
         )
         self.session.add(notification)
         self.session.flush()
@@ -66,7 +72,7 @@ class NotificationService:
         enqueue_notification(self.session, notification)
         return notification
 
-    def send(self, request: NotificationRequest) -> CommunicationNotification:
+    def send(self, request: NotificationRequest, *, cost: dict[str, Any] | None = None, latency_ms: int | None = None) -> CommunicationNotification:
         if not request.idempotency_key:
             raise ValueError("idempotency_key is required for notification delivery")
         existing = self.session.query(CommunicationNotification).filter_by(
@@ -75,6 +81,13 @@ class NotificationService:
         ).one_or_none()
         if existing is not None:
             return existing
+
+        started_at = datetime.now(timezone.utc)
+        metadata = dict(request.variables)
+        if cost is not None:
+            metadata.setdefault("email_cost", cost)
+        if latency_ms is not None:
+            metadata.setdefault("email_latency_ms", latency_ms)
 
         notification = CommunicationNotification(
             id=request.notification_id or f"notification_{uuid.uuid4().hex}",
@@ -89,7 +102,7 @@ class NotificationService:
             provider=self.provider.name,
             correlation_id=request.correlation_id,
             trace_id=request.trace_id,
-            metadata_json=dict(request.variables),
+            metadata_json=metadata,
         )
         self.session.add(notification)
         self.session.flush()
@@ -101,11 +114,31 @@ class NotificationService:
             attempt_number=1,
             provider=self.provider.name,
             status=NotificationStatus.PROCESSING.value,
+            started_at=started_at,
+            cost=cost or None,
+            latency_ms=latency_ms,
         )
         self.session.add(attempt)
         try:
             result = self.provider.send(request)
+            elapsed_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+            final_latency_ms = latency_ms if latency_ms is not None else elapsed_ms
+            notification.status = transition(notification.status, result.status)
+            notification.provider_message_id = result.provider_message_id
+            attempt.status = result.status
+            attempt.provider_message_id = result.provider_message_id
+            attempt.latency_ms = final_latency_ms
+            attempt.cost = cost or attempt.cost
+            attempt.completed_at = datetime.now(timezone.utc)
+            notification.metadata_json = {
+                **dict(notification.metadata_json or {}),
+                "provider_response": dict(result.raw_response),
+                "email_cost": cost,
+                "email_latency_ms": final_latency_ms,
+            }
         except CommunicationError as exc:
+            elapsed_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+            final_latency_ms = latency_ms if latency_ms is not None else elapsed_ms
             target_status = NotificationStatus.RETRYING if exc.retryable else NotificationStatus.FAILED
             notification.status = transition(notification.status, target_status)
             notification.failure_code = exc.code
@@ -113,14 +146,14 @@ class NotificationService:
             attempt.status = notification.status
             attempt.error_code = exc.code
             attempt.error_detail = str(exc)
-        else:
-            notification.status = transition(notification.status, result.status)
-            notification.provider_message_id = result.provider_message_id
-            attempt.status = result.status
-            attempt.provider_message_id = result.provider_message_id
+            attempt.latency_ms = final_latency_ms
+            attempt.cost = cost or attempt.cost
+            attempt.completed_at = datetime.now(timezone.utc)
             notification.metadata_json = {
                 **dict(notification.metadata_json or {}),
-                "provider_response": dict(result.raw_response),
+                "email_cost": cost,
+                "email_latency_ms": final_latency_ms,
+                "last_provider_error": exc.code,
             }
         self.session.flush()
         return notification
